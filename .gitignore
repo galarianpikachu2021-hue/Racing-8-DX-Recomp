@@ -54,3 +54,6 @@ mk8d.pre-*
 /.claude/
 /docs/HANDOFF.md
 /docs/cup-table-dump.txt
+
+# Brainstorm mockups (local)
+/.superpowers/
