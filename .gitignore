@@ -1,0 +1,56 @@
+# Everything game-derived, key-derived or machine-specific stays local. See LEGAL.md.
+/local/
+/build/
+/generated/
+
+# Game, key and firmware material, wherever it ends up
+*.nsp
+*.xci
+*.nca
+*.nso
+*.nro
+*.npdm
+*.tik
+*.cert
+*.keys
+prod.keys
+title.keys
+
+# Recompiler output and anything built from it
+recomp_registration.c
+recompiled_*.c
+librecompiled_*
+librecomp_static_*
+*.so
+*.a
+*.dll
+*.exe
+*.lib
+*.pdb
+
+# Saves, logs, caches
+*.sav
+*.log
+userdata.dat
+__pycache__/
+.cache/
+CMakeUserPresets.json
+.vscode/
+.idea/
+
+# Notes from the pipeline/optimization bot (kept in the repo dir, never published)
+/criticism.md
+
+# Block-hooked recompile (generated from the game; never committed) and game binaries
+mk8d.hooked*
+mk8d.pre-*
+**/exefs-*-hooked/
+**/g_main_hookmap*
+
+# Internal working notes (machine-specific paths and setup): kept local, never published
+/CLAUDE.md
+/AGENTS.md
+/analyze-pipeline.md
+/.claude/
+/docs/HANDOFF.md
+/docs/cup-table-dump.txt

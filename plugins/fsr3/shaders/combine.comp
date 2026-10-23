@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// kart-recomp FSR 3 plugin: the reactive mask FSR gets is the larger of two masks (the one FSR generates from the opaque/final colour
+// pair for alpha-blended effects, and the host's "the camera doesn't explain this pixel" mask).
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D mask_a;
+layout(set = 0, binding = 1) uniform sampler2D mask_b;
+layout(set = 0, binding = 2, r8) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 size; int use_a; int use_b; } p;
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= p.size.x || px.y >= p.size.y) return;
+    float v = 0.0;
+    if (p.use_a != 0) v = max(v, texelFetch(mask_a, px, 0).r);
+    if (p.use_b != 0) v = max(v, texelFetch(mask_b, px, 0).r);
+    imageStore(dst, px, vec4(v, 0.0, 0.0, 0.0));
+}

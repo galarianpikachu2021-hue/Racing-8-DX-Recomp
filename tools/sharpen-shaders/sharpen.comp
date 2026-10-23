@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// kart-recomp: contrast-adaptive sharpening of the upscaled 3D image (before the HUD is drawn on it), written for the host's
+// output format. Same idea as AMD's CAS: the kernel weight shrinks where the neighbourhood is already high-contrast, so edges
+// aren't haloed; strength 0..1 maps from the gentlest to the strongest stable kernel.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgb10_a2) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 size; float strength; float pad; } p;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= p.size.x || px.y >= p.size.y) return;
+    ivec2 hi = p.size - 1;
+    vec3 c = texelFetch(src, px, 0).rgb;
+    vec3 n = texelFetch(src, clamp(px + ivec2(0, -1), ivec2(0), hi), 0).rgb;
+    vec3 s = texelFetch(src, clamp(px + ivec2(0, 1), ivec2(0), hi), 0).rgb;
+    vec3 w = texelFetch(src, clamp(px + ivec2(-1, 0), ivec2(0), hi), 0).rgb;
+    vec3 e = texelFetch(src, clamp(px + ivec2(1, 0), ivec2(0), hi), 0).rgb;
+    vec3 mn = min(c, min(min(n, s), min(w, e)));
+    vec3 mx = max(c, max(max(n, s), max(w, e)));
+    // Per channel: more sharpening where there is headroom to the ends of the range and little local contrast.
+    vec3 amp = sqrt(clamp(min(mn, vec3(1.0) - mx) / max(mx, vec3(1e-4)), 0.0, 1.0));
+    // The kernel stays stable (1 + 4 * weight > 0) up to peak = -1/4.2; AMD's CAS uses the same 1/8 .. 1/5 style range.
+    float peak = -1.0 / mix(8.0, 4.2, clamp(p.strength, 0.0, 1.0));
+    vec3 wgt = amp * peak;
+    vec3 sharpened = ((n + s + w + e) * wgt + c) / (1.0 + 4.0 * wgt);
+    // Coring: the change is the high-pass response; tiny responses are texture grain and dithering, which sharpening only turns into
+    // dots, so they're passed through unchanged and real edges keep their full boost.
+    vec3 delta = sharpened - c;
+    vec3 core = vec3(0.012 + 0.03 * (mx.g - mn.g));
+    delta = sign(delta) * max(abs(delta) - core * 0.5, 0.0);
+    vec3 outc = c + delta;
+    // Limiter: never overshoot the neighbourhood (no halos, no bright/dark specks).
+    float room = 0.015;
+    outc = clamp(outc, mn - room, mx + room);
+    imageStore(dst, px, vec4(clamp(outc, 0.0, 1.0), 1.0));
+}

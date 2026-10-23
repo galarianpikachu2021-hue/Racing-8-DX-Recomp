@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KartRecomp
+Comment=Static recompilation of a kart racing game, built from your own game files
+Exec=mk8d
+Icon=kartrecomp
+Categories=Game;
+Terminal=false

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# KartRecomp AppImage entry point: runs the game program built on this machine. Nothing game-derived is read from
+# inside the AppImage except that program; the game files, keys and firmware are the user's own, in their data folder.
+here="$(dirname "$(readlink -f "$0")")"
+name=kartrecomp
+data="${XDG_DATA_HOME:-$HOME/.local/share}/$name"
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/$name"
+mkdir -p "$data/content/dlc" "$data/keys" "$data/mods" "$conf"
+say() {
+  echo "$1" >&2
+  if command -v notify-send >/dev/null; then notify-send "KartRecomp" "$1"; fi
+}
+# The generated code is built for x86-64-v3 (AVX2, BMI2, FMA, MOVBE).
+for f in avx2 bmi2 fma movbe; do
+  grep -m1 -qw "$f" /proc/cpuinfo || { say "This CPU lacks '$f': the game needs an x86-64-v3 CPU (Intel Haswell / AMD Zen or newer)."; exit 1; }
+done
+missing=()
+[ -f "$data/content/base.nsp" ] || missing+=("$data/content/base.nsp (your base game)")
+[ -f "$data/content/update-3.0.4.nsp" ] || missing+=("$data/content/update-3.0.4.nsp (update 3.0.4)")
+[ -f "$data/keys/prod.keys" ] || missing+=("$data/keys/prod.keys (your console's keys)")
+if [ ${#missing[@]} -gt 0 ]; then
+  say "Missing: ${missing[*]}. Firmware goes in $data/nand/system. Add-on content: $data/content/dlc/*.nsp."
+  exit 1
+fi
+# Settings the launcher writes (renderer, output height, CPU pinning...), one VAR=value per line.
+if [ -f "$conf/launch.env" ]; then set -a; . "$conf/launch.env"; set +a; fi
+export KARTRECOMP_APP_NAME="$name"
+export KARTRECOMP_NATIVE_GPU="${KARTRECOMP_NATIVE_GPU:-native}"
+dlc=()
+for f in "$data"/content/dlc/*.nsp; do [ -e "$f" ] && dlc+=(--content-dlc "$f"); done
+cd "$here/usr/lib/kartrecomp"   # the plugins/ folder is looked up from here
+exec "$here/usr/bin/mk8d" --content-base "$data/content/base.nsp" --content-update "$data/content/update-3.0.4.nsp" "${dlc[@]}" "$@"

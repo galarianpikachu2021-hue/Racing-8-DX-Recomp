@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// kart-recomp: motion vectors for the upscaler hook, in two layers.
+//  1. Camera motion from the scene depth: m = previous view-projection * inverse(current view-projection), applied to
+//     (ndc, depth, 1) gives where the same world point was last frame. Exact for the static world and the sky.
+//  2. Object motion by matching, per 8x8 tile: pixels whose last-frame luminance doesn't match at the camera-predicted spot are
+//     "bad". A tile with enough bad pixels (a moving object, not aliasing noise on a texture) searches last frame's luminance
+//     together for the vector that explains its bad pixels best (including "didn't move", which is what a kart that follows
+//     the camera does). Everything else keeps the camera vector, and quiet tiles pay for nothing but the check.
+// Output RG16F in render pixels, unjittered, prev = cur + mv (the ABI in upscaler.h). Game NDC: y up, depth 0..1 (infinite far).
+// Every thread also writes its pixel's luminance, which is next frame's `prev_luma`.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D depth_tex;
+layout(set = 0, binding = 1, rg16f) uniform writeonly image2D mv_out;
+layout(set = 0, binding = 2, rgb10_a2) uniform writeonly image2D vis_out; // KARTRECOMP_MV_DEBUG only
+layout(set = 0, binding = 3) uniform sampler2D cur_tex;                   // tonemapped 3D colour (linear)
+layout(set = 0, binding = 4) uniform sampler2D prev_luma;                 // last frame's luminance (linear)
+layout(set = 0, binding = 5, r8) uniform writeonly image2D luma_out;
+layout(set = 0, binding = 6, r8) uniform writeonly image2D mismatch_out; // 0..0.9: how little the camera vector can be trusted here
+layout(set = 0, binding = 7) uniform sampler2D prev_mv;                  // last frame's final vectors: where an object went last frame is where it goes now
+layout(push_constant) uniform Params {
+    mat4 m;
+    vec2 size;
+    vec2 jit_cur;  // this frame's sub-pixel jitter (content is shifted by +jit in render pixels)
+    vec2 jit_prev; // last frame's
+    float valid;     // 1: camera matrices and depth are usable
+    float debug_vis; // 1: also write the vectors as a picture into vis_out (same size as the render)
+    float use_match; // 1: prev_luma holds last frame's luminance
+    float min_bad;   // bad pixels (of 64) for a tile to search
+    float near_plane; // camera near plane, for the view distance of a depth value
+    float max_dist;   // only pixels closer than this (view-space units) can be moving objects
+    float vis_gain;   // debug view: pixels per full colour
+    float wide;      // 1: also search a wide grid (+-12 px) for fast movers (costs about twice as much)
+    float pad2, pad3;
+} p;
+
+const float kLumaTol = 0.06;  // mean 3x3 luminance difference above which the camera vector is doubted
+const float kAccept = 0.06;   // a tile's replacement must match its bad pixels at least this well on average
+const int kZero = 25;         // candidates 0..24: a 5x5 grid (step 3) around "didn't move"
+const int kNear = 25;         // candidates 25..49: a 5x5 grid (step 3) around the tile's camera vector
+const int kPrior = 9;         // candidates 50..58: a 3x3 grid (step 2) around last frame's vector at the tile's centre
+const int kWide = 25;         // candidates 59..83: a 5x5 grid (step 6) around the tile's camera vector, for fast movers
+const int kCoarse = kZero + kNear + kPrior + kWide;
+int candidates() { return p.wide > 0.5 ? kCoarse : kCoarse - kWide; }
+
+shared uint s_bad;
+shared uint s_cam_cost;       // sum of the bad pixels' camera-hypothesis costs, x1000
+shared int s_mv_x, s_mv_y;    // sum of the bad pixels' camera vectors, x16
+shared uint s_cost[kCoarse + 9];
+shared vec2 s_prior;
+shared vec2 s_pick;
+shared uint s_accept;
+shared uint s_ambiguous;
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+float cur_l[5];
+
+// The 5 taps of a patch (a plus, 2 px arms), each a 2x2 box average so texture aliasing doesn't read as motion.
+const vec2 kTap[5] = vec2[5](vec2(0.0, 0.0), vec2(-2.0, 0.0), vec2(2.0, 0.0), vec2(0.0, -2.0), vec2(0.0, 2.0));
+
+// Mean absolute difference between the current patch and last frame's at `q` (a render-pixel position in last frame's
+// jittered image, pixel-centre convention: q = px for "same pixel"). Both sides are sampled at pixel corners: the same blur.
+float cost(vec2 q) {
+    float s = 0.0;
+    for (int k = 0; k < 5; ++k) {
+        s += abs(texture(prev_luma, (q + kTap[k] + 1.0) / p.size).r - cur_l[k]);
+    }
+    return s * 0.2;
+}
+
+vec2 candidate(int i, vec2 tile_cam, vec2 tile_prior) {
+    if (i < kZero) return vec2((i % 5 - 2) * 3, (i / 5 - 2) * 3);
+    int j = i - kZero;
+    if (j < kNear) return tile_cam + vec2((j % 5 - 2) * 3, (j / 5 - 2) * 3);
+    j -= kNear;
+    if (j < kPrior) return tile_prior + vec2((j % 3 - 1) * 2, (j / 3 - 1) * 2);
+    j -= kPrior;
+    return tile_cam + vec2((j % 5 - 2) * 6, (j / 5 - 2) * 6);
+}
+
+void main() {
+    uint li = gl_LocalInvocationIndex;
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    bool inside = px.x < int(p.size.x) && px.y < int(p.size.y);
+    if (li == 0u) {
+        s_bad = 0u;
+        s_cam_cost = 0u;
+        s_mv_x = 0;
+        s_mv_y = 0;
+        s_accept = 0u;
+        s_ambiguous = 0u;
+    }
+    for (uint k = li; k < uint(kCoarse + 9); k += 64u) s_cost[k] = 0u;
+    barrier();
+
+    vec2 mv = vec2(0.0);
+    vec2 mv_cam = vec2(0.0);
+    bool bad = false;
+    float mismatch = 0.0;
+    vec2 base = vec2(px) + (p.jit_prev - p.jit_cur); // where this pixel's surface point would sit last frame if it didn't move
+    if (inside) {
+        imageStore(luma_out, px, vec4(luma(texelFetch(cur_tex, px, 0).rgb), 0.0, 0.0, 0.0));
+        if (p.valid > 0.5) {
+            float z = texelFetch(depth_tex, px, 0).r;
+            // The surface point's unjittered position this frame, and where the camera put it last frame.
+            vec2 uv = (vec2(px) + 0.5 - p.jit_cur) / p.size;
+            vec4 cur = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+            vec4 prev = p.m * cur;
+            if (prev.w > 1e-6) {
+                vec2 pn = prev.xy / prev.w;
+                vec2 puv = vec2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+                mv = (puv - uv) * p.size;
+            }
+            mv_cam = mv;
+            // View distance of a non-inverted infinite-far depth: d = near / (1 - z). The far track, crowd and sky are the static
+            // world (or tiny animations): they keep the exact camera vector and never pay for the object search.
+            float view_dist = p.near_plane / max(1.0 - z, 1e-6);
+            if (p.use_match > 0.5 && z < 0.99999 && view_dist < p.max_dist) {
+                for (int k = 0; k < 5; ++k)
+                    cur_l[k] = luma(texture(cur_tex, (vec2(px) + kTap[k] + 1.0) / p.size).rgb);
+                float cam_cost = cost(base + mv);
+                // Reactive mask for the upscaler: where the picture isn't explained by the camera (animated characters, effects,
+                // anything without motion data of its own) history is wrong, and FSR drags it along as ghosting.
+                mismatch = clamp((cam_cost - 0.03) * 7.0, 0.0, 0.9);
+                if (cam_cost > kLumaTol) {
+                    bad = true;
+                    atomicAdd(s_bad, 1u);
+                    atomicAdd(s_cam_cost, uint(cam_cost * 1000.0));
+                    atomicAdd(s_mv_x, int(mv.x * 16.0));
+                    atomicAdd(s_mv_y, int(mv.y * 16.0));
+                }
+            }
+        }
+    }
+    barrier();
+
+    // Workgroup-uniform from here: only tiles with a real disagreement search.
+    if (float(s_bad) >= p.min_bad) {
+        vec2 tile_cam = vec2(float(s_mv_x), float(s_mv_y)) / (16.0 * float(s_bad));
+        if (li == 0u) s_prior = texelFetch(prev_mv, ivec2(gl_WorkGroupID.xy) * 8 + 4, 0).xy;
+        barrier();
+        vec2 tile_prior = s_prior;
+        if (bad) {
+            for (int i = 0; i < candidates(); ++i) atomicAdd(s_cost[i], uint(cost(base + candidate(i, tile_cam, tile_prior)) * 1000.0));
+        }
+        barrier();
+        if (li == 0u) {
+            uint best = s_cost[0];
+            int bi = 0;
+            for (int i = 1; i < candidates(); ++i) if (s_cost[i] < best) { best = s_cost[i]; bi = i; }
+            vec2 pick = candidate(bi, tile_cam, tile_prior);
+            // Repeating patterns (road stripes) match equally well in several places: if a clearly different place
+            // is nearly as good, the match means nothing.
+            uint other = 0xFFFFFFFFu;
+            for (int i = 0; i < candidates(); ++i)
+                if (length(candidate(i, tile_cam, tile_prior) - pick) > 4.0) other = min(other, s_cost[i]);
+            s_ambiguous = (float(other) < 1.25 * float(best) + 0.01 * 1000.0 * float(s_bad)) ? 1u : 0u;
+            s_pick = pick;
+        }
+        barrier();
+        vec2 centre = s_pick;
+        if (bad) {
+            for (int k = 0; k < 9; ++k) {
+                vec2 cand = centre + vec2(k % 3 - 1, k / 3 - 1);
+                atomicAdd(s_cost[kCoarse + k], uint(cost(base + cand) * 1000.0));
+            }
+        }
+        barrier();
+        if (li == 0u) {
+            uint best = s_cost[kCoarse];
+            int bk = 0;
+            for (int k = 1; k < 9; ++k) if (s_cost[kCoarse + k] < best) { best = s_cost[kCoarse + k]; bk = k; }
+            vec2 cand = centre + vec2(bk % 3 - 1, bk / 3 - 1);
+            // Accept only a clear win over the camera vectors that matches well, and that actually differs from them.
+            bool good = s_ambiguous == 0u && float(best) < 0.6 * float(s_cam_cost) && float(best) / float(s_bad) < kAccept * 1000.0 &&
+                        length(cand - tile_cam) >= 2.0;
+            s_pick = cand;
+            s_accept = good ? 1u : 0u;
+        }
+        barrier();
+        if (bad && s_accept == 1u) {
+            // Per-pixel refinement around the tile's vector, so the result follows edges instead of 8x8 block borders.
+            vec2 best = s_pick;
+            float best_cost = cost(base + s_pick);
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    vec2 cand = s_pick + vec2(dx, dy);
+                    float c = cost(base + cand);
+                    if (c < best_cost) { best = cand; best_cost = c; }
+                }
+            mv = best;
+            mismatch = max(mismatch, 0.6); // an estimated object vector is a guess: keep some reactivity
+        }
+    }
+
+    if (!inside) return;
+    imageStore(mv_out, px, vec4(mv, 0.0, 0.0));
+    imageStore(mismatch_out, px, vec4(mismatch, 0.0, 0.0, 0.0));
+    if (p.debug_vis > 3.5 && p.valid > 0.5 && p.use_match > 0.5) {
+        // Mode 4: how well the final vector explains the picture: |last frame at pos + mv - this frame|, x8 (grey = good).
+        for (int k = 0; k < 5; ++k) cur_l[k] = luma(texture(cur_tex, (vec2(px) + kTap[k] + 1.0) / p.size).rgb);
+        float e = clamp(cost(vec2(px) + (p.jit_prev - p.jit_cur) + mv) * 8.0, 0.0, 1.0);
+        imageStore(vis_out, px, vec4(e, e * 0.5, 0.0, 1.0));
+    } else if (p.debug_vis > 2.5 && p.valid > 0.5) {
+        // Mode 3: view distance heat map (red: 0..100 units, green: 0..1000, blue: 0..10000).
+        float zz = texelFetch(depth_tex, px, 0).r;
+        float dd = p.near_plane / max(1.0 - zz, 1e-6);
+        imageStore(vis_out, px, vec4(clamp(dd / 100.0, 0.0, 1.0), clamp(dd / 1000.0, 0.0, 1.0), clamp(dd / 10000.0, 0.0, 1.0), 1.0));
+    } else if (p.debug_vis > 0.5 && p.valid > 0.5) {
+        // Grey = still; red/green = motion right/down (cyan/magenta the other way); 8 px saturates.
+        vec2 v = clamp(mv / max(p.vis_gain, 0.01), -1.0, 1.0);
+        if (p.debug_vis > 1.5) v = clamp((mv - mv_cam) * (1.0 / 6.0), -1.0, 1.0); // mode 2: only the object layer's corrections
+        imageStore(vis_out, px, vec4(0.5 + 0.5 * v.x, 0.5 + 0.5 * v.y, 0.5, 1.0));
+    }
+}

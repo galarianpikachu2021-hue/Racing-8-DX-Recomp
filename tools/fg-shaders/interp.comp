@@ -1,0 +1,39 @@
+#version 450
+// Frame generation: the picture half a frame between the previous and the current 3D image, from the current frame's
+// motion vectors (prev = cur + mv, in render pixels). The HUD of the current frame (where the finished frame differs
+// from the 3D image) is laid over it, and a mask of where it did is written for the HDR present pass.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D prev_img;   // 3D image of the previous frame
+layout(binding = 1) uniform sampler2D cur_img;    // 3D image of the current frame
+layout(binding = 2) uniform sampler2D final_img;  // the current frame as finished, HUD included
+layout(binding = 3) uniform sampler2D motion_img; // RG16F, render pixels
+layout(binding = 4, rgba16f) uniform writeonly image2D out_img;
+layout(binding = 5, r8) uniform writeonly image2D ui_img;
+layout(binding = 6) uniform sampler2D plugin_img; // a frame-generation plugin's 3D result (used when mode = 1)
+layout(push_constant) uniform P {
+    ivec2 size;
+    vec2 render_size;
+    float t;       // 0 = previous frame, 1 = current
+    float mode;    // 0: interpolate here; 1: take plugin_img as the 3D picture and only lay the HUD over it
+    float pad1, pad2;
+} p;
+
+float diff(vec3 a, vec3 b) { vec3 d = abs(a - b); return max(d.r, max(d.g, d.b)); }
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= p.size.x || xy.y >= p.size.y) return;
+    vec2 uv = (vec2(xy) + 0.5) / vec2(p.size);
+    vec2 mv = texture(motion_img, uv).rg / p.render_size;
+    vec3 c_w = texture(cur_img, uv - mv * (1.0 - p.t)).rgb;
+    vec3 p_w = texture(prev_img, uv + mv * p.t).rgb;
+    vec3 c0 = texture(cur_img, uv).rgb;
+    vec3 p0 = texture(prev_img, uv).rgb;
+    // The motion-compensated pair when it agrees at least as well as the unmoved pair; otherwise (disocclusion, a wrong
+    // vector) the unmoved pair.
+    vec3 col = p.mode > 0.5 ? texture(plugin_img, uv).rgb : diff(c_w, p_w) <= diff(c0, p0) + 0.02 ? mix(p_w, c_w, p.t) : mix(p0, c0, p.t);
+    vec3 fin = texture(final_img, uv).rgb;
+    float ui = smoothstep(0.004, 0.02, diff(fin, c0));
+    imageStore(out_img, xy, vec4(mix(col, fin, ui), 1.0));
+    imageStore(ui_img, xy, vec4(ui));
+}
