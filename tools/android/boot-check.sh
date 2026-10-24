@@ -16,7 +16,8 @@ push_once "$game/content/base.nsp" "$files/kart/base.nsp"
 push_once "$game/content/update-3.0.4.nsp" "$files/kart/update.nsp"
 home="${KARTRECOMP_SUYU_HOME:-$game/../suyu-home/suyu}"
 for k in prod.keys title.keys; do push_once "$home/keys/$k" "$files/keys/$k"; done
-adb shell "[ -d '$files/nand/system/Contents/registered' ]" || { adb shell mkdir -p "$files/nand/system/Contents"; adb push "$home/nand/system/Contents/registered" "$files/nand/system/Contents/" >/dev/null; }
+# (the app creates the folder empty on its first start, so test for files, not for the folder)
+adb shell "[ -n \"\$(ls '$files/nand/system/Contents/registered' 2>/dev/null)\" ]" || { adb shell mkdir -p "$files/nand/system/Contents"; adb shell rm -rf "$files/nand/system/Contents/registered"; adb push "$home/nand/system/Contents/registered" "$files/nand/system/Contents/" >/dev/null; }
 update="$files/kart/update.nsp"
 if [ -n "$wrong" ]; then push_once "$wrong" "$files/kart/wrong.nsp"; update="$files/kart/wrong.nsp"; fi
 adb logcat -G 64M >/dev/null 2>&1 || true
