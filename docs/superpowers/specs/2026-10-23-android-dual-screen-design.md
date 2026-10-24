@@ -127,6 +127,8 @@ none for the base model):
 
 ## Constraints
 
+- **No JIT, ever** (user, 2026-10-23, strict): strict static recompilation on every platform; no dynarmic fallback, no runtime code generation.
+  Every other decision in this design may change, but the user is asked first.
 - Legal: LEGAL.md applies unchanged (player supplies game, keys, firmware, `.dsmod`).
 - Development machine: Linux desktop (AMD); an Android emulator is installed for app/UI work; real performance only on the Thor.
 - Builds/tests on the shared desktop stay RAM-capped (see project notes).
