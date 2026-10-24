@@ -19,9 +19,11 @@ for k in prod.keys title.keys; do push_once "$home/keys/$k" "$files/keys/$k"; do
 adb shell "[ -d '$files/nand/system/Contents/registered' ]" || { adb shell mkdir -p "$files/nand/system/Contents"; adb push "$home/nand/system/Contents/registered" "$files/nand/system/Contents/" >/dev/null; }
 update="$files/kart/update.nsp"
 if [ -n "$wrong" ]; then push_once "$wrong" "$files/kart/wrong.nsp"; update="$files/kart/wrong.nsp"; fi
+adb logcat -G 64M >/dev/null 2>&1 || true
 adb logcat -c
 adb shell am start -n "$pkg/org.yuzu.yuzu_emu.activities.EmulationActivity" --es kartrecomp.base "$files/kart/base.nsp" --es kartrecomp.update "$update" >/dev/null
 sleep "${BOOT_WAIT:-45}"
+[ -n "${SHOT_OUT:-}" ] && adb exec-out screencap -p > "$SHOT_OUT"
 log=$(adb logcat -d)
 adb shell am force-stop "$pkg"
 if [ -n "$wrong" ]; then
@@ -32,4 +34,13 @@ grep -q "FATAL EXCEPTION\|Fatal signal" <<<"$log" && { grep -m3 -A3 "FATAL EXCEP
 mods=$(grep -c "Static recompiled module" <<<"$log" || true)
 run=$(grep -c "ArmRecomp::RunThread entered" <<<"$log" || true)
 echo "static modules: $mods, guest threads entered: $run"
-[ "$mods" -ge 4 ] && [ "$run" -ge 1 ] && echo PASS || { echo "FAIL: the recompiled game did not start"; exit 1; }
+[ "$mods" -ge 4 ] && [ "$run" -ge 1 ] || { echo "FAIL: the recompiled game did not start"; exit 1; }
+if [ -n "${SHOT_OUT:-}" ]; then
+    # Rendering check: the native renderer's own frame counter and a picture that is not black.
+    frames=$(grep -o "nvn-host vulkan: [0-9]* frames" <<<"$log" | tail -1 | grep -o "[0-9]*" | head -1 || true)
+    missing=$(grep -m1 "nvn-host vulkan: .*\(lacks\|failed\|could not\)" <<<"$log" || true)
+    bright=$(python3 -c "from PIL import Image,ImageStat; im=Image.open('$SHOT_OUT').convert('L'); print(int(ImageStat.Stat(im).mean[0]))")
+    echo "native frames: ${frames:-0}, screenshot mean brightness: $bright${missing:+, renderer said: $missing}"
+    [ "${frames:-0}" -gt 0 ] && [ "$bright" -gt 8 ] || { echo "FAIL: nothing rendered"; exit 1; }
+fi
+echo PASS
