@@ -5,7 +5,7 @@ Goal: render MK8D by translating its **NVN** graphics API calls directly into a 
 native (strict static recomp), so this is the last big emulation layer between the game and the hardware.
 It is also what makes an Android/ARM port realistic.
 
-## Where the boundary is (verified 2026-10-18)
+## Where the boundary is (verified ##########)
 
 - The game's `main` module imports a single graphics symbol, `nvnBootstrapLoader`. It's defined in the
   `sdk` module, which carries the NVN driver.
@@ -30,7 +30,7 @@ It is also what makes an Android/ARM port realistic.
 The full trace stays in `local/traces/`. The function list comes from the user's own game, so it isn't
 committed.
 
-## Full Grand Prix capture (phase 1, 2026-10-18)
+## Full Grand Prix capture (phase 1, ##########)
 
 The run: 52,905 frames (about 14.7 min, roughly 59 fps with tracing on), strict static, no crash. 207 entry
 points were used and 625 M NVN calls recorded, plus 58 frames captured with full arguments (29 samples, 2
@@ -105,7 +105,7 @@ The recompiler emits portable C, so the same generated game code compiles for ar
 Android needs the runtime (services, input, audio) built for Android plus the Vulkan backend above. Metal
 reuses the backend interface with SPIR-V → MSL.
 
-## Phase 2 notes (shadow stage, 2026-10-18)
+## Phase 2 notes (shadow stage, ##########)
 
 Run with `KARTRECOMP_NATIVE_GPU=shadow`. A second window, "KartRecomp - native GPU (shadow)", opens next
 to the game. The report is `user/log/nvn_host.txt`.
@@ -130,7 +130,7 @@ to the game. The report is `user/log/nvn_host.txt`.
   blits the window texture to its swapchain. Measured: 60 fps, 0 dropped, about 365 native images, about
   18 clears per frame. The window is black for now, because the final image is produced by draws.
 
-## NVN driver conventions (learned 2026-10-18 by pairing NVN calls with the emulated GPU's register state)
+## NVN driver conventions (learned ######## by pairing NVN calls with the emulated GPU's register state)
 
 Tool: `KARTRECOMP_NVN_RE=1` writes `user/log/nvn_re.txt`. It holds NVN-side lines from nvn-host and
 hardware-side lines from video_core for the same objects. They're matched up by GPU address.
@@ -148,7 +148,7 @@ hardware-side lines from video_core for the same objects. They're matched up by 
 - **Stages:** NVN shader stage enum → Maxwell bind group: vertex 0→0, fragment 1→4, geometry 2→3. Compute
   (5) is separate.
 
-## Phase 3/4 progress: GPU memory and shaders (2026-10-18)
+## Phase 3/4 progress: GPU memory and shaders (##########)
 
 - **Pool GPU mappings:** an `NVNmemoryPool` holds up to three GPU mappings of its storage, as
   `(descriptor ptr, GPU base)` pairs at `+0x38/+0x40`, `+0x48/+0x50` and `+0x58/+0x60` (pitch,
@@ -168,7 +168,7 @@ hardware-side lines from video_core for the same objects. They're matched up by 
   state decoding, descriptor layouts from `Shader::Info`, uniform/texture upload, pipelines, render
   passes.
 
-## FIRST NATIVE 3D FRAME (2026-10-18 night)
+## FIRST NATIVE 3D FRAME (######## night)
 
 `KARTRECOMP_NATIVE_GPU=shadow KARTRECOMP_NATIVE_DUMP=1` dumped the first race frame rendered entirely by
 nvn-host + the Vulkan backend: a recognizable lit course in perspective, also present in the game's
@@ -218,7 +218,7 @@ ASTC textures fall back to stand-ins; the render thread can't keep up while comp
   allowed for non-compare reads). Prime suspect for the remainder: compute dispatches (about 2 per frame,
   likely luminance/auto-exposure) aren't executed yet, so exposure stays 0.
 
-## Overnight 2026-10-18 → 19: from first pixels to full native race frames
+## Overnight ############: from first pixels to full native race frames
 
 Debugging tools added: per-pass dumps (`KARTRECOMP_NATIVE_DUMP=N` writes every pass's first color target
 as `passNNN_drawsD_*` plus window and targets), SPIR-V dumps of full-screen passes (`*_spv/`, readable with
@@ -255,7 +255,7 @@ with the 3D LUT). Saved locally as `local/milestones/2026-10-19-native-race-full
 960×540 target) being sampled without the right UV scale; green tint; the title logo repeats.
 Next suspects: uniform values for those passes, and texture views with sizes other than their storage.
 
-## 2026-10-19 (night): orientation, layered targets, culling, vertex formats
+## ########## (night): orientation, layered targets, culling, vertex formats
 
 The renderer is a **light pre-pass** design. Each race frame runs:
 1. Depth/normal prepass (normal maps only) into an RGB10A2 normal buffer.
@@ -431,7 +431,7 @@ Open:
 - ASTC (UI icons) isn't decoded.
 - Compute isn't executed.
 
-## 2026-10-19 (afternoon): first play-test fixes
+## ########## (afternoon): first play-test fixes
 
 User report after the first play-test: inverted colors, z-fighting, shadow lines, shadows wrong in general,
 missing reflections, sky duplication in replays, dark tracks, missing bloom, the pause background, rumble,
@@ -483,7 +483,7 @@ Still open:
 - Sky duplication in replays and flyovers, the pause background, bloom, overall darkness, shaking
   pieces, end-screen textures.
 
-## 2026-10-19 (evening): effect-heavy slowdown, boost echo
+## ########## (evening): effect-heavy slowdown, boost echo
 
 - **Per-frame dedup.** Within one frame, the same guest range (vertex data, constants) and the same
   snapshot are uploaded once. Identical descriptor sets are reused. Particle-heavy frames repeated
@@ -505,7 +505,7 @@ Still open:
     use a shader.
   - `KARTRECOMP_NATIVE_PICK_W=<width>`: pick inside smaller or mip targets.
 
-## 2026-10-19 (late): replacing NVN recording calls, where the time goes
+## ########## (late): replacing NVN recording calls, where the time goes
 
 - **The real NVN driver no longer records anything in native mode.** In exclusive mode, the
   command-recording calls the model handles (draws, state binds, texture, sampler and uniform
@@ -530,7 +530,7 @@ Still open:
     that core's hot recompiled functions.
 - The log line `nvn-host submit split per frame` reports flatten and per-backend submit times.
 
-## 2026-10-19 (night): is it the hardware, the services, or the CPU code?
+## 2########### (night): is it the hardware, the services, or the CPU code?
 
 Measured mid-race in native mode at 1080p on the user's machine (Ryzen 7 9700X, RX 9070, 15 GB RAM),
 using `tools/profile-report.py` and the built-in sampler (`KARTRECOMP_PROFILE=<start>,<seconds>[,wall]`,
@@ -570,7 +570,7 @@ found on the stack. `perf` isn't installed and `ptrace_scope` is 1, so it runs i
   - Keep hot guest registers in locals inside a block.
   - Build for the host CPU (`-march=native`).
 
-## 2026-10-21: block chaining, effects scenario, what did and didn't help
+## ########: block chaining, effects scenario, what did and didn't help
 
 - **Block chaining is built and verified.** All direct B/BL/fall-through exits tail-call the next block
   (`tools/recomp-chain.py`; the generator emits the same code now). It runs correctly, and the dispatch
@@ -612,7 +612,7 @@ found on the stack. `perf` isn't installed and `ptrace_scope` is 1, so it runs i
   with a higher priority than the user's other programs (needs `gamemode` group membership or
   rtprio/nice limits, which this account doesn't have).
 
-## 2026-10-21 - Native frame rate (render-side interpolation) - REVERTED
+## ######## - Native frame rate (render-side interpolation) - REVERTED
 
 The user judged the visual errors too severe and asked to revert it and look at FSR 4 / DLSS (hardware frame generation)
 instead. The prototype is removed from the fork and the launcher; what it taught is kept here.
@@ -639,7 +639,7 @@ instead. The prototype is removed from the fork and the launcher; what it taught
 - Idea for hardware frame generation (driver FSR/AFMF style): hand it the UI-free scene and draw the HUD after; the
   depth rule already separates them.
 
-## 2026-10-21 - Survey for upscaling / frame generation (FSR, DLSS)
+## ######## - Survey for upscaling / frame generation (FSR, DLSS)
 
 What one race frame (1920x1080, native, no scaling) gives an upscaler:
 
@@ -664,7 +664,7 @@ Upscaler options, as checked against AMD's FidelityFX-SDK repo (MIT-style licens
   interface (colour, depth, motion vectors, jitter, exposure, reset flag). Don't bundle NVIDIA files.
 - The Windows-only third-party "DLSS-NR-on-AMD" tool is DX12-only and not usable here; not touched.
 
-### Step 1 done: camera jitter (2026-10-21)
+### Step 1 done: camera jitter (#########)
 
 - `KARTRECOMP_JITTER=1` shifts the viewport of every scene pass (a color target plus a non-D16 depth target; shadow
   maps, post-processing, HUD and menus have none or the wrong kind) by a Halton(2,3) offset in [-0.5, 0.5) guest pixels,
@@ -678,7 +678,7 @@ Upscaler options, as checked against AMD's FidelityFX-SDK repo (MIT-style licens
   view-projection (not yet found in the captured uniforms). Per-object motion would need each vertex shader run twice
   (current and previous uniforms), which the translator doesn't do today.
 
-## 2026-10-21 - Sky duplication fixed: render targets that are mip chains
+## ######### - Sky duplication fixed: render targets that are mip chains
 
 Symptom (user screenshot, Mario Circuit course-intro title): small copies of the castle and track in the sky at the top
 left and top middle, worst in flyovers and replays.
@@ -704,7 +704,7 @@ Also this session: `make-menu-tas.py --cup=N` (Flower Cup = Mario Circuit, open 
 (every presented frame at 480x270); the overlay's speed limit no longer leaks into the saved config (`SdlConfig::SaveAllValues`
 writes the configured value); overlay settings persist in `user/config/kartrecomp_overlay.ini`.
 
-## 2026-10-21 (night): frame drops again, with the architecture in mind
+## ######### (night): frame drops again, with the architecture in mind
 
 Scenario: `tools/make-menu-tas.py --effects`, native, 1440p, game fps over seconds 60-130 (71 samples), two runs per variant.
 
@@ -732,11 +732,11 @@ Scenario: `tools/make-menu-tas.py --effects`, native, 1440p, game fps over secon
   programs speculatively; nothing to add there.
 - **Test aids**: `KARTRECOMP_HITCH=<period>,<ms>[,<from>]` (sleep in the renderer), `GPU frame time` log line, `--time-trial` TAS.
 
-## The "PC 0" race crash (investigation, 2026-10-23)
+## The "PC 0" race crash (investigation, #############)
 Symptom: a guest thread dies with "No recompiled block at PC 0x0 ... strict mode" (game freezes, process stays alive). R21 = -1, R00 = 0, LR = main+0xDEF24. Seen on gcc builds (hooked and unhooked, user's interactive races with mods: 3/3, CTGP only: 1, no mods: 0/1; scripted runs: occasionally) and once at 36 s of the benchmark replay on the clang hot/cold build (not on the next 2 runs of that build): timing-dependent.
 Code (3.0.4 main, from the generated `_expected` words):
 ```
 deef0: mov x22,x19 ; ldr x20,[x22,#0x30]! ; mov x0,x20 ; ldrsh x21,[x22,#0x854] ; mov w1,w21 ; bl 0x69d48c
 def08: ldr x8,[x20,#0x38] ; ldr x8,[x8,x21,lsl#3] ; ldr x0,[x8] ; ldr x8,[x0] ; ldr x8,[x8,#0x78] ; ldrsh w1,[x22,#0x856] ; blr x8
 ```
-The signed 16-bit index at object+0x884 is -1 ("none"), the array lookup at index -1 yields a null object, the virtual call jumps to 0. The gate before (deed4) tests a state value against bit mask 0x2085a00c2. One direct writer found: `strh` at block main+0x71dc10 (`[x21+0x884]`); stores through other bases / wider stores not searched yet. Hypothesis: load timing (worse with many mods, slower code): the reader runs before the writer on our scheduling. **Root cause (2026-10-23): a character mod, not the recompiler.** The index is a driver-skeleton BONE index: the writer (main+0xd5fac..0xd6054) calls the bone lookup main+0x69c6a0 with names from rodata (`Hair1`, `Hair`, `HairL`/`HairR`, `Crown1`, `Flag`, ...) and stores -1 when the model has none of them; the reader assumes the bone exists for that character's hair/accessory type. With the user's mods (character model swaps) the replay crashed 2 of 8 runs (the CPU opponents are random, so only races with the swapped character crash); with `KARTRECOMP_NO_MODS=1` 0 of 6. Not fixed (a guard at main+0xdeef0 would have to supply a valid matrix: main+0xdef24 reads [x0+0x30]); tests run without mods.
+The signed 16-bit index at object+0x884 is -1 ("none"), the array lookup at index -1 yields a null object, the virtual call jumps to 0. The gate before (deed4) tests a state value against bit mask 0x2085a00c2. One direct writer found: `strh` at block main+0x71dc10 (`[x21+0x884]`); stores through other bases / wider stores not searched yet. Hypothesis: load timing (worse with many mods, slower code): the reader runs before the writer on our scheduling. **Root cause (#########): a character mod, not the recompiler.** The index is a driver-skeleton BONE index: the writer (main+0xd5fac..0xd6054) calls the bone lookup main+0x69c6a0 with names from rodata (`Hair1`, `Hair`, `HairL`/`HairR`, `Crown1`, `Flag`, ...) and stores -1 when the model has none of them; the reader assumes the bone exists for that character's hair/accessory type. With the user's mods (character model swaps) the replay crashed 2 of 8 runs (the CPU opponents are random, so only races with the swapped character crash); with `KARTRECOMP_NO_MODS=1` 0 of 6. Not fixed (a guard at main+0xdeef0 would have to supply a valid matrix: main+0xdef24 reads [x0+0x30]); tests run without mods.
