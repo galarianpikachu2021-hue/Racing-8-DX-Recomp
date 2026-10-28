@@ -1,5 +1,9 @@
 # Android port: how to build, run and test (plan 1)
 
+> **UNTESTED ON REAL HARDWARE.** This branch has only ever run in the Android emulator (x86_64, API 35). The arm64 build for Snapdragon
+> devices (AYN Thor and others) compiles and links, but nobody has run it on a device yet: expect crashes, missing Adreno driver
+> handling and unknown performance. There is no launcher yet and no dual-screen yet. Experimental, for developers.
+
 Status (2026-10-23): the statically recompiled game runs in the fork's Android app in the emulator (API 35 image): main menu and a scripted race
 at the Thor's handheld resolution, rendered by the native Vulkan renderer on the activity surface. Next: device readiness for Adreno
 (`docs/superpowers/plans/2026-10-23-android-device-readiness.md`), then device testing on the Thor. The arm64 build exists (404 MB APK, `libyuzu-android.so` aarch64 with 1.26 M recompiled blocks, no JIT code).

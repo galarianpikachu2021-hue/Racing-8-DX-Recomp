@@ -31,7 +31,7 @@ Everything above is a row in the F10 menu. The launcher's Enhancements tab sets 
 | **DLSS upscaling / DLSS frame generation** | **experimental: compiled, not yet run on NVIDIA hardware** |
 | FSR 4 | waiting for a Vulkan release from AMD |
 | Linux (AppImage packaging, launcher with updater, mods) | working |
-| Android (Snapdragon handhelds, including dual-screen) | in development, see [docs/ANDROID.md](docs/ANDROID.md) |
+| Android (Snapdragon handhelds, including dual-screen) | **experimental and untested on real hardware**: only run in the emulator so far, see [docs/ANDROID.md](docs/ANDROID.md) (branch `android-port`) |
 | Windows | planned |
 
 ## How it works
