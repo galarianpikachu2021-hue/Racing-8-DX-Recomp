@@ -85,10 +85,10 @@ index 0ae108d9c1..3fd53ae603 100644
          virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
-index 0000000000..0cebd256aa
+index 0000000000..bb13d758a4
 --- /dev/null
 +++ b/src/common/kart_overlay.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,155 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: input path to the in-game overlay menu (suyu_cmd/native_gpu/overlay_menu.h).
 +// The window and controller drivers push navigation events here; while the menu is open the
@@ -124,9 +124,19 @@ index 0000000000..0cebd256aa
 +    return q;
 +}
 +
++inline std::atomic<bool>& RestartRequest(); // defined below
++/// Set while the Mods page has unapplied changes: the menu cannot be closed then, only "Restart now" leaves it.
++inline std::atomic<bool>& CloseLocked() {
++    static std::atomic<bool> locked{false};
++    return locked;
++}
 +/// Toggle flips the open flag at once; everything else is queued for the render thread.
 +inline void Push(Nav n) {
 +    if (n == Nav::Toggle) {
++        if (IsOpen() && CloseLocked().load()) { // leaving with unapplied mod changes restarts the game to apply them
++            RestartRequest().store(true);
++            return;
++        }
 +        OpenFlag().store(!IsOpen());
 +        return;
 +    }
@@ -139,6 +149,39 @@ index 0000000000..0cebd256aa
 +    }
 +}
 +
++/// The mods folder the game reads (<dir>/<title id>/<mod>/), set by the frontend at start-up; the overlay's Mods page lists it.
++inline std::string& ModsDir() {
++    static std::string dir;
++    return dir;
++}
++/// Set (by the main-menu hook on the Toy-Con button, now "Mods") to open the overlay on its Mods page.
++inline std::atomic<bool>& ModsPageRequest() {
++    static std::atomic<bool> req{false};
++    return req;
++}
++/// Posted by the overlay for the frontend thread: save the config (mod on/off changed), and save then restart the game.
++inline std::atomic<bool>& SaveRequest() {
++    static std::atomic<bool> req{false};
++    return req;
++}
++inline std::atomic<bool>& RestartRequest() {
++    static std::atomic<bool> req{false};
++    return req;
++}
++/// Held while Settings::values.disabled_addons is changed (render thread) or saved (frontend thread).
++inline std::mutex& SettingsLock() {
++    static std::mutex m;
++    return m;
++}
++/// The game's own command line, for RestartRequest (set by the frontend at start-up).
++inline std::vector<std::string>& LaunchArgs() {
++    static std::vector<std::string> args;
++    return args;
++}
++inline void OpenModsPage() {
++    ModsPageRequest().store(true);
++    OpenFlag().store(true);
++}
 +inline bool Pop(Nav& n) {
 +    std::scoped_lock lock{QueueLock()};
 +    if (Queue().empty()) {
@@ -250,7 +293,7 @@ index 0000000000..9839ebcc04
 +
 +} // namespace KartRe
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..af30533f29 100644
+index 408daa6839..58f3e192ff 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,16 @@ add_library(core STATIC
@@ -270,7 +313,16 @@ index 408daa6839..af30533f29 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -1226,7 +1236,7 @@ else()
+@@ -136,6 +146,8 @@ add_library(core STATIC
+     file_sys/nca_metadata.h
+     file_sys/partition_filesystem.cpp
+     file_sys/partition_filesystem.h
++    file_sys/kart_text_patch.cpp
++    file_sys/kart_text_patch.h
+     file_sys/patch_manager.cpp
+     file_sys/patch_manager.h
+     file_sys/program_metadata.cpp
+@@ -1226,7 +1238,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -618,10 +670,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..fe212d2f0d
+index 0000000000..3f2edca302
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,480 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/kart_hook_trace.h"
 +
@@ -639,6 +691,7 @@ index 0000000000..fe212d2f0d
 +#include <string>
 +
 +#include "common/fs/path_util.h"
++#include "common/kart_overlay.h"
 +#include "common/logging/log.h"
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/core.h"
@@ -858,6 +911,16 @@ index 0000000000..fe212d2f0d
 +// KARTRECOMP_TEST_CUP="17,19,21,22" (course indices) replaces the four courses of the next Grand Prix. The normal course table is not
 +// touched; only the copy in the race list is.
 +void InstallModHooks(Core::System& system, u64 load_base) {
++    // Main menu (TitleSelect page, handler main+0x4d5d58): event 0x68 is the Toy-Con button, whose case (main+0x4d6234, reached
++    // through the handler's jump table, so via the dispatcher) sends a "Labo" telemetry event and switches to the Labo page.
++    // The button is labelled "Mods" now (core/file_sys/kart_text_patch.cpp): leave the handler as for an ignored event
++    // (main+0x4d63b4 restores the frame and returns) and open the overlay's Mods page instead.
++    RecompHooks::Install(load_base + 0x4d6234, [load_base](RecompHooks::HookContext& ctx) {
++        ctx.pc = load_base + 0x4d63b4;
++        KartOverlay::OpenModsPage();
++        LOG_INFO(Core_ARM, "main menu: Mods button");
++        return true;
++    });
 +    if (const char* alias = std::getenv("KARTRECOMP_CT_ALIAS"); alias && *alias && *alias != '0') {
 +        // The 14 spare course ids 3..16 ("Reserved01..14") become CT_00..CT_13: the name table's entries are overwritten in place as soon
 +        // as the table exists (it is built lazily by the first call of the name getter, main+0x1acb0), before the startup loops that
@@ -1033,7 +1096,7 @@ index 0000000000..fe212d2f0d
 +        const u64 last = dash == std::string::npos ? first : std::strtoull(item.c_str() + dash + 1, nullptr, 16);
 +        for (u64 off = first; off <= last; off += 4) {
 +        const u64 pc = load_base + off;
-+        RecompHooks::Install(pc, [off, load_base, &system, hits = std::make_shared<std::atomic<int>>(0)](RecompHooks::HookContext& ctx) {
++        RecompHooks::Install(pc, [off, load_base, hits = std::make_shared<std::atomic<int>>(0)](RecompHooks::HookContext& ctx) {
 +            static const int cap = std::getenv("KARTRECOMP_HOOK_TRACE_CAP") ? std::atoi(std::getenv("KARTRECOMP_HOOK_TRACE_CAP")) : 12;
 +            if (hits->fetch_add(1) >= cap) return false; // the first few entries of each block are enough
 +            std::scoped_lock lock{g_lock};
@@ -1552,7 +1615,7 @@ index 0000000000..5129cdb53e
 +
 +} // namespace Core::NvnTrace
 diff --git a/src/core/cpu_manager.cpp b/src/core/cpu_manager.cpp
-index 315b273ae8..41d0eae7e3 100644
+index 315b273ae8..e4feebcffc 100644
 --- a/src/core/cpu_manager.cpp
 +++ b/src/core/cpu_manager.cpp
 @@ -4,6 +4,12 @@
@@ -1587,7 +1650,7 @@ index 315b273ae8..41d0eae7e3 100644
 +                cpu_set_t set;
 +                CPU_ZERO(&set);
 +                CPU_SET(static_cast<int>(cpu), &set);
-+                const int rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
++                const int rc = sched_setaffinity(0, sizeof(set), &set); // 0 = the calling thread (glibc and bionic)
 +                LOG_INFO(Core, "KARTRECOMP_PIN: guest core {} -> host CPU {} ({})", core, cpu, rc);
 +                break;
 +            }
@@ -1598,6 +1661,187 @@ index 315b273ae8..41d0eae7e3 100644
  #ifdef __ANDROID__
      // Aimed specifically for Snapdragon 8 Elite devices
      // This kills performance on desktop, but boosts perf for UMA devices
+diff --git a/src/core/file_sys/kart_text_patch.cpp b/src/core/file_sys/kart_text_patch.cpp
+new file mode 100644
+index 0000000000..5c5550a499
+--- /dev/null
++++ b/src/core/file_sys/kart_text_patch.cpp
+@@ -0,0 +1,121 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/file_sys/kart_text_patch.h"
++
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include "common/logging/log.h"
++#include "core/file_sys/vfs/vfs.h"
++#include "core/file_sys/vfs/vfs_vector.h"
++
++namespace FileSys::KartText {
++namespace {
++
++// Menu.msbt label of the main menu's Toy-Con button ("Toy-Con" in English; every language has it).
++constexpr char kLabel[] = "2180";
++constexpr char16_t kText[] = u"Mods";
++
++u32 U32(const std::vector<u8>& d, size_t at) {
++    u32 v = 0;
++    if (at + 4 <= d.size()) std::memcpy(&v, d.data() + at, 4);
++    return v;
++}
++u16 U16(const std::vector<u8>& d, size_t at) {
++    u16 v = 0;
++    if (at + 2 <= d.size()) std::memcpy(&v, d.data() + at, 2);
++    return v;
++}
++
++/// Rewrites the label's string in the MSBT at [base, end) in place. The string keeps its slot (the TXT2 offsets do not move): the
++/// new text and its terminator fill the front, zeros the rest. False when the label is missing or its slot is too small.
++bool PatchMsbt(std::vector<u8>& d, size_t base, size_t end) {
++    if (end - base < 0x20 || std::memcmp(d.data() + base, "MsgStdBn", 8) != 0 || U16(d, base + 8) != 0xFEFF) return false;
++    const u16 sections = U16(d, base + 0x0E);
++    size_t pos = base + 0x20;
++    bool found = false;
++    u32 index = 0;
++    size_t txt2 = 0, txt2_size = 0;
++    for (u16 s = 0; s < sections && pos + 16 <= end; ++s) {
++        const u32 size = U32(d, pos + 4);
++        const size_t body = pos + 16;
++        if (body + size > end) return false;
++        if (std::memcmp(d.data() + pos, "LBL1", 4) == 0) {
++            const u32 groups = U32(d, body);
++            for (u32 g = 0; g < groups && !found; ++g) {
++                const u32 count = U32(d, body + 4 + g * 8);
++                size_t p = body + U32(d, body + 8 + g * 8);
++                for (u32 k = 0; k < count && p < body + size; ++k) {
++                    const u8 len = d[p];
++                    if (len == sizeof(kLabel) - 1 && std::memcmp(d.data() + p + 1, kLabel, len) == 0) {
++                        index = U32(d, p + 1 + len);
++                        found = true;
++                        break;
++                    }
++                    p += 1 + len + 4;
++                }
++            }
++        } else if (std::memcmp(d.data() + pos, "TXT2", 4) == 0) {
++            txt2 = body;
++            txt2_size = size;
++        }
++        pos = body + ((size + 15) & ~size_t{15});
++    }
++    if (!found || txt2 == 0) return false;
++    const u32 n = U32(d, txt2);
++    if (index >= n) return false;
++    const size_t from = txt2 + U32(d, txt2 + 4 + index * 4);
++    const size_t to = index + 1 < n ? txt2 + U32(d, txt2 + 8 + index * 4) : txt2 + txt2_size;
++    if (to <= from || to - from < sizeof(kText)) return false; // sizeof includes the terminator
++    std::memset(d.data() + from, 0, to - from);
++    std::memcpy(d.data() + from, kText, sizeof(kText));
++    return true;
++}
++
++/// The Menu.msbt member of a message archive (uncompressed SARC), patched; false when it could not be.
++bool PatchSarc(std::vector<u8>& d) {
++    if (d.size() < 0x28 || std::memcmp(d.data(), "SARC", 4) != 0 || U16(d, 6) != 0xFEFF ||
++        std::memcmp(d.data() + 0x14, "SFAT", 4) != 0) {
++        return false;
++    }
++    const u32 data_off = U32(d, 0x0C);
++    const u16 count = U16(d, 0x1A);
++    const size_t nodes = 0x20, names = nodes + count * 16 + 8;
++    if (names > d.size() || std::memcmp(d.data() + nodes + count * 16, "SFNT", 4) != 0) return false;
++    for (u16 i = 0; i < count; ++i) {
++        const size_t node = nodes + i * 16;
++        const u32 attr = U32(d, node + 4);
++        if (attr >> 24 != 1) continue;
++        const size_t name = names + (attr & 0xFFFFFF) * 4;
++        if (name + 10 > d.size() || std::strncmp(reinterpret_cast<const char*>(d.data() + name), "Menu.msbt", 10) != 0) continue;
++        const size_t start = data_off + U32(d, node + 8), end = data_off + U32(d, node + 12);
++        return end <= d.size() && start < end && PatchMsbt(d, start, end);
++    }
++    return false;
++}
++
++} // namespace
++
++VirtualDir MakeMenuTextLayer(const VirtualDir& romfs) {
++    const VirtualDir ui = romfs ? romfs->GetSubdirectory("UI") : nullptr;
++    if (!ui) return nullptr;
++    std::vector<VirtualDir> langs;
++    for (const auto& lang : ui->GetSubdirectories()) {
++        const VirtualFile file = lang->GetFile("message.sarc");
++        if (!file) continue;
++        std::vector<u8> bytes = file->ReadAllBytes();
++        if (!PatchSarc(bytes)) {
++            LOG_WARNING(Loader, "kart-recomp: main menu text not changed for {}", lang->GetName());
++            continue;
++        }
++        auto patched = std::make_shared<VectorVfsFile>(std::move(bytes), "message.sarc");
++        langs.push_back(std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{patched}, std::vector<VirtualDir>{},
++                                                             lang->GetName()));
++    }
++    if (langs.empty()) return nullptr;
++    LOG_INFO(Loader, "kart-recomp: main menu Toy-Con button renamed to Mods ({} languages)", langs.size());
++    auto ui_layer = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{}, std::move(langs), "UI");
++    return std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{}, std::vector<VirtualDir>{ui_layer}, "romfs");
++}
++
++} // namespace FileSys::KartText
+diff --git a/src/core/file_sys/kart_text_patch.h b/src/core/file_sys/kart_text_patch.h
+new file mode 100644
+index 0000000000..6829fd4368
+--- /dev/null
++++ b/src/core/file_sys/kart_text_patch.h
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++#include "core/file_sys/vfs/vfs_types.h"
++
++namespace FileSys::KartText {
++
++/// kart-recomp: for MK8D, a RomFS layer (to put above everything else) with each UI/<lang>/message.sarc of `romfs` rewritten so
++/// the main menu's Toy-Con button reads "Mods" (it opens the KartRecomp mod page instead). Built from the files the game would
++/// otherwise see, mods included. Null when there is nothing to change.
++VirtualDir MakeMenuTextLayer(const VirtualDir& romfs);
++
++} // namespace FileSys::KartText
+diff --git a/src/core/file_sys/patch_manager.cpp b/src/core/file_sys/patch_manager.cpp
+index 721934ebf1..036253c5a8 100644
+--- a/src/core/file_sys/patch_manager.cpp
++++ b/src/core/file_sys/patch_manager.cpp
+@@ -25,6 +25,7 @@
+ #include "core/file_sys/control_metadata.h"
+ #include "core/file_sys/ips_layer.h"
+ #include "core/file_sys/patch_manager.h"
++#include "core/file_sys/kart_text_patch.h"
+ #include "core/file_sys/registered_cache.h"
+ #include "core/file_sys/romfs.h"
+ #include "core/file_sys/vfs/vfs_cached.h"
+@@ -585,8 +586,10 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
+         }
+     }
+ 
++    // kart-recomp: MK8D always gets its main-menu text layer (Toy-Con -> Mods), with or without mods.
++    const bool kart_text = title_id == 0x0100152000022000ULL && type == ContentRecordType::Program;
+     // When there are no layers to apply, return early as there is no need to rebuild the RomFS
+-    if (layers.empty() && layers_ext.empty()) {
++    if (layers.empty() && layers_ext.empty() && !kart_text) {
+         return;
+     }
+ 
+@@ -598,6 +601,11 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
+     layers.emplace_back(std::move(extracted));
+ 
+     auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
++    if (kart_text && layered != nullptr) {
++        if (auto top = KartText::MakeMenuTextLayer(layered)) {
++            layered = LayeredVfsDirectory::MakeLayeredDirectory({std::move(top), std::move(layered)});
++        }
++    }
+     auto layered_ext = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers_ext));
+     if (layered == nullptr && layered_ext == nullptr) {
+         return;
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..1b76552ee6 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
@@ -1642,6 +1886,34 @@ index fb3735988f..a02dba7d37 100644
  }
  
  void ConsumerBase::OnFrameReplaced(const BufferItem& item) {
+diff --git a/src/core/hle/service/nvnflinger/frame_pacing.h b/src/core/hle/service/nvnflinger/frame_pacing.h
+new file mode 100644
+index 0000000000..1184cf744b
+--- /dev/null
++++ b/src/core/hle/service/nvnflinger/frame_pacing.h
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: hooks between the buffer queue, the composer and the vsync conductor for adaptive vsync (see vi/conductor.cpp).
++#pragma once
++
++#include <atomic>
++
++namespace Service::Nvnflinger::Pacing {
++
++/// Set by the composer: the last composition tried to take a new frame from the game's layer and there was none, so the game
++/// is running late.
++inline std::atomic<bool>& Starved() {
++    static std::atomic<bool> v{false};
++    return v;
++}
++
++/// Called (from the game's thread) whenever the game queues a frame; set by the conductor.
++inline std::atomic<void (*)()>& OnFrameQueued() {
++    static std::atomic<void (*)()> v{nullptr};
++    return v;
++}
++
++} // namespace Service::Nvnflinger::Pacing
 diff --git a/src/core/hle/service/nvnflinger/hardware_composer.cpp b/src/core/hle/service/nvnflinger/hardware_composer.cpp
 index 8cb5a04b12..79f69b9401 100644
 --- a/src/core/hle/service/nvnflinger/hardware_composer.cpp
@@ -1844,10 +2116,10 @@ index 3cc84acfdf..1db5fe21de 100644
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..c209105c43
+index 0000000000..61c9a3ee56
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1260 @@
+@@ -0,0 +1,1267 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +
@@ -2387,6 +2659,13 @@ index 0000000000..c209105c43
 +            list.push_back(ResolveTexture(ctx, s, Mem(ctx).Read64(ctx.x[2] + i * 8)));
 +        }
 +        s.window_builders[ctx.x[0]] = std::move(list);
++    };
++    h["nvnWindowSetCrop"] = [](HookContext& ctx, State& s) {
++        const s32 x = static_cast<s32>(Arg32(ctx, 1)), y = static_cast<s32>(Arg32(ctx, 2));
++        const s32 w = static_cast<s32>(Arg32(ctx, 3)), hgt = static_cast<s32>(Arg32(ctx, 4));
++        for (auto& b : s.backends) {
++            b->OnWindowCrop(x, y, w, hgt);
++        }
 +    };
 +    h["nvnWindowInitialize"] = [](HookContext& ctx, State& s) {
 +        s.windows[ctx.x[0]] = s.window_builders[ctx.x[1]];
@@ -3110,10 +3389,10 @@ index 0000000000..c209105c43
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/nvn_host.h b/src/core/nvn_host/nvn_host.h
 new file mode 100644
-index 0000000000..eeee2c1930
+index 0000000000..66d45e856f
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.h
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,207 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: nvn-host, the native NVN implementation (shadow stage).
 +//
@@ -3267,6 +3546,9 @@ index 0000000000..eeee2c1930
 +    /// Called after each present with no model lock held: a backend that is the
 +    /// real renderer blocks here to pace the game instead of dropping frames.
 +    virtual void Throttle() {}
++    /// nvnWindowSetCrop: the part of the window textures the game actually drew (handheld mode draws 1280x720 into the 1920x1080
++    /// window textures the display layer hands out). The presented picture is this rectangle. Model lock held: don't block.
++    virtual void OnWindowCrop(s32 x, s32 y, s32 w, s32 h) {}
 +    /// nvnProgramSetShaders on a graphics program (model lock held: don't block).
 +    /// Games create programs while loading, so a backend can translate early.
 +    virtual void OnProgram(const std::vector<u64>& shader_datas) {}
@@ -3734,7 +4016,7 @@ index 0000000000..497dbb0382
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..0598d3a378 100644
+index 699980238b..d39931ab8d 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -350,17 +350,20 @@ inline constexpr int kChainBudget = 256;
@@ -3844,7 +4126,7 @@ index 699980238b..0598d3a378 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5838,10 +5849,18 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +5849,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -3862,9 +4144,17 @@ index 699980238b..0598d3a378 100644
 +          "    BlockFn f=(_slice_idx && _rel>=_slice_lo && _rel<=_slice_hi && ((_rel-_slice_lo)&3ULL)==0)\n"
 +          "        ? _slice_idx[(size_t)((_rel-_slice_lo)>>2)] : recomp_lookup(_rel);\n"
            "    if(!f)return;\n"
-           "    if(!first && --c->chain_budget<=0)return;\n"
+-          "    if(!first && --c->chain_budget<=0)return;\n"
++       << (mod == "main"
++               // kart-recomp: a block the host hooks (its byte in g_main_hookmap) goes back to the host dispatcher, which runs
++               // the hook: jump-table cases and indirect calls are only reachable here.
++               ? "    if(!first && _rel<0x1000000ULL && __builtin_expect(g_main_hookmap[_rel>>2],0))return;\n"
++               : "")
++       << "    if(!first && --c->chain_budget<=0)return;\n"
            "    first=0; f(c);\n"
-@@ -5865,7 +5884,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+           "  }\n"
+           "}\n\n"
+@@ -5865,7 +5889,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -3874,7 +4164,7 @@ index 699980238b..0598d3a378 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6888,10 +6908,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,10 +6913,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -3901,7 +4191,7 @@ index 699980238b..0598d3a378 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -7580,6 +7616,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +7621,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif

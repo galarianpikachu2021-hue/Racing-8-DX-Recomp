@@ -1,0 +1,735 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 696d155dae..bde6bb60bd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,6 +5,14 @@ cmake_minimum_required(VERSION 3.22)
+ 
+ project(suyu)
+ 
++# kart-recomp: -DKARTRECOMP_HOST_JOBS=<n> caps the compiles that run at once (and runs links one at a time): on a memory-limited build
++# machine the host's C++ and the generated game units are 1-2 GB each. The generated modules add their own "recomp_compile" pool.
++if (KARTRECOMP_HOST_JOBS AND CMAKE_GENERATOR MATCHES "Ninja")
++    set_property(GLOBAL APPEND PROPERTY JOB_POOLS host_compile=${KARTRECOMP_HOST_JOBS} host_link=1)
++    set(CMAKE_JOB_POOL_COMPILE host_compile)
++    set(CMAKE_JOB_POOL_LINK host_link)
++endif()
++
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules")
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules/find")
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/externals/cmake-modules")
+@@ -312,7 +320,9 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/hooks/pre-commit AND NOT EXISTS ${PROJECT_SOURCE
+     endif()
+ endif()
+ 
+-if (ARCHITECTURE_arm64 AND (ANDROID OR PLATFORM_LINUX))
++# kart-recomp: NCE runs the guest's own instructions on the host CPU (and needs dynarmic's decoder). A strict static build has neither
++# dynarmic nor any use for it: the game is recompiled ahead of time (SUYU_NO_JIT).
++if (ARCHITECTURE_arm64 AND (ANDROID OR PLATFORM_LINUX) AND NOT SUYU_NO_JIT)
+     set(HAS_NCE 1)
+     add_compile_definitions(HAS_NCE=1)
+ endif()
+diff --git a/src/android/app/build.gradle.kts b/src/android/app/build.gradle.kts
+index 79c0f8ee3c..61d877d622 100644
+--- a/src/android/app/build.gradle.kts
++++ b/src/android/app/build.gradle.kts
+@@ -92,6 +92,17 @@ android {
+                     )
+                 )
+ 
++                // kart-recomp: -Pkartrecomp.recompDir=<exefs tree> links the statically recompiled game in (clang for its C).
++                (project.findProperty("kartrecomp.recompDir") as String?)?.let { recompDir ->
++                    // SUYU_NO_JIT: no dynarmic in the binary at all (the recompiled game is strictly ahead-of-time; the user's rule: no JIT, ever).
++                    arguments.addAll(listOf("-DKARTRECOMP_RECOMP_DIR=$recompDir", "-DRECOMP_JOBS=1", "-DSUYU_NO_JIT=ON",
++                        // At most 4 compiles and 1 link at a time (the host's C++ and the generated units are 1-2 GB each; the
++                        // desktop this builds on has about 12 GB to spare), and line tables only instead of full debug info.
++                        "-DKARTRECOMP_HOST_JOBS=2",
++                        "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -DNDEBUG",
++                        "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g1 -DNDEBUG"))
++                }
++
+                 if (isNightly) {
+                     arguments.addAll(listOf(
+                         "-DENABLE_UPDATE_CHECKER=ON",
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
+index 5ac2de9a59..26095b6803 100644
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/NativeLibrary.kt
+@@ -160,6 +160,9 @@ object NativeLibrary {
+      */
+     external fun run(path: String?, programIndex: Int, frontendInitiated: Boolean)
+ 
++    /** kart-recomp: the player's base game and update 3.0.4 (paths or content URIs) for the statically recompiled game. */
++    external fun setExplicitContent(base: String, update: String, dlc: Array<String>)
++
+     // Surface Handling
+     external fun surfaceChanged(surf: Surface?)
+ 
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
+index 0cf455ebfb..f553e3c9fe 100644
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
+@@ -233,9 +233,17 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+         intentGame = null
+         isCustomSettingsIntent = false
+ 
++        // kart-recomp: explicit base + update 3.0.4 for the statically recompiled game (launcher / adb test hook).
++        val kartBase = intent.getStringExtra(EXTRA_KARTRECOMP_BASE)
++        val kartUpdate = intent.getStringExtra(EXTRA_KARTRECOMP_UPDATE)
+         if (intent.action == CustomSettingsHandler.CUSTOM_CONFIG_ACTION) {
+             handleEmuReadyIntent(intent)
+             return
++        } else if (kartBase != null && kartUpdate != null) {
++            NativeLibrary.setExplicitContent(
++                kartBase, kartUpdate, intent.getStringArrayExtra(EXTRA_KARTRECOMP_DLC) ?: emptyArray()
++            )
++            intentGame = Game(title = "Racing 8 DX", path = kartBase, programId = KARTRECOMP_PROGRAM_ID)
+         } else if (intentUri != null) {
+             intentGame = if (Game.extensions.contains(FileUtil.getExtension(intentUri))) {
+                 GameHelper.getGame(requireActivity().intent.data!!, false)
+@@ -2438,6 +2446,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+     }
+ 
+     companion object {
++        const val EXTRA_KARTRECOMP_BASE = "kartrecomp.base"
++        const val EXTRA_KARTRECOMP_UPDATE = "kartrecomp.update"
++        const val EXTRA_KARTRECOMP_DLC = "kartrecomp.dlc"
++        /** MK8D's title id 0100152000022000, as the decimal string Game.programId holds. */
++        const val KARTRECOMP_PROGRAM_ID = "72080821221203968"
+         private val AMIIBO_MIME_TYPES =
+             arrayOf("application/octet-stream", "application/x-binary", "*/*")
+         private val perfStatsUpdateHandler = Handler(Looper.myLooper()!!)
+diff --git a/src/android/app/src/main/jni/CMakeLists.txt b/src/android/app/src/main/jni/CMakeLists.txt
+index 799b3edce7..caca662325 100644
+--- a/src/android/app/src/main/jni/CMakeLists.txt
++++ b/src/android/app/src/main/jni/CMakeLists.txt
+@@ -28,6 +28,28 @@ if (ARCHITECTURE_arm64)
+ endif()
+ 
+ target_link_libraries(yuzu-android PRIVATE ${FFmpeg_LIBRARIES} OpenSSL::SSL cpp-jwt::cpp-jwt)
++
++# kart-recomp: the statically recompiled game (strict, no JIT) linked into the app's library. KARTRECOMP_RECOMP_DIR is one
++# export's exefs tree (tools/recomp/split_export.py output); the shared registration code and module discovery live in
++# src/kartrecomp_static_recomp.cmake, the same as the desktop static build.
++set(KARTRECOMP_RECOMP_DIR "" CACHE PATH "statically recompiled game to link in (empty = stock emulator)")
++if (KARTRECOMP_RECOMP_DIR)
++    # Generated game code for the phone's CPU: the Snapdragon 8-class baseline (ARMv8.2-A); the x86_64 emulator build keeps the defaults.
++    if (ANDROID_ABI STREQUAL "arm64-v8a")
++        set(RECOMP_OPT_FLAGS_V2 "-O2 -foptimize-sibling-calls -march=armv8.2-a" CACHE STRING "optimisation flags for the generated block bodies" FORCE)
++    endif()
++    include("${CMAKE_SOURCE_DIR}/src/kartrecomp_static_recomp.cmake")
++    kartrecomp_add_static_recomp(yuzu-android "${KARTRECOMP_RECOMP_DIR}" _kart_recomp_ok)
++    if (NOT _kart_recomp_ok)
++        message(FATAL_ERROR "KARTRECOMP_RECOMP_DIR=${KARTRECOMP_RECOMP_DIR} has no recompiled modules")
++    endif()
++    target_compile_definitions(yuzu-android PRIVATE KARTRECOMP_STATIC_RECOMP=1)
++    # The native Vulkan renderer (drawing from the game's NVN calls), presenting to the activity's surface.
++    set(_kart_gpu "${CMAKE_SOURCE_DIR}/src/suyu_cmd/native_gpu")
++    target_sources(yuzu-android PRIVATE
++        ${_kart_gpu}/vk_shadow_backend.cpp ${_kart_gpu}/upscaler.cpp ${_kart_gpu}/overlay_menu.cpp
++        ${_kart_gpu}/texture_pack.cpp ${_kart_gpu}/native_surface_android.cpp)
++endif()
+ if (ENABLE_UPDATE_CHECKER)
+     target_compile_definitions(yuzu-android PUBLIC ENABLE_UPDATE_CHECKER)
+ endif()
+diff --git a/src/android/app/src/main/jni/native.cpp b/src/android/app/src/main/jni/native.cpp
+index afd45206c1..1604a92001 100644
+--- a/src/android/app/src/main/jni/native.cpp
++++ b/src/android/app/src/main/jni/native.cpp
+@@ -91,6 +91,12 @@ extern "C" {
+ #include "input_common/drivers/virtual_amiibo.h"
+ #include "input_common/drivers/tas_input.h"
+ #include "jni/native.h"
++#include "suyu_cmd/explicit_update.h"
++#ifdef KARTRECOMP_STATIC_RECOMP
++#include "frontend_common/kart_static_recomp.h"
++#include "core/nvn_host/nvn_host.h"
++#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
++#endif
+ #include "video_core/renderer_base.h"
+ #include "video_core/renderer_vulkan/renderer_vulkan.h"
+ #include "video_core/capture.h"
+@@ -268,6 +274,11 @@ void EmulationSession::InitializeSystem(bool reload) {
+     m_system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+     m_system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+                                      m_manual_provider.get());
++#ifdef KARTRECOMP_STATIC_RECOMP
++    // The factories scan the installed firmware, whose NCA headers need the keys: load them from the keys folder first (the
++    // key manager may have been created before that folder was set, which leaves the header key all zero and the scan crashes).
++    Core::Crypto::KeyManager::Instance().ReloadKeys();
++#endif
+     m_system.GetFileSystemController().CreateFactories(*m_vfs);
+ }
+ 
+@@ -277,6 +288,11 @@ void EmulationSession::SetAppletId(int applet_id) {
+         static_cast<Service::AM::AppletId>(m_applet_id));
+ }
+ 
++// kart-recomp: explicit content (NativeLibrary.setExplicitContent), set before the emulation thread starts.
++static std::string g_explicit_base, g_explicit_update;
++static std::vector<std::string> g_explicit_dlc;
++static SuyuCli::ExplicitUpdateProvider g_explicit_provider;
++
+ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,
+                                                                const std::size_t program_index,
+                                                                const bool frontend_initiated) {
+@@ -307,7 +323,54 @@ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string
+     });
+ 
+     // Initialize filesystem.
++#ifndef KARTRECOMP_STATIC_RECOMP
+     ConfigureFilesystemProvider(filepath);
++#else
++    // kart-recomp: the statically recompiled game (strict, no JIT) boots from the player's explicit base + update 3.0.4.
++    static const bool recomp_registered = [] {
++        setenv("SUYU_RECOMP_STRICT", "1", 1);
++        setenv("KARTRECOMP_NATIVE_GPU", "native", 0);
++        return KartStaticRecomp::Register();
++    }();
++    if (!recomp_registered) {
++        return Core::SystemResultStatus::ErrorLoader;
++    }
++    KartStaticRecomp::ForceHleApplets(); // before Load: the Mii / player-select / controller applets must not be firmware programs
++    // The native renderer draws from the game's NVN calls onto this activity's surface (the desktop's
++    // KARTRECOMP_NATIVE_GPU=native exclusive mode).
++    if (Core::NvnHost::Enabled()) {
++        if (auto backend = KartRecomp::CreateVulkanShadowBackend(false, KartRecomp::MakeAndroidSurface(m_native_window))) {
++            Core::NvnHost::AddBackend(std::move(backend));
++        } else {
++            LOG_CRITICAL(Frontend, "kart-recomp: the native renderer could not start on this GPU (see the lines above)");
++            return Core::SystemResultStatus::ErrorVideoCore;
++        }
++    }
++    if (g_explicit_base.empty() || g_explicit_update.empty()) {
++        LOG_CRITICAL(Frontend, "kart-recomp: no explicit base + update given");
++        return Core::SystemResultStatus::ErrorLoader;
++    }
++    // A private content provider, as the desktop static build does: nothing else may expose this title or another update.
++    m_system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
++    m_system.SetFilesystem(m_vfs);
++    m_system.GetFileSystemController().CreateFactories(*m_vfs);
++    if (!SuyuCli::ConfigureExplicitUpdate(m_system, g_explicit_provider, g_explicit_base, g_explicit_update, {},
++                                          g_explicit_dlc)) {
++        return Core::SystemResultStatus::ErrorLoader;
++    }
++    // The emulated GPU only consumes the command stream (fences, syncpoints); the native renderer draws (as the desktop's
++    // KARTRECOMP_NATIVE_GPU=native exclusive mode). Also avoids the stock renderer's timeline-semaphore path, which emulator
++    // GPUs do not all implement.
++    Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
++    // The recompiled code is a translation of update 3.0.4 (CNMT version 1310720) only.
++    constexpr u64 kMk8dUpdateId = 0x0100152000022800ULL;
++    constexpr u32 kRecompiledVersion = 1310720;
++    if (const auto version = g_explicit_provider.GetEntryVersion(kMk8dUpdateId); version != kRecompiledVersion) {
++        LOG_CRITICAL(Frontend, "kart-recomp: explicit update refused: version {} is not 3.0.4 ({})",
++                     version.value_or(0), kRecompiledVersion);
++        return Core::SystemResultStatus::ErrorLoader;
++    }
++#endif
+ 
+     // Load the ROM.
+     Service::AM::FrontendAppletParameters params{
+@@ -715,9 +778,15 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_surfaceChanged(JNIEnv* env, jobject i
+                                                           [[maybe_unused]] jobject surf) {
+     EmulationSession::GetInstance().SetNativeWindow(ANativeWindow_fromSurface(env, surf));
+     EmulationSession::GetInstance().SurfaceChanged();
++#ifdef KARTRECOMP_STATIC_RECOMP
++    KartRecomp::SetAndroidWindow(EmulationSession::GetInstance().NativeWindow()); // the native renderer follows the new surface
++#endif
+ }
+ 
+ void Java_org_yuzu_yuzu_1emu_NativeLibrary_surfaceDestroyed(JNIEnv* env, jobject instance) {
++#ifdef KARTRECOMP_STATIC_RECOMP
++    KartRecomp::SetAndroidWindow(nullptr);
++#endif
+     if (auto* native_window = EmulationSession::GetInstance().NativeWindow(); native_window) {
+         ANativeWindow_release(native_window);
+     }
+@@ -1253,6 +1322,19 @@ void Java_org_yuzu_yuzu_1emu_NativeLibrary_run(JNIEnv* env, jobject jobj, jstrin
+     }
+ }
+ 
++void Java_org_yuzu_yuzu_1emu_NativeLibrary_setExplicitContent(JNIEnv* env, jobject jobj, jstring j_base,
++                                                              jstring j_update, jobjectArray j_dlc) {
++    g_explicit_base = Common::Android::GetJString(env, j_base);
++    g_explicit_update = Common::Android::GetJString(env, j_update);
++    g_explicit_dlc.clear();
++    const jsize count = j_dlc ? env->GetArrayLength(j_dlc) : 0;
++    for (jsize i = 0; i < count; ++i) {
++        auto item = static_cast<jstring>(env->GetObjectArrayElement(j_dlc, i));
++        g_explicit_dlc.push_back(Common::Android::GetJString(env, item));
++        env->DeleteLocalRef(item);
++    }
++}
++
+ void Java_org_yuzu_yuzu_1emu_NativeLibrary_logDeviceInfo(JNIEnv* env, jclass clazz) {
+     LOG_INFO(Frontend, "suyu Version: {}-{}", Common::g_scm_branch, Common::g_scm_desc);
+     LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
+diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
+new file mode 100644
+index 0000000000..905c2845e3
+--- /dev/null
++++ b/src/frontend_common/kart_static_recomp.cpp
+@@ -0,0 +1,261 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
++// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
++// their SUYU_RECOMP_* definitions) by src/kartrecomp_static_recomp.cmake. Moved verbatim from suyu.cpp.
++#include "frontend_common/kart_static_recomp.h"
++
++#include <algorithm>
++#include <string>
++#include <vector>
++
++#include "common/common_types.h"
++#include "common/logging/log.h"
++#include "common/settings.h"
++#include "core/arm/recomp/arm_recomp.h"
++#include "core/arm/recomp/recomp_gap_session.h"
++#include "core/arm/recomp/recomp_guard_gen.h"
++#include "core/arm/recomp/recomp_image_features.h"
++
++// Statically linked recompiled CPU modules.
++//
++// A per-game build of this executable (see SUYU_CMD_RECOMP_DIR in
++// src/suyu_cmd/CMakeLists.txt) compiles in a generated recomp_registration.c
++// that lists the game's modules in NSO load order. That makes the exported
++// game a single self-contained binary - there is nothing to LoadLibrary and no
++// recompiled_*.dll to ship beside it. The layout below must match the struct
++// the generator emits.
++extern "C" {
++struct SuyuRecompStaticModule {
++    const char* name;
++    void (*(*lookup)(u64))(void*);
++    void (*set_base)(u64);
++    void (*run_slice)(void*);
++    unsigned (*image_abi)();
++};
++#ifdef SUYU_CMD_STATIC_RECOMP
++const SuyuRecompStaticModule* suyu_recomp_static_modules_v4(unsigned* count);
++#ifdef SUYU_RECOMP_GUARD_V2
++int suyu_recomp_static_guard_v2(unsigned version);
++#endif
++#ifdef SUYU_RECOMP_FASTMEM_V1
++// ABI 6 registrations: 1 only if every module reports FM1 and accepts this
++// host's layout (see Core::GetRecompFastmemLayout).
++int suyu_recomp_static_fastmem_v1(u32 page_bits, u32 stride_log2, u64 pointer_mask,
++                                  u32 off_table, u32 off_limit);
++#endif
++#ifdef SUYU_RECOMP_FEATURES_V1
++// ABI 6 registrations: the OR of every module's recomp_image_features().
++unsigned suyu_recomp_static_features_v1(void);
++#endif
++#ifdef SUYU_RECOMP_GUARD_GEN_V1
++// ABI 6 GG1 registrations: every module's recomp_image_guard_gen_v1 result, in
++// load order. Returns the number filled, or 0 if any module refused.
++struct SuyuRecompGuardGenModule {
++    u32* word;
++    const u64* base;
++    u64 code_lo;
++    u64 code_end;
++};
++unsigned suyu_recomp_static_guard_gen_v1(u32 host_version, SuyuRecompGuardGenModule* out,
++                                         unsigned max);
++#endif
++#ifdef SUYU_RECOMP_FPX_V1
++// FPX1 registrations: nonzero (the modules' recomp_image_fpx_v1 answer) only if
++// every module reports FPX1 and accepts this host's view (Core::GetRecompFpxLayout).
++unsigned suyu_recomp_static_fpx_v1(u32 off_fpcr, u32 off_fpsr, u64 inhibit_bit);
++#endif
++#endif
++}
++
++
++namespace KartStaticRecomp {
++
++bool Register() {
++    // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
++    // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
++    // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
++    struct RecompModule {
++        Core::RecompBlockFn (*lookup)(u64){};
++        void (*set_base)(u64){};
++        Core::RecompBlockFn run_slice{};
++        unsigned image_abi{};
++        unsigned (*guard_v2)(unsigned){};
++        std::string name; // informational, for recomp_gaps.json
++    };
++    static std::vector<RecompModule> s_recomp_modules;
++    bool recomp_guard_ready = false;
++    // ABI 5 and ABI 6 (FM1 fast path) images are both accepted, but never
++    // mixed: ABI 6 extends the shared GuestContext, so one bundle has one ABI.
++    unsigned recomp_bundle_abi = 0;
++    // FPX1 (exact native FP) is all or nothing across a bundle: its kill
++    // switch is a context bit that only FPX1 modules keep from the guest.
++    // Nonzero: the handshake answer, whose low byte is the compiled fast path.
++    unsigned recomp_fpx = 0;
++    [[maybe_unused]] int recomp_fpx_modules = -1;
++    [[maybe_unused]] const auto fpx_layout = Core::GetRecompFpxLayout();
++    [[maybe_unused]] const auto accept_recomp_abi = [&recomp_bundle_abi](unsigned abi) {
++        if (abi != 5 && abi != 6) {
++            LOG_CRITICAL(Frontend, "Recompiled image ABI {} is not 5 or 6; re-export all modules",
++                         abi);
++            return false;
++        }
++        if (recomp_bundle_abi != 0 && abi != recomp_bundle_abi) {
++            LOG_CRITICAL(Frontend,
++                         "Recompiled images mix ABI {} and {}; re-export all modules together",
++                         recomp_bundle_abi, abi);
++            return false;
++        }
++        recomp_bundle_abi = abi;
++        return true;
++    };
++    [[maybe_unused]] const auto fastmem_layout = Core::GetRecompFastmemLayout();
++    // ABI 6 GG1: filled by the handshakes below, handed over after SetRecompLookup.
++    std::vector<Core::RecompGuardGen::Module> recomp_guard_gen_modules;
++
++    // Preferred path: modules compiled straight into this executable. Nothing
++    // to find on disk, nothing to load, and no version skew between the exe and
++    // its modules.
++#ifdef SUYU_CMD_STATIC_RECOMP
++    {
++        unsigned count = 0;
++        const SuyuRecompStaticModule* mods = suyu_recomp_static_modules_v4(&count);
++        for (unsigned i = 0; i < count; ++i) {
++            if (!mods[i].image_abi) {
++                LOG_CRITICAL(Frontend, "Static image predates correctness ABI 5; re-export all modules");
++                return false;
++            }
++            if (!accept_recomp_abi(mods[i].image_abi())) {
++                return false;
++            }
++            s_recomp_modules.push_back({mods[i].lookup, mods[i].set_base, mods[i].run_slice,
++                                        mods[i].image_abi(), nullptr,
++                                        mods[i].name ? mods[i].name : ""});
++            LOG_INFO(Frontend, "Static recompiled module [{}] {} — ArmRecomp active", i,
++                     mods[i].name ? mods[i].name : "?");
++        }
++#ifdef SUYU_RECOMP_GUARD_V2
++        recomp_guard_ready = suyu_recomp_static_guard_v2(2) != 0;
++#endif
++        if (recomp_bundle_abi == 6) {
++            // A feature bit is a requirement on the host: refuse any this host
++            // does not implement before trusting any other handshake.
++            bool features_known = false;
++            unsigned features = 0;
++#ifdef SUYU_RECOMP_FEATURES_V1
++            features = suyu_recomp_static_features_v1();
++            features_known = true;
++#endif
++            if (!features_known) {
++                LOG_CRITICAL(Frontend, "ABI 6 static modules predate the feature registry; "
++                                       "re-export all modules with this build");
++                return false;
++            }
++            if (const u32 unknown = Core::RecompImageFeature::Unsupported(features)) {
++                LOG_CRITICAL(Frontend,
++                             "Static recompiled modules require image features {:#x} that this "
++                             "host does not implement; update suyu or re-export with this build",
++                             unknown);
++                return false;
++            }
++            // GG1 images complete the FM1 handshake only after this one.
++            if (features & Core::RecompImageFeature::GuardGen1) {
++                bool guard_gen_ok = false;
++#ifdef SUYU_RECOMP_GUARD_GEN_V1
++                std::vector<SuyuRecompGuardGenModule> gg(count);
++                const unsigned filled = suyu_recomp_static_guard_gen_v1(
++                    Core::RecompGuardGen::kHostVersion, gg.data(), count);
++                guard_gen_ok = filled == count;
++                for (unsigned i = 0; guard_gen_ok && i < filled; ++i) {
++                    recomp_guard_gen_modules.push_back(
++                        {gg[i].word, gg[i].base, gg[i].code_lo, gg[i].code_end});
++                }
++#endif
++                if (!guard_gen_ok) {
++                    LOG_CRITICAL(Frontend, "ABI 6 static modules refused the generation guard "
++                                           "handshake; re-export all modules with this build");
++                    return false;
++                }
++            }
++            bool fastmem_ok = false;
++#ifdef SUYU_RECOMP_FASTMEM_V1
++            fastmem_ok = suyu_recomp_static_fastmem_v1(
++                             fastmem_layout.page_bits, fastmem_layout.stride_log2,
++                             fastmem_layout.pointer_mask, fastmem_layout.off_table,
++                             fastmem_layout.off_limit) == 1;
++#endif
++            if (!fastmem_ok) {
++                LOG_CRITICAL(Frontend, "ABI 6 static modules do not match this host's fastmem "
++                                       "layout; re-export all modules with this build");
++                return false;
++            }
++            if (features & Core::RecompImageFeature::ExactFpX1) {
++#ifdef SUYU_RECOMP_FPX_V1
++                recomp_fpx = suyu_recomp_static_fpx_v1(fpx_layout.off_fpcr, fpx_layout.off_fpsr,
++                                                       fpx_layout.inhibit_bit);
++#endif
++                if (!recomp_fpx) {
++                    LOG_CRITICAL(Frontend, "FPX1 static modules are mixed or do not match this "
++                                           "host's FP layout; re-export all modules with this build");
++                    return false;
++                }
++            }
++        }
++    }
++#endif
++
++    if (!s_recomp_modules.empty()) {
++        // Combined lookup: try each module's lookup until one returns non-null.
++        Core::SetRecompLookup([](u64 pc) -> Core::RecompBlockFn {
++            for (const auto& m : s_recomp_modules) {
++                if (auto fn = m.lookup(pc)) return m.run_slice ? m.run_slice : fn;
++            }
++            return nullptr;
++        });
++        const bool long_slices = std::all_of(
++            s_recomp_modules.cbegin(), s_recomp_modules.cend(), [](const RecompModule& module) {
++                return module.image_abi >= 4 && module.run_slice != nullptr;
++            });
++        Core::SetRecompLongSlices(long_slices);
++        Core::SetRecompCodeGuardReady(recomp_guard_ready);
++        LOG_INFO(Frontend, "Recompiled instruction guard-v2: {}",
++                 recomp_guard_ready ? "ready" : "not negotiated");
++        // Every ABI 6 module passed the handshake above, or loading stopped.
++        Core::SetRecompFastmemReady(recomp_bundle_abi == 6);
++        LOG_INFO(Frontend, "Recompiled image ABI {}; page-table fastmem: {}", recomp_bundle_abi,
++                 recomp_bundle_abi == 6 ? "negotiated" : "not used");
++        // After SetRecompLookup, which forgets any earlier modules, and before
++        // the process exists. Logs its own outcome.
++        Core::SetRecompGuardGenModules(std::move(recomp_guard_gen_modules));
++        // Every FPX1 module passed its handshake above, or loading stopped.
++        Core::SetRecompFpxReady(recomp_fpx != 0);
++        LOG_INFO(Frontend, "Recompiled FPX1 native FP: {} (handshake {:#x})",
++                 recomp_fpx ? "negotiated" : "not used", recomp_fpx);
++        // Route base to the module at the same index in load order.
++        // rtld=index0, main=index1, subsdk0=index2, ..., sdk=last.
++        Core::SetRecompBaseSetter([](size_t index, const char*, u64 base) {
++            if (index < s_recomp_modules.size() && s_recomp_modules[index].set_base) {
++                s_recomp_modules[index].set_base(base);
++                // Misses in this module are gaps a re-export can close.
++                Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
++            }
++        });
++    }
++    return true;
++}
++
++void ForceHleApplets() {
++    using Settings::AppletMode;
++    auto& v = Settings::values;
++    for (auto* mode : {&v.cabinet_applet_mode, &v.controller_applet_mode, &v.error_applet_mode,
++                       &v.player_select_applet_mode, &v.swkbd_applet_mode, &v.mii_edit_applet_mode,
++                       &v.web_applet_mode, &v.photo_viewer_applet_mode, &v.offline_web_applet_mode}) {
++        mode->SetValue(AppletMode::HLE);
++    }
++    for (auto* mode : {&v.data_erase_applet_mode, &v.net_connect_applet_mode, &v.shop_applet_mode,
++                       &v.login_share_applet_mode, &v.wifi_web_auth_applet_mode, &v.my_page_applet_mode}) {
++        mode->SetValue(AppletMode::HLE);
++    }
++    LOG_INFO(Frontend, "Strict static build: all library applets forced to HLE");
++}
++
++} // namespace KartStaticRecomp
+diff --git a/src/frontend_common/kart_static_recomp.h b/src/frontend_common/kart_static_recomp.h
+new file mode 100644
+index 0000000000..642d94aba8
+--- /dev/null
++++ b/src/frontend_common/kart_static_recomp.h
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++namespace KartStaticRecomp {
++
++/// Registers the recompiled modules compiled into this binary (generated recomp_registration.c) with ArmRecomp: lookup, base
++/// setter, guard, fastmem and FP handshakes. False (logged) when a module or handshake does not match this host.
++bool Register();
++
++/// A strict static build has no CPU backend for anything but the recompiled game, so every library applet (Mii editor, player
++/// select, controller, keyboard, web, ...) must be HLE: an LLE applet is a separate firmware program whose threads have no CPU
++/// interface, which hangs or kills the game thread that opened it. Call before the system loads.
++void ForceHleApplets();
++
++} // namespace KartStaticRecomp
+diff --git a/src/kartrecomp_static_recomp.cmake b/src/kartrecomp_static_recomp.cmake
+new file mode 100644
+index 0000000000..45aeef9d7e
+--- /dev/null
++++ b/src/kartrecomp_static_recomp.cmake
+@@ -0,0 +1,176 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# kart-recomp: links one export's statically recompiled modules (exefs tree with recomp_registration.c and one generated
++# module project per NSO) into an existing target, with the registry, the shared registration code
++# (frontend_common/kart_static_recomp.cpp) and the SUYU_RECOMP_* handshake definitions. Used by the desktop static build
++# (suyu_cmd) and the Android app (android/app/src/main/jni). Sets <ok_var> to TRUE when modules were added.
++set(KARTRECOMP_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}")
++function(kartrecomp_add_static_recomp target recomp_dir ok_var)
++    set(${ok_var} FALSE PARENT_SCOPE)
++    if (NOT EXISTS "${recomp_dir}/recomp_registration.c")
++        message(FATAL_ERROR "${recomp_dir} has no recomp_registration.c")
++    endif()
++    if (NOT EXISTS "${recomp_dir}/recomp_abi_v4.h")
++        message(FATAL_ERROR
++            "This static module registry predates ABI 4. Re-export the title before building.")
++    endif()
++    enable_language(C)
++    # Tells the generated module projects to emit only the static library,
++    # skipping their portable standalone exe (whose target name would
++    # collide between modules) and their loadable shared image.
++    set(RECOMP_STATIC_ONLY ON)
++    set(_recomp_libs "")
++    # Generated block bodies re-declare temporaries per guest block and
++    # leave results unused wherever the original instruction's value is
++    # dead, so suyu's warnings-as-errors fire constantly on machine-written
++    # code that nobody is going to read, let alone edit. -Wshadow alone
++    # fails the build on Mario Kart 8 Deluxe's main module. The MSVC branch
++    # of the generated CMakeLists already silences its equivalents; do the
++    # same for everyone else by dropping -Werror for these subdirectories
++    # only. The host's own flags are restored once they have been added, so
++    # suyu's sources keep the full set.
++    get_directory_property(_recomp_host_opts COMPILE_OPTIONS)
++    set(_recomp_quiet_opts "${_recomp_host_opts}")
++    # Matched anywhere in the element, not anchored: these arrive wrapped
++    # in a generator expression, e.g.
++    # "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror=shadow>", so an anchored pattern
++    # matches none of them and silently leaves the build exactly as it was.
++    list(FILTER _recomp_quiet_opts EXCLUDE REGEX "-Werror|/WX")
++    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_recomp_quiet_opts}")
++    # file(GLOB) treats [ ] * ? in the WHOLE path as glob syntax, not just
++    # the trailing "/*" - a title whose exported folder name carries its
++    # title ID in brackets (e.g. "Pokemon Sword[0100ABF008968000][US][v0]",
++    # produced whenever a ROM has no NACP title to name the folder from)
++    # silently matches nothing, so every module looks missing even though
++    # recomp_export.c/CMakeLists.txt are sitting right there on disk.
++    # Escaping each special character to its bracket-literal form before
++    # globbing keeps this working for any export path, not just ones that
++    # happen to avoid those characters.
++    # Order matters: each replacement's own output must not be re-mangled
++    # by a later replacement, so "[" goes through a placeholder that
++    # contains no bracket characters until every other substitution has
++    # already run.
++    set(_recomp_dir_escaped "${recomp_dir}")
++    string(REPLACE "[" "@LBRACKET@" _recomp_dir_escaped "${_recomp_dir_escaped}")
++    string(REPLACE "]" "[]]" _recomp_dir_escaped "${_recomp_dir_escaped}")
++    string(REPLACE "*" "[*]" _recomp_dir_escaped "${_recomp_dir_escaped}")
++    string(REPLACE "?" "[?]" _recomp_dir_escaped "${_recomp_dir_escaped}")
++    string(REPLACE "@LBRACKET@" "[[]" _recomp_dir_escaped "${_recomp_dir_escaped}")
++    file(GLOB _recomp_children RELATIVE "${recomp_dir}"
++         "${_recomp_dir_escaped}/*")
++    # SUYU_CMD_RECOMP_PREBUILT_DIR: the modules were already compiled by
++    # recomp_modules/ (the Windows Build export does that with clang-cl,
++    # since one CMake project has one C compiler). Link its libraries
++    # instead of compiling the generated sources in this tree.
++    if (SUYU_CMD_RECOMP_PREBUILT_DIR)
++        set(_recomp_runtime_lib "${SUYU_CMD_RECOMP_PREBUILT_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}recomp_runtime_shared${CMAKE_STATIC_LIBRARY_SUFFIX}")
++        if (NOT EXISTS "${_recomp_runtime_lib}")
++            message(FATAL_ERROR "SUYU_CMD_RECOMP_PREBUILT_DIR has no ${_recomp_runtime_lib}")
++        endif()
++        add_library(recomp_runtime_shared STATIC IMPORTED)
++        set_target_properties(recomp_runtime_shared PROPERTIES
++            IMPORTED_LOCATION "${_recomp_runtime_lib}")
++    endif()
++    foreach(_m ${_recomp_children})
++        if (EXISTS "${recomp_dir}/${_m}/CMakeLists.txt" AND
++            EXISTS "${recomp_dir}/${_m}/recomp_export.c")
++            # Each generated module carries its own frozen copy of the
++            # GuestContext layout. A cache produced before TPIDRRO_EL0 was
++            # split out of TPIDR_EL0 still folds the two registers into one
++            # field, which silently breaks IPC (the guest emits its message
++            # header outside the TLS region the kernel parses it from).
++            # Refuse to build against such a cache instead of shipping a
++            # binary that black-screens.
++            if (EXISTS "${recomp_dir}/${_m}/recomp_runtime.h")
++                file(READ "${recomp_dir}/${_m}/recomp_runtime.h" _rt_h)
++                if (NOT _rt_h MATCHES "#define RECOMP_IMAGE_ABI ([56])")
++                    message(FATAL_ERROR "Module '${_m}' predates correctness ABI 5; re-export ALL modules")
++                endif()
++                # ABI 6 extends the GuestContext that all modules share
++                # with one runtime, so a bundle must not mix ABIs.
++                set(_m_abi "${CMAKE_MATCH_1}")
++                if (DEFINED _recomp_bundle_abi AND NOT _recomp_bundle_abi STREQUAL _m_abi)
++                    message(FATAL_ERROR "Module '${_m}' is ABI ${_m_abi} but others are ABI "
++                                        "${_recomp_bundle_abi}; re-export ALL modules together")
++                endif()
++                set(_recomp_bundle_abi "${_m_abi}")
++                if (NOT _rt_h MATCHES "tpidrro_el0")
++                    message(FATAL_ERROR
++                        "Recompiled module '${_m}' in ${recomp_dir} predates the "
++                        "TPIDRRO_EL0/TPIDR_EL0 split and would mis-handle IPC. "
++                        "Re-export the game to regenerate its AOT cache.")
++                endif()
++            endif()
++            if (NOT EXISTS "${recomp_dir}/${_m}/recomp_runtime.h")
++                message(FATAL_ERROR "Generated module '${_m}' has no runtime header")
++            endif()
++            if (SUYU_CMD_RECOMP_PREBUILT_DIR)
++                set(_recomp_lib "${SUYU_CMD_RECOMP_PREBUILT_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}recomp_static_${_m}${CMAKE_STATIC_LIBRARY_SUFFIX}")
++                if (NOT EXISTS "${_recomp_lib}")
++                    message(FATAL_ERROR "SUYU_CMD_RECOMP_PREBUILT_DIR has no ${_recomp_lib}")
++                endif()
++                add_library(recomp_static_${_m} STATIC IMPORTED)
++                set_target_properties(recomp_static_${_m} PROPERTIES
++                    IMPORTED_LOCATION "${_recomp_lib}"
++                    INTERFACE_LINK_LIBRARIES recomp_runtime_shared)
++                list(APPEND _recomp_libs "recomp_static_${_m}")
++                continue()
++            endif()
++            add_subdirectory("${recomp_dir}/${_m}"
++                             "${CMAKE_CURRENT_BINARY_DIR}/recomp/${_m}")
++            # The generated CMakeLists renames each module's exported
++            # symbols so that several modules can share one binary, but
++            # its list predates these three and every module defines
++            # them, so linking more than one fails on duplicates.
++            # Rename them the same way until the emitter does.
++            # (recomp_modules/CMakeLists.txt repeats this.)
++            target_compile_definitions(recomp_static_${_m} PRIVATE
++                recomp_image_index=recomp_image_index_${_m}
++                _recomp_index_view=_recomp_index_view_${_m}
++                recomp_build_index=recomp_build_index_${_m})
++            list(APPEND _recomp_libs "recomp_static_${_m}")
++        endif()
++    endforeach()
++    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_recomp_host_opts}")
++    if (_recomp_libs)
++        target_sources(${target} PRIVATE "${recomp_dir}/recomp_registration.c"
++                       "${KARTRECOMP_SRC_DIR}/frontend_common/kart_static_recomp.cpp")
++        target_compile_definitions(${target} PRIVATE SUYU_CMD_STATIC_RECOMP=1)
++        if (NOT SUYU_RECOMP_HYBRID)
++            target_compile_definitions(${target} PRIVATE
++                                       SUYU_CMD_STATIC_RECOMP_STRICT=1)
++        else()
++            target_compile_definitions(${target} PRIVATE
++                                       SUYU_CMD_STATIC_RECOMP_HYBRID=1)
++        endif()
++        if (EXISTS "${recomp_dir}/recomp_guard_v2.h")
++            target_compile_definitions(${target} PRIVATE SUYU_RECOMP_GUARD_V2=1)
++        endif()
++        if (_recomp_bundle_abi STREQUAL "6")
++            if (NOT EXISTS "${recomp_dir}/recomp_fastmem_v1.h")
++                message(FATAL_ERROR "ABI 6 modules need a registry with the fastmem "
++                                    "handshake; re-export the title with this build")
++            endif()
++            target_compile_definitions(${target} PRIVATE SUYU_RECOMP_FASTMEM_V1=1)
++            # The registry's feature report, which suyu.cpp checks for bits
++            # this host does not implement before any other handshake.
++            if (NOT EXISTS "${recomp_dir}/recomp_features_v1.h")
++                message(FATAL_ERROR "ABI 6 modules need a registry with the feature "
++                                    "report; re-export the title with this build")
++            endif()
++            target_compile_definitions(${target} PRIVATE SUYU_RECOMP_FEATURES_V1=1)
++            # Generation code guard (GG1) registrations, when the export has them.
++            if (EXISTS "${recomp_dir}/recomp_guard_gen_v1.h")
++                target_compile_definitions(${target} PRIVATE SUYU_RECOMP_GUARD_GEN_V1=1)
++            endif()
++            # FPX1 registries also export suyu_recomp_static_fpx_v1.
++            if (EXISTS "${recomp_dir}/recomp_fpx_v1.h")
++                target_compile_definitions(${target} PRIVATE SUYU_RECOMP_FPX_V1=1)
++            endif()
++        endif()
++        target_link_libraries(${target} PRIVATE ${_recomp_libs})
++        set(${ok_var} TRUE PARENT_SCOPE)
++    else()
++        message(WARNING "recomp dir set but no recompiled modules found in it")
++    endif()
++
++endfunction()

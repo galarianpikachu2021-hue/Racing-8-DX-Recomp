@@ -2,7 +2,7 @@
 
 Status (2026-10-23): the statically recompiled game runs in the fork's Android app in the emulator (API 35 image): main menu and a scripted race
 at the Thor's handheld resolution, rendered by the native Vulkan renderer on the activity surface. Next: device readiness for Adreno
-(`docs/superpowers/plans/2026-10-23-android-device-readiness.md`), then the arm64 build for the Thor.
+(`docs/superpowers/plans/2026-10-23-android-device-readiness.md`), then device testing on the Thor. The arm64 build exists (404 MB APK, `libyuzu-android.so` aarch64 with 1.26 M recompiled blocks, no JIT code).
 Design: `docs/superpowers/specs/2026-10-23-android-dual-screen-design.md`. Plan: `docs/superpowers/plans/2026-10-23-android-engine-bringup.md`.
 
 ## Toolchain
@@ -18,6 +18,7 @@ tools/android/build-app.sh chromeOS relWithDebInfo                      # stock 
 KARTRECOMP_BUILD_MEM=12G tools/android/build-app.sh chromeOS relWithDebInfo \
     --recomp <exefs tree from tools/recomp/split_export.py --hot=data/mk8d-3.0.4/hot_blocks.txt>   # with the recompiled game
 tools/android/build-app.sh mainline relWithDebInfo --recomp <tree>      # arm64-v8a (the Thor), same flags
+# arm64 needs RECOMP_JOBS=1 (hot recomp units peak at 6-7 GB of clang each) and KARTRECOMP_HOST_JOBS=2 on a 15 GB PC; about 1.5 h from scratch
 ```
 
 APKs land in `local/android/`. First recomp build: about 17 minutes wall on 8 cores (about 40 CPU-minutes for 284 generated units, clang
