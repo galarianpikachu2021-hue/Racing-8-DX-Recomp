@@ -24,7 +24,7 @@ one() {  # <label> [extra env...]
   ( cd "$game"
     env KARTRECOMP_NO_MODS=1 SUYU_CMD_PERF_SAMPLE=1 KARTRECOMP_NATIVE_GPU=native KARTRECOMP_NATIVE_NOSCALE=1 KARTRECOMP_NATIVE_SHOTS=900 \
         KARTRECOMP_PROFILE=60,60 KARTRECOMP_PROFILE_OUT="$PWD/user/log/profile-spike-$label.txt" "$@" \
-        timeout -s INT 170 ./play.sh -t >/dev/null 2>&1 || true )
+        timeout -s INT 170 "./${KARTRECOMP_PLAY:-play.sh}" -t >/dev/null 2>&1 || true )
   grep -q "fully static" "$game/user/log/recomp_coverage.txt" || { echo "FAIL: $label not fully static"; exit 1; }
   case "$label" in module*) grep -aq "LoadModuleDir: Recompiled module \[3\] loaded from" "$game/user/log/suyu_log.txt" || { echo "FAIL: $label did not load the module libraries"; exit 1; } ;; esac
   local n slow
@@ -35,7 +35,7 @@ one() {  # <label> [extra env...]
 sa=0; ma=0
 for i in $(seq 1 "$runs"); do
   s=$(one "static$i" | tee /dev/stderr | sed -E 's/.*core0=([0-9]+).*/\1/'); sa=$((sa + s))
-  m=$(one "module$i" KARTRECOMP_MODULE_DIR="$moddir" | tee /dev/stderr | sed -E 's/.*core0=([0-9]+).*/\1/'); ma=$((ma + m))
+  m=$(one "module$i" KARTRECOMP_MODULE_DIR="$moddir" ${KARTRECOMP_USE_ENGINE:+KARTRECOMP_PLAY=play-engine.sh} | tee /dev/stderr | sed -E 's/.*core0=([0-9]+).*/\1/'); ma=$((ma + m))
 done
 smean=$((sa / runs)); mmean=$((ma / runs))
 echo "static mean=$smean module mean=$mmean"

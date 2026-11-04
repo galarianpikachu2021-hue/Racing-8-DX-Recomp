@@ -265,10 +265,10 @@ index afd45206c1..1604a92001 100644
      LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..f8a724bc0e
+index 0000000000..5b2bbf53ca
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,459 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
@@ -277,7 +277,10 @@ index 0000000000..f8a724bc0e
 +
 +#include <algorithm>
 +#include <cstdlib>
++#include <cstdio>
 +#include <filesystem>
++#include <fstream>
++#include <iterator>
 +#include <string>
 +#include <vector>
 +
@@ -311,7 +314,7 @@ index 0000000000..f8a724bc0e
 +    void (*run_slice)(void*);
 +    unsigned (*image_abi)();
 +};
-+#ifdef SUYU_CMD_STATIC_RECOMP
++#if defined(SUYU_CMD_STATIC_RECOMP) && !defined(KARTRECOMP_ENGINE)
 +const SuyuRecompStaticModule* suyu_recomp_static_modules_v4(unsigned* count);
 +#ifdef SUYU_RECOMP_GUARD_V2
 +int suyu_recomp_static_guard_v2(unsigned version);
@@ -518,7 +521,7 @@ index 0000000000..f8a724bc0e
 +    // Preferred path: modules compiled straight into this executable. Nothing
 +    // to find on disk, nothing to load, and no version skew between the exe and
 +    // its modules.
-+#ifdef SUYU_CMD_STATIC_RECOMP
++#if defined(SUYU_CMD_STATIC_RECOMP) && !defined(KARTRECOMP_ENGINE)
 +    {
 +        unsigned count = 0;
 +        const SuyuRecompStaticModule* mods = suyu_recomp_static_modules_v4(&count);
@@ -648,6 +651,67 @@ index 0000000000..f8a724bc0e
 +    return true;
 +}
 +
++#ifdef KARTRECOMP_ENGINE
++#ifndef KARTRECOMP_ENGINE_VERSION
++#define KARTRECOMP_ENGINE_VERSION "dev"
++#endif
++int CheckEngineModules(int& argc, char**& argv) {
++    std::string dir;
++    for (int i = 1; i < argc; ++i) {
++        if (std::string(argv[i]) == "--module-dir" && i + 1 < argc) {
++            dir = argv[i + 1];
++            for (int j = i; j + 2 < argc + 1; ++j) argv[j] = argv[j + 2]; // remove the option from what getopt sees
++            argc -= 2;
++            break;
++        }
++    }
++    if (dir.empty()) {
++        if (const char* env = std::getenv("KARTRECOMP_MODULE_DIR")) dir = env;
++    }
++    std::error_code ec;
++    if (dir.empty() || !std::filesystem::exists(std::filesystem::path(dir) / ("recompiled_image" + std::string(kLibExt)), ec)) {
++        std::fprintf(stderr, "No game has been built yet (no recompiled modules in '%s'). Build it from the launcher first.\n", dir.c_str());
++        return 5;
++    }
++    // module.json (written by the builder after a verified build) names the engine the modules were built for.
++    if (std::ifstream info{std::filesystem::path(dir) / "module.json"}) {
++        const std::string text((std::istreambuf_iterator<char>(info)), std::istreambuf_iterator<char>());
++        const std::string key = "\"engineVersion\": \"";
++        if (const auto at = text.find(key); at != std::string::npos) {
++            const auto from = at + key.size();
++            const std::string built_for = text.substr(from, text.find('"', from) - from);
++            if (built_for != KARTRECOMP_ENGINE_VERSION) {
++                std::fprintf(stderr, "These game modules were built for engine %s but this is engine %s: rebuild the game.\n",
++                             built_for.c_str(), KARTRECOMP_ENGINE_VERSION);
++                return 4;
++            }
++        }
++    }
++    std::vector<RecompModule> modules;
++    unsigned abi = 0, fpx = 0;
++    int fpx_modules = -1;
++    bool guard_ready = false;
++    std::vector<Core::RecompGuardGen::Module> gg;
++    std::string refusal;
++    const auto accept = [&](unsigned a) {
++        if (a != 5 && a != 6) { refusal = "module ABI " + std::to_string(a) + " is not supported by this engine (needs 5 or 6): rebuild the game"; return false; }
++        abi = a;
++        return true;
++    };
++    if (!LoadModuleDir(dir, modules, accept, abi, fpx, fpx_modules, guard_ready, gg, Core::GetRecompFastmemLayout(),
++                       Core::GetRecompFpxLayout())) {
++        std::fprintf(stderr, "%s\n", refusal.empty() ? "These game modules do not match this engine: rebuild the game." : refusal.c_str());
++        return 4;
++    }
++#ifdef _WIN32
++    _putenv_s("KARTRECOMP_MODULE_DIR", dir.c_str());
++#else
++    setenv("KARTRECOMP_MODULE_DIR", dir.c_str(), 1);
++#endif
++    return 0;
++}
++#endif
++
 +void ForceHleApplets() {
 +    using Settings::AppletMode;
 +    auto& v = Settings::values;
@@ -666,10 +730,10 @@ index 0000000000..f8a724bc0e
 +} // namespace KartStaticRecomp
 diff --git a/src/frontend_common/kart_static_recomp.h b/src/frontend_common/kart_static_recomp.h
 new file mode 100644
-index 0000000000..642d94aba8
+index 0000000000..11663ca04e
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,22 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -678,6 +742,13 @@ index 0000000000..642d94aba8
 +/// Registers the recompiled modules compiled into this binary (generated recomp_registration.c) with ArmRecomp: lookup, base
 +/// setter, guard, fastmem and FP handshakes. False (logged) when a module or handshake does not match this host.
 +bool Register();
++
++#ifdef KARTRECOMP_ENGINE
++/// The engine build (mk8d-engine) has no game compiled in: it loads the user's modules from a folder (`--module-dir <dir>` or
++/// KARTRECOMP_MODULE_DIR, which this sets for Register()). Call first thing in main, before anything else. Returns 0 to go on, or the
++/// process exit code, with the reason on stderr: 5 no game built yet, 4 modules built for another engine version or ABI.
++int CheckEngineModules(int& argc, char**& argv);
++#endif
 +
 +/// A strict static build has no CPU backend for anything but the recompiled game, so every library applet (Mii editor, player
 +/// select, controller, keyboard, web, ...) must be HLE: an LLE applet is a separate firmware program whose threads have no CPU
