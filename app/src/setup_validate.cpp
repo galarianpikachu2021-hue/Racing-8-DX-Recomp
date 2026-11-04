@@ -45,7 +45,7 @@ QString ValidateDlc(const QStringList& files) {
 }
 
 QString ValidateInputs(const SetupInputs& in, const std::function<NspInfo(const QString&)>& reader) {
-    if (const auto p = CheckKeys(in.keys); p != KeyProblem::None) return KeyProblemText(p);
+    if (const auto p = CheckKeys(in.keys); p != KeyProblem::None) return KeyProblemText(p, MissingKeyName(in.keys));
     if (const QString why = ValidateBase(reader(in.base)); !why.isEmpty()) return why;
     if (const QString why = ValidateUpdate(reader(in.update)); !why.isEmpty()) return why;
     if (const QString why = ValidateFirmware(in.firmware); !why.isEmpty()) return why;

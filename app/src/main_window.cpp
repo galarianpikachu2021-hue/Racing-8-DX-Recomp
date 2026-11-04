@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
+#include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -71,6 +72,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     auto* tabs = new QTabWidget;
     setup_page = new SetupPage;
     tabs->addTab(setup_page, tr("Setup"));
+    connect(setup_page, &SetupPage::playRequested, this, &MainWindow::launch); // one place starts the game
     tabs->addTab(buildPlayTab(), tr("Play"));
     tabs->addTab(buildDisplayTab(), tr("Display"));
     tabs->addTab(buildFrameRateTab(), tr("Frame rate"));
@@ -121,6 +123,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     connect(&game, &QProcess::stateChanged, this, [this](QProcess::ProcessState state) {
         const bool running = state != QProcess::NotRunning;
+        setup_page->setGameRunning(running);
         play_button->setEnabled(!running);
         stop_button->setEnabled(running);
         // The game rewrites its whole config on exit, so edits made while it runs would
@@ -136,6 +139,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     connect(&game, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
         QString summary = tr("Game exited (code %1).").arg(code);
+        if (code == 4 || code == 5) summary += QLatin1Char(' ') + tr("The built game does not match this engine, or is missing: build it again on the Setup page.");
         QFile report(package.coverageReport());
         if (report.open(QIODevice::ReadOnly | QIODevice::Text)) {
             for (const auto& line : QString::fromUtf8(report.readAll()).split(QLatin1Char('\n'))) {
@@ -148,6 +152,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         appendLog(summary + QLatin1Char('\n'));
         status_label->setText(summary);
     });
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (setup_page->isBuilding()) {
+        const auto answer = QMessageBox::question(this, tr("Build running"),
+            tr("The game is still being built. Stop the build and close? (Building again resumes where it stopped.)"));
+        if (answer != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+        setup_page->stopAndWait();
+    }
+    QMainWindow::closeEvent(event);
 }
 
 MainWindow::~MainWindow() {

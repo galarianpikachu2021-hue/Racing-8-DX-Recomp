@@ -26,6 +26,15 @@ private slots:
         QVERIFY(i.aarch64 && i.hasProgram);
         QVERIFY(i.error.isEmpty());
     }
+    void anExporterThatCrashesIsReportedAsWrongKeysOrADamagedFile() {
+        QTemporaryDir d;
+        const QString script = d.filePath("crashing-exporter.sh");
+        Write(script, "#!/bin/sh\nkill -SEGV $$\n");
+        QFile::setPermissions(script, QFile::permissions(script) | QFileDevice::ExeOwner);
+        const NspInfo info = ReadNspInfo(script, d.filePath("x.nsp"), d.filePath("prod.keys"));
+        QVERIFY(!info.error.isEmpty());
+        QVERIFY2(info.error.contains("keys") && info.error.contains("damaged"), qPrintable(info.error));
+    }
     void garbageFromTheExporterBecomesAnError() {
         QVERIFY(!ParseNspInfo("segfault").error.isEmpty());
         QVERIFY(!ParseNspInfo("").error.isEmpty());
@@ -37,6 +46,15 @@ private slots:
         QCOMPARE(CheckKeys(d.filePath("keys/prod.keys")), KeyProblem::MissingHeaderKey);
         QVERIFY(KeyProblemText(KeyProblem::MissingHeaderKey).contains("header_key"));
         QCOMPARE(CheckKeys(d.filePath("nope.keys")), KeyProblem::NoFile);
+    }
+    void aMissingDerivationKeyIsNamedExactly() {
+        QTemporaryDir d;
+        Write(d.filePath("prod.keys"), "header_key = 00\naes_kek_generation_source = 00\nkey_area_key_application_source = 00\n"
+                                       "aes_key_generation_source = 00\nmaster_key_00 = 00\n"); // no titlekek_source
+        QCOMPARE(CheckKeys(d.filePath("prod.keys")), KeyProblem::MissingDerivationKey);
+        QCOMPARE(MissingKeyName(d.filePath("prod.keys")), QString("titlekek_source"));
+        QVERIFY(KeyProblemText(KeyProblem::MissingDerivationKey, "titlekek_source").contains("titlekek_source"));
+        QVERIFY(!KeyProblemText(KeyProblem::MissingDerivationKey, "titlekek_source").contains("aes_kek_generation_source")); // only the missing one
     }
     void keysWithoutAnyMasterKeyAreRefused() {
         QTemporaryDir d;

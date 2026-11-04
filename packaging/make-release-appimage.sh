@@ -30,8 +30,15 @@ cp -a "$tc" "$appdir/usr/lib/kartrecomp/toolchain"
 cp "$repo/data/mk8d-3.0.4/hot_blocks.txt" "$appdir/usr/lib/kartrecomp/data/mk8d-3.0.4/"
 rm -f "$appdir/AppRun"; cp "$here/AppRun.release" "$appdir/AppRun"; chmod +x "$appdir/AppRun"
 echo "[3/4] Checking that nothing from a game is inside"
-bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.xci' -o -iname '*.nca' -o -iname 'prod.keys*' -o -iname 'title.keys*' -o -name 'recompiled_*.c' -o -name 'recompiled_*.so' \) | head -5)
+bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.nsz' -o -iname '*.xci' -o -iname '*.xcz' -o -iname '*.nca' -o -iname '*.nso' -o -iname '*.npdm' -o -iname 'prod.keys*' -o -iname 'title.keys*' \
+  -o -name 'recomp_*.c' -o -name 'recompiled_*' -o -name 'module.json' \) -o \( -name '*.o' -not -path '*/toolchain/*' \) | head -5)
 [ -z "$bad" ] || { echo "FAIL: game-derived files in the AppDir: $bad"; exit 1; }
+[ -e "$appdir/usr/bin/plugins/libkr_upscaler_fsr3.so" ] || echo "WARNING: no FSR 3 plugin in the release" >&2
+find "$appdir" -iname '*dlss*' -o -iname '*ngx*' | grep -q . && { echo "FAIL: DLSS/NGX files must never ship"; exit 1; }
+# The AppImage must start on common distros: refuse a release that needs a newer glibc than KARTRECOMP_MAX_GLIBC (default 2.35), unless
+# KARTRECOMP_ALLOW_NEW_GLIBC=1 (a local build on a new distro; build the engine on an older base for a real release).
+if [ -n "${KARTRECOMP_ALLOW_NEW_GLIBC:-}" ]; then "$here/glibc-floor.sh" "$appdir" || true
+else "$here/glibc-floor.sh" "$appdir" "${KARTRECOMP_MAX_GLIBC:-2.35}" || { echo "FAIL: the release needs a newer glibc than common distros ship: build the engine on an older base"; exit 1; }; fi
 echo "[4/4] Compressing the AppImage"
 ARCH=x86_64 "$tools/appimagetool-x86_64.AppImage" --comp zstd "$appdir" "$out/KartRecomp-Launcher-x86_64.AppImage" >"$work/appimagetool.log" 2>&1 \
   || { tail -20 "$work/appimagetool.log"; exit 1; }

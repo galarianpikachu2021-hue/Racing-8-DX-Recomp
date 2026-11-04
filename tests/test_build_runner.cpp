@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
+#include <thread>
 
 #include "build_runner.h"
 
@@ -26,6 +27,82 @@ private slots:
         QTemporaryDir dir;
         QVERIFY(BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 1024));
         QVERIFY(!BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 10LL * 1024 * 1024 * 1024 * 1024));
+    }
+    void aChangedBuildStampWipesTheWorkFolderAndTheSameStampKeepsIt() {
+        QTemporaryDir dir;
+        const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
+            QDir().mkpath(QFileInfo(dir.filePath(rel)).absolutePath());
+            QFile f(dir.filePath(rel));
+            f.open(QIODevice::WriteOnly);
+            f.write(text);
+        };
+        touch("export/main/recomp_export.c");
+        touch("export/main/recomp_runtime.c");
+        touch("export/main/src/recompiled_main.c");
+        touch("export/main/src/recompiled_main_0.c", "static uint32_t recomp_gg_seen[4];\nvoid blk_main_0000000000000000(GuestContext* c){\n}\nconst struct _recomp_ent _seg_main_0[] = {\n};\n");
+        touch("fakecc", "#!/bin/sh\nout=; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\necho o > \"$out\"\n");
+        QFile::setPermissions(dir.filePath("fakecc"), QFile::permissions(dir.filePath("fakecc")) | QFileDevice::ExeOwner);
+        BuildPlan plan;
+        plan.exportDir = dir.filePath("export");
+        plan.workDir = dir.filePath("work");
+        plan.outDir = dir.filePath("out");
+        plan.compiler = dir.filePath("fakecc");
+        plan.stamp = "engine-1";
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        touch("work/main/obj/old-object.o"); // something left by an earlier build
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        QVERIFY(QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // same stamp: resumed, not wiped
+        plan.stamp = "engine-2"; // a new engine, toolchain or hot list
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        QVERIFY(!QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // different stamp: everything compiled again
+    }
+    void cancelStopsTheRunningCompilerPromptly() {
+        QTemporaryDir dir;
+        const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
+            QDir().mkpath(QFileInfo(dir.filePath(rel)).absolutePath());
+            QFile f(dir.filePath(rel));
+            f.open(QIODevice::WriteOnly);
+            f.write(text);
+        };
+        touch("export/main/recomp_export.c");
+        touch("export/main/recomp_runtime.c");
+        touch("export/main/src/recompiled_main.c");
+        touch("export/main/src/recompiled_main_0.c", "static uint32_t recomp_gg_seen[4];\nvoid blk_main_0000000000000000(GuestContext* c){\n}\nconst struct _recomp_ent _seg_main_0[] = {\n};\n");
+        touch("fakecc", ("#!/bin/sh\necho $$ >> " + dir.filePath("pids") + "\nexec sleep 30\n").toLocal8Bit());
+        QFile::setPermissions(dir.filePath("fakecc"), QFile::permissions(dir.filePath("fakecc")) | QFileDevice::ExeOwner);
+        BuildPlan plan;
+        plan.exportDir = dir.filePath("export");
+        plan.workDir = dir.filePath("work");
+        plan.outDir = dir.filePath("out");
+        plan.compiler = dir.filePath("fakecc");
+        plan.jobs = 2;
+        std::atomic<bool> cancel{false};
+        std::thread stopper([&] { QThread::msleep(600); cancel = true; });
+        QElapsedTimer t;
+        t.start();
+        const auto r = BuildRunner::Build(plan, nullptr, &cancel);
+        stopper.join();
+        QVERIFY2(t.elapsed() < 6000, "cancel did not stop the compilers");
+        QVERIFY(!r.ok);
+        QVERIFY(r.message.contains("ancel"));
+        QFile pids(dir.filePath("pids"));
+        QVERIFY(pids.open(QIODevice::ReadOnly));
+        for (const QByteArray& pid : pids.readAll().split('\n'))
+            if (!pid.trimmed().isEmpty()) QVERIFY2(!QFileInfo::exists("/proc/" + pid.trimmed()), "a compiler is still running after cancel");
+    }
+    void aCompilerKilledBySignalIsReportedAsOutOfMemory() {
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("src");
+        QFile(dir.filePath("src/a.c")).open(QIODevice::WriteOnly);
+        QFile fake(dir.filePath("fakecc"));
+        fake.open(QIODevice::WriteOnly);
+        fake.write("#!/bin/sh\nkill -9 $$\n");
+        fake.close();
+        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
+        auto jobs = BuildRunner::PlanCompileJobs(dir.filePath("src"), dir.filePath("obj"), {"a.c"}, {});
+        QString err;
+        QVERIFY(!BuildRunner::RunCompileJob(dir.filePath("fakecc"), jobs[0], &err));
+        QVERIFY2(err.contains("memory"), qPrintable(err));
     }
     void aPieceWithAnObjectButNoMarkerIsPlannedAgain() {
         QTemporaryDir dir;

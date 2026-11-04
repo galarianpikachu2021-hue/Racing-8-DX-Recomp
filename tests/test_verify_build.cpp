@@ -13,8 +13,11 @@ QString MakeEngine(const QTemporaryDir& d) {
     f.write("#!/bin/sh\n"
             "cov=\"$SUYU_RECOMP_COVERAGE_PATH\"\n"
             "report() { printf '=== RECOMP EXECUTION COVERAGE ===\\n  static blocks executed : %s\\n  static -> JIT          : %s (0 lookup miss, 0 unimplemented opcode)\\n%s=== END ===\\n' \"$1\" \"$2\" \"$3\" > \"$cov\"; }\n"
+            "log=\"$XDG_DATA_HOME/kartrecomp/log/suyu_log.txt\"; mkdir -p \"$(dirname \"$log\")\"\n"
+            "frames() { for i in 1 2 3 4; do echo \"[ 1.0] Frontend <Info> x:1:f: PERF game_fps=$1 system_fps=60 frametime_ms=16 speed=1\" >> \"$log\"; done; }\n"
             "case \"$FAKE_MODE\" in\n"
-            "  good) sleep 0.3; report 2000000000 0 ''; sleep 30;;\n"
+            "  good) sleep 0.3; frames 59.9; report 2000000000 0 ''; sleep 30;;\n"
+            "  noframes) sleep 0.3; frames 0.0; report 2000000000 0 ''; sleep 30;;\n"
             "  jit) sleep 0.3; report 2000000000 5 ''; sleep 30;;\n"
             "  killed) sleep 0.3; report 2000000000 0 '  threads killed with no JIT fallback: 1\\n'; sleep 30;;\n"
             "  early) echo 'cannot open the update' >&2; exit 3;;\n"
@@ -64,6 +67,11 @@ private slots:
         const auto layout = DataLayout::FromRoots(data, cache.filePath("kartrecomp"));
         const auto r = VerifyBuild(engine, layout, 150, nullptr);
         QVERIFY2(r.ok, qPrintable(r.message));
+    }
+    void aBootThatRunsCodeButNeverPresentsFramesFails() {
+        const auto r = Run("noframes", 2);
+        QVERIFY(!r.ok);
+        QVERIFY2(r.message.contains("frames"), qPrintable(r.message));
     }
     void aBootThatNeverGetsGoingTimesOutWithAClearMessage() {
         const auto r = Run("slow", 2);

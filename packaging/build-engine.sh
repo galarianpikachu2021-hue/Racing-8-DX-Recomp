@@ -17,6 +17,16 @@ ninja -C "$build" -j"${JOBS:-3}" mk8d-engine
 mkdir -p "$out/engine/plugins"
 cp "$build/bin/mk8d-engine" "$out/engine/"
 strip -s "$out/engine/mk8d-engine" 2>/dev/null || true
-cp "$here"/plugins/*/*.so "$out/engine/plugins/" 2>/dev/null || true
+# FSR 3 upscaling and frame generation (MIT, built by plugins/fsr3/build.sh) ship; the DLSS plugin never does (NVIDIA's licence).
+fsr=""
+for d in "${KARTRECOMP_PLUGINS_DIR:-}" "$HOME/.cache/kartrecomp-fsr3" "$here/local/game/plugins"; do
+  [ -n "$d" ] && [ -f "$d/libkr_upscaler_fsr3.so" ] && { fsr="$d/libkr_upscaler_fsr3.so"; break; }
+done
+if [ -n "$fsr" ]; then
+  cp "$fsr" "$out/engine/plugins/"
+  ln -sf libkr_upscaler_fsr3.so "$out/engine/plugins/libkr_framegen_fsr3.so"
+else
+  echo "WARNING: libkr_upscaler_fsr3.so not found: the release would have no FSR 3 plugins (run plugins/fsr3/build.sh)" >&2
+fi
 echo "$version" > "$out/engine/ENGINE_VERSION"
 ls -l "$out/engine"

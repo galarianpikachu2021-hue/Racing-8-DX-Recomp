@@ -11,6 +11,11 @@
 #include <mutex>
 #include <thread>
 
+#ifdef Q_OS_LINUX
+#include <signal.h>
+#include <sys/prctl.h>
+#endif
+
 #include "unit_split.h"
 
 namespace {
@@ -57,20 +62,44 @@ bool BuildRunner::IsDone(const CompileJob& job) {
     return QFile::exists(job.object) && QFile::exists(job.marker);
 }
 
-bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, QString* error) {
+void BuildRunner::DieWithParent(QProcess& process) {
+#ifdef Q_OS_LINUX
+    // A child must never outlive the launcher (a closed window, a crash): the kernel kills it when its parent thread ends.
+    process.setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+#else
+    Q_UNUSED(process)
+#endif
+}
+
+bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, QString* error, const std::atomic<bool>* cancel) {
     QFile::remove(job.marker);
     QFile::remove(job.object);
     QDir().mkpath(QFileInfo(job.object).absolutePath());
     QProcess p;
     p.setProcessChannelMode(QProcess::SeparateChannels);
+    DieWithParent(p);
     p.start(compiler, job.args + QStringList{"-c", job.source, "-o", job.object});
     if (!p.waitForStarted()) {
         if (error) *error = QStringLiteral("cannot start %1").arg(compiler);
         return false;
     }
-    p.waitForFinished(-1);
-    if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0 || !QFile::exists(job.object)) {
-        if (error) *error = QString::fromLocal8Bit(p.readAllStandardError()).trimmed();
+    while (!p.waitForFinished(200)) {
+        if (cancel && cancel->load()) {
+            p.kill();
+            p.waitForFinished();
+            QFile::remove(job.object);
+            if (error) *error = QStringLiteral("Cancelled.");
+            return false;
+        }
+    }
+    if (p.exitStatus() != QProcess::NormalExit) {
+        QFile::remove(job.object);
+        if (error) *error = QStringLiteral("The compiler was stopped, most likely because the PC ran out of memory. Close other programs and press Build again: it resumes where it stopped.");
+        return false;
+    }
+    if (p.exitCode() != 0 || !QFile::exists(job.object)) {
+        const QString text = QString::fromLocal8Bit(p.readAllStandardError()).trimmed();
+        if (error) *error = text.contains(QStringLiteral("No space left")) ? QStringLiteral("Out of disk space. Free some space and press Build again: it resumes where it stopped.") : text;
         QFile::remove(job.object);
         return false;
     }
@@ -92,6 +121,17 @@ void BuildPlan::useToolchain(const QString& t) {
 
 BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(int, int, const QString&)>& progress,
                                const std::atomic<bool>* cancel) {
+    // What the work folder holds is only valid for the engine, toolchain and hot list it was made with.
+    if (!plan.stamp.isEmpty()) {
+        const QString stampFile = QDir(plan.workDir).filePath("STAMP");
+        QFile old(stampFile);
+        const bool same = old.open(QIODevice::ReadOnly) && old.readAll().trimmed() == plan.stamp.toUtf8();
+        old.close();
+        if (!same) QDir(plan.workDir).removeRecursively();
+        QDir().mkpath(plan.workDir);
+        QFile fresh(stampFile);
+        if (fresh.open(QIODevice::WriteOnly)) fresh.write(plan.stamp.toUtf8() + "\n");
+    }
     QSet<QByteArray> hot;
     if (!plan.hotList.isEmpty()) {
         QFile f(plan.hotList);
@@ -158,7 +198,7 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
             }
             QString error;
             const CompileJob& job = *pending[i];
-            const bool ok = RunCompileJob(plan.compiler, job, &error);
+            const bool ok = RunCompileJob(plan.compiler, job, &error, cancel);
             std::lock_guard<std::mutex> lock(mutex);
             if (!ok) {
                 if (failure.isEmpty()) failure = QStringLiteral("compiling %1 failed: %2").arg(QFileInfo(job.source).fileName(), error);
@@ -180,9 +220,12 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
         for (const CompileJob& j : m.jobs) objects << j.object;
         const QString out = QDir(plan.outDir).filePath(QStringLiteral("recompiled_%1.so").arg(m.name));
         QProcess link;
+        DieWithParent(link);
         link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{"-o", out} + objects +
                        QStringList{"-lm", "-lc"} + plan.builtins);
-        link.waitForFinished(-1);
+        while (!link.waitForFinished(200)) {
+            if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); return {false, QStringLiteral("Cancelled.")}; }
+        }
         if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0)
             return {false, QStringLiteral("linking %1 failed: %2").arg(out, QString::fromLocal8Bit(link.readAllStandardError()).trimmed())};
         if (progress) progress(total, total, QStringLiteral("linked %1").arg(QFileInfo(out).fileName()));

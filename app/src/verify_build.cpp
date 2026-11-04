@@ -8,6 +8,8 @@
 #include <QRegularExpression>
 #include <QThread>
 
+#include "build_runner.h"
+
 namespace {
 // Blocks run by the guest when the title is in its main loop (a real boot runs billions within a minute); far above the loader's own work.
 constexpr qint64 kMainLoopBlocks = 1'000'000'000;
@@ -33,6 +35,20 @@ Coverage ReadCoverage(const QString& path) {
     c.killed = text.contains("threads killed");
     return c;
 }
+// Seconds in which the game presented frames at a real rate (PERF sampling lines in the engine's log): a game stuck in an error or wait
+// loop can run plenty of code without ever drawing the title.
+int PresentingSeconds(const QString& logPath) {
+    QFile f(logPath);
+    if (!f.open(QIODevice::ReadOnly)) return 0;
+    static const QRegularExpression fps(QStringLiteral("PERF game_fps=([0-9.]+)"));
+    int seconds = 0;
+    for (const QByteArray& line : f.readAll().split('\n')) {
+        const auto m = fps.match(QString::fromLatin1(line));
+        if (m.hasMatch() && m.captured(1).toDouble() >= 10.0) ++seconds;
+    }
+    return seconds;
+}
+constexpr int kFrameSeconds = 3;
 } // namespace
 
 VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int timeoutSec, const std::atomic<bool>* cancel) {
@@ -45,12 +61,14 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     env.insert("XDG_CACHE_HOME", QFileInfo(layout.cacheRoot).absolutePath());
     env.insert("XDG_CONFIG_HOME", layout.cacheRoot + "/verify/config"); // a throwaway config: the user's own settings must not change the check
     env.insert("KARTRECOMP_VERIFY_BOOT", "1");
+    env.insert("SUYU_CMD_PERF_SAMPLE", "1"); // one "PERF game_fps=..." line per second in the log: the proof that frames were presented
     env.insert("SUYU_RECOMP_COVERAGE_PATH", coveragePath);
     env.insert("SDL_VIDEODRIVER", "dummy"); // no window: the Null renderer needs no display
     env.insert("SDL_AUDIODRIVER", "dummy");
     env.remove("KARTRECOMP_NATIVE_GPU");
     env.insert("KARTRECOMP_NO_MODS", "1");
     QProcess p;
+    BuildRunner::DieWithParent(p);
     p.setProcessEnvironment(env);
     p.setWorkingDirectory(QFileInfo(engine).absolutePath());
     p.start(engine, {"--module-dir", layout.moduleDir(), "--content-base", layout.base(), "--content-update", layout.update()});
@@ -74,11 +92,14 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
             return {false, c.killed ? QStringLiteral("The game's test boot lost a thread: some code was not recompiled.")
                                     : QStringLiteral("The build is not fully static (%1 transitions to a JIT, which this project never allows).").arg(c.jit)};
         }
-        if (c.blocks >= kMainLoopBlocks) {
+        if (c.blocks >= kMainLoopBlocks && PresentingSeconds(layout.dataRoot + "/log/suyu_log.txt") >= kFrameSeconds) {
             stop();
             return {true, {}};
         }
     }
+    const Coverage last = ReadCoverage(coveragePath);
     stop();
+    if (last.present && last.blocks >= kMainLoopBlocks)
+        return {false, QStringLiteral("The game ran but never presented frames in %1 s of the test boot: it is probably stuck (check the firmware and keys).").arg(timeoutSec)};
     return {false, QStringLiteral("The game did not reach its main loop within %1 s of the test boot.").arg(timeoutSec)};
 }

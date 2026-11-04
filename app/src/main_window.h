@@ -33,6 +33,9 @@ signals:
     void importProgress(int done, int total, const QString& name);
     void importFinished(bool ok, const QString& error);
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private:
     QWidget* buildPlayTab();
     QWidget* buildDisplayTab();

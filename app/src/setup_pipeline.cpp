@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "setup_pipeline.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -21,6 +22,15 @@ qint64 AvailableRam() {
     return 8LL << 30;
 }
 bool Cancelled(const std::atomic<bool>* c) { return c && c->load(); }
+QString FileText(const QString& path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).trimmed() : QString();
+}
+QString FileHash(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    return QString::fromLatin1(QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256).toHex().left(16));
+}
 } // namespace
 
 PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout, const BuilderPaths& paths,
@@ -44,12 +54,14 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     report(5, QStringLiteral("Installing your files"));
     if (const QString err = InstallInputs(in, layout); !err.isEmpty()) return {false, err};
     QDir(layout.moduleDir()).removeRecursively(); // a half-finished earlier build must not look built
+    QDir(layout.exportDir()).removeRecursively(); // always regenerated (about 2 s): never mix two exports
     QDir().mkpath(layout.exportDir());
 
     report(10, QStringLiteral("Reading the game"));
     {
         QProcess ex;
         ex.setProcessChannelMode(QProcess::SeparateChannels);
+        BuildRunner::DieWithParent(ex);
         ex.start(paths.exporter, {"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"});
         if (!ex.waitForStarted()) return {false, QStringLiteral("Cannot start the exporter (%1).").arg(paths.exporter)};
         while (!ex.waitForFinished(200)) {
@@ -72,6 +84,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     plan.outDir = layout.moduleDir();
     plan.hotList = paths.hotList;
     plan.jobs = jobs;
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(paths.hotList);
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QStringLiteral("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);

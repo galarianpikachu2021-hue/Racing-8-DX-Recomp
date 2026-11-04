@@ -44,7 +44,9 @@ struct Fixture {
         paths.engine = dir.filePath("engine.sh");
         paths.engineVersion = "v1";
         Write(paths.engine,
-              "#!/bin/sh\nprintf '=== X ===\\n  static blocks executed : 2000000000\\n  static -> JIT          : 0 (0 lookup miss, 0 unimplemented opcode)\\n' > \"$SUYU_RECOMP_COVERAGE_PATH\"\nsleep 30\n", true);
+              "#!/bin/sh\nlog=\"$XDG_DATA_HOME/kartrecomp/log/suyu_log.txt\"; mkdir -p \"$(dirname \"$log\")\"\n"
+              "for i in 1 2 3 4; do echo \"PERF game_fps=60.0\" >> \"$log\"; done\n"
+              "printf '=== X ===\\n  static blocks executed : 2000000000\\n  static -> JIT          : 0 (0 lookup miss, 0 unimplemented opcode)\\n' > \"$SUYU_RECOMP_COVERAGE_PATH\"\nsleep 30\n", true);
         paths.hotList = dir.filePath("hot.txt");
         Write(paths.hotList, "blk_main_0000000000000000\n");
     }
@@ -64,6 +66,20 @@ private slots:
         QVERIFY(QFile::exists(f.layout.base()) && QFile::exists(f.layout.keysFile()));
         QVERIFY(std::is_sorted(marks.begin(), marks.end()));
         QCOMPARE(marks.last(), 1000);
+    }
+    void aNewEngineVersionRebuildsEverythingAndAStaleExportIsCleared() {
+        Fixture f;
+        const auto touch = [&](const QString& path) { Write(path, "x"); };
+        QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
+        touch(f.layout.workDir() + "/main/obj/sentinel.o");
+        touch(f.layout.exportDir() + "/stale-from-an-older-export.txt");
+        QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
+        QVERIFY(QFile::exists(f.layout.workDir() + "/main/obj/sentinel.o"));      // same engine: resumed
+        QVERIFY(!QFile::exists(f.layout.exportDir() + "/stale-from-an-older-export.txt")); // the export is regenerated every time
+        f.paths.engineVersion = "v2";
+        QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
+        QVERIFY(!QFile::exists(f.layout.workDir() + "/main/obj/sentinel.o"));     // new engine: everything compiled again
+        QVERIFY(IsBuilt(f.layout, "v2"));
     }
     void an32BitUpdateStopsBeforeAnythingIsInstalled() {
         Fixture f("old-update.nsp");

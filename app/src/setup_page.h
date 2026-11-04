@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <atomic>
 #include <memory>
+#include <thread>
 
 #include "setup_paths.h"
 #include "setup_validate.h"
@@ -21,8 +22,15 @@ public:
     explicit SetupPage(QWidget* parent = nullptr);
     ~SetupPage() override;
 
+    bool isBuilding() const { return building; }
+    /// Cancels a running build and waits until it has stopped (every child process is killed). Safe to call any time.
+    void stopAndWait();
+    /// The main window owns the game process: while it runs, building (which replaces the modules) and a second Play are off.
+    void setGameRunning(bool running);
+
 signals:
     void builtChanged(bool built);
+    void playRequested();
 
 private:
     struct Row {
@@ -37,7 +45,6 @@ private:
     void build();
     void cancel();
     void finishBuild(bool ok, const QString& message);
-    void play();
     void refreshButtons();
     void saveInputs() const;
 
@@ -48,7 +55,8 @@ private:
     QPushButton *buildButton, *cancelButton, *playButton;
     QProgressBar* bar;
     QLabel* message;
-    QProcess game;
+    std::thread worker;
+    bool gameRunning = false;
     std::atomic<bool> cancelFlag{false};
     bool building = false;
     bool inputsValid = false;

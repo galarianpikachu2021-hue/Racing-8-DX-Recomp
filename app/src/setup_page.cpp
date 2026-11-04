@@ -64,7 +64,7 @@ SetupPage::SetupPage(QWidget* parent)
 
     connect(buildButton, &QPushButton::clicked, this, &SetupPage::build);
     connect(cancelButton, &QPushButton::clicked, this, &SetupPage::cancel);
-    connect(playButton, &QPushButton::clicked, this, &SetupPage::play);
+    connect(playButton, &QPushButton::clicked, this, &SetupPage::playRequested);
     QSettings s;
     base.edit->setText(s.value("setup/base").toString());
     update.edit->setText(s.value("setup/update").toString());
@@ -79,7 +79,17 @@ SetupPage::SetupPage(QWidget* parent)
     if (QFileInfo::exists(layout.moduleDir())) emit builtChanged(IsBuilt(layout, paths.engineVersion));
 }
 
-SetupPage::~SetupPage() { cancelFlag = true; }
+SetupPage::~SetupPage() { stopAndWait(); }
+
+void SetupPage::stopAndWait() {
+    cancelFlag = true;
+    if (worker.joinable()) worker.join();
+}
+
+void SetupPage::setGameRunning(bool running) {
+    gameRunning = running;
+    refreshButtons();
+}
 
 SetupPage::Row SetupPage::addRow(QGridLayout* grid, int r, const QString& title, const QString& hint, std::function<void()> browse) {
     Row row;
@@ -122,7 +132,7 @@ void SetupPage::revalidate() {
     const auto show = [](Row& r, const QString& reason, bool empty) { r.status->setText(empty ? QString() : StatusText(reason)); };
     // keys first: opening an NSP needs them
     const KeyProblem kp = in.keys.isEmpty() ? KeyProblem::None : CheckKeys(in.keys);
-    show(keys, KeyProblemText(kp), in.keys.isEmpty());
+    show(keys, KeyProblemText(kp, MissingKeyName(in.keys)), in.keys.isEmpty());
     const bool keysOk = !in.keys.isEmpty() && kp == KeyProblem::None;
     const auto read = [&](const QString& p) { return ReadNspInfo(paths.exporter, p, in.keys); };
     const auto nspReason = [&](const QString& path, bool isBase) -> QString {
@@ -145,10 +155,10 @@ void SetupPage::revalidate() {
 
 void SetupPage::refreshButtons() {
     const bool built = IsBuilt(layout, paths.engineVersion);
-    buildButton->setEnabled(inputsValid && !building);
+    buildButton->setEnabled(inputsValid && !building && !gameRunning);
     buildButton->setText(QFileInfo::exists(layout.workDir()) ? tr("Rebuild game") : tr("Build game"));
     cancelButton->setEnabled(building);
-    playButton->setEnabled(built && !building && game.state() == QProcess::NotRunning);
+    playButton->setEnabled(built && !building && !gameRunning);
     if (!building) bar->setValue(built ? bar->maximum() : 0);
 }
 
@@ -160,7 +170,8 @@ void SetupPage::build() {
     cancelFlag = false;
     refreshButtons();
     const SetupInputs in = inputs();
-    std::thread([this, in] {
+    if (worker.joinable()) worker.join(); // the previous run has finished (its result was delivered)
+    worker = std::thread([this, in] {
         const auto result = RunSetupPipeline(in, layout, paths, [this](int permille, const QString& text) {
             QMetaObject::invokeMethod(this, [this, permille, text] {
                 bar->setValue(permille);
@@ -168,7 +179,7 @@ void SetupPage::build() {
             });
         }, &cancelFlag);
         QMetaObject::invokeMethod(this, [this, result] { finishBuild(result.ok, result.message); });
-    }).detach();
+    });
 }
 
 void SetupPage::finishBuild(bool ok, const QString& text) {
@@ -194,17 +205,4 @@ void SetupPage::saveInputs() const {
     s.setValue("setup/keys", keys.edit->text());
     s.setValue("setup/firmware", firmware.edit->text());
     s.setValue("setup/dlc", dlc);
-}
-
-void SetupPage::play() {
-    QStringList args = {"--module-dir", layout.moduleDir(), "--content-base", layout.base(), "--content-update", layout.update()};
-    for (const QString& f : QDir(layout.dlcDir()).entryList({"*.nsp"}, QDir::Files)) args << "--content-dlc" << layout.dlcDir() + "/" + f;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("KARTRECOMP_APP_NAME", "kartrecomp");
-    if (!env.contains("KARTRECOMP_NATIVE_GPU")) env.insert("KARTRECOMP_NATIVE_GPU", "native");
-    game.setProcessEnvironment(env);
-    game.setWorkingDirectory(QFileInfo(paths.engine).absolutePath());
-    connect(&game, &QProcess::finished, this, [this] { refreshButtons(); }, Qt::UniqueConnection);
-    game.start(paths.engine, args);
-    refreshButtons();
 }

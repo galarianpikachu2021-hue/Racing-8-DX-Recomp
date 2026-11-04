@@ -4,6 +4,7 @@
 // as finished only when its object file AND its .done marker exist) and links the modules. Blocking: run Build() on a worker thread.
 #pragma once
 
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <atomic>
@@ -28,6 +29,7 @@ struct BuildPlan {
     QStringList linkArgs;    // added to the module link, e.g. -fuse-ld=lld -nostdlib -L... (before the objects) and the libraries
     /// Fills compiler, compileArgs and linkArgs from a bundled toolchain folder (packaging/make-toolchain.sh).
     void useToolchain(const QString& toolchainDir);
+    QString stamp;   // identifies what the work folder was built with (engine, toolchain, hot list); a different stamp wipes it
     int jobs = 1;
 };
 
@@ -46,7 +48,9 @@ public:
     static QList<CompileJob> PlanCompileJobs(const QString& srcDir, const QString& objDir, const QStringList& files,
                                              const QStringList& hotFiles, const QString& includeDir = {});
     static bool IsDone(const CompileJob& job);
-    static bool RunCompileJob(const QString& compiler, const CompileJob& job, QString* error);
+    /// Makes a child die with this process (Linux: PR_SET_PDEATHSIG); call before start().
+    static void DieWithParent(QProcess& process);
+    static bool RunCompileJob(const QString& compiler, const CompileJob& job, QString* error, const std::atomic<bool>* cancel = nullptr);
 
     /// Whole build. `progress(done, total, what)` is called from worker threads after every finished job (serialised).
     static BuildResult Build(const BuildPlan& plan, const std::function<void(int, int, const QString&)>& progress,

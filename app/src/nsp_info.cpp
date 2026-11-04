@@ -5,6 +5,8 @@
 #include <QJsonObject>
 #include <QProcess>
 
+#include "build_runner.h"
+
 NspInfo ParseNspInfo(const QByteArray& line) {
     NspInfo info;
     const auto doc = QJsonDocument::fromJson(line.trimmed());
@@ -24,6 +26,7 @@ NspInfo ParseNspInfo(const QByteArray& line) {
 
 NspInfo ReadNspInfo(const QString& exporter, const QString& nsp, const QString& keys, int timeoutMs) {
     QProcess p;
+    BuildRunner::DieWithParent(p);
     p.start(exporter, {"--info", nsp, "--keys", keys});
     if (!p.waitForStarted()) {
         NspInfo info;
@@ -34,6 +37,11 @@ NspInfo ReadNspInfo(const QString& exporter, const QString& nsp, const QString& 
         p.kill();
         NspInfo info;
         info.error = QStringLiteral("reading the file took too long");
+        return info;
+    }
+    if (p.exitStatus() != QProcess::NormalExit) {
+        NspInfo info;
+        info.error = QStringLiteral("the exporter crashed while reading it: your keys are probably wrong for this file, or the file is damaged");
         return info;
     }
     return ParseNspInfo(p.readAllStandardOutput());
