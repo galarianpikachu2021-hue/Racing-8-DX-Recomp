@@ -233,6 +233,9 @@ QWidget* MainWindow::buildPlayTab() {
                                    "translated game code). Saves, settings and mods move to ~/.local/share/kartrecomp and "
                                    "~/.config/kartrecomp; your game files, firmware and mods are linked there, not copied."));
     connect(appimage_button, &QPushButton::clicked, this, &MainWindow::packageAppImage);
+#ifdef Q_OS_WIN
+    appimage_button->hide();  // AppImages are a Linux thing
+#endif
 #endif
 
     auto* buttons = new QHBoxLayout;
