@@ -80,6 +80,7 @@ private:
     QPushButton* appimage_button = nullptr;
     QProgressBar* appimage_progress = nullptr;
     class Updater* updater = nullptr;
+    class SetupPage* setup_page = nullptr;
     QPlainTextEdit* log_view = nullptr;
     // Display
     QComboBox* resolution_combo = nullptr;

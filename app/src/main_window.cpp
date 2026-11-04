@@ -2,6 +2,7 @@
 #include "main_window.h"
 
 #include "ctgp_convert.h"
+#include "setup_page.h"
 #include "updater.h"
 
 #include <QThread>
@@ -68,6 +69,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(820, 600);
 
     auto* tabs = new QTabWidget;
+    setup_page = new SetupPage;
+    tabs->addTab(setup_page, tr("Setup"));
     tabs->addTab(buildPlayTab(), tr("Play"));
     tabs->addTab(buildDisplayTab(), tr("Display"));
     tabs->addTab(buildFrameRateTab(), tr("Frame rate"));

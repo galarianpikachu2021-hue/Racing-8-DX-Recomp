@@ -3,8 +3,10 @@ find_package(ZLIB REQUIRED)
 qt_standard_project_setup()
 
 # The build pipeline (unit splitting, compile scheduling), shared by the launcher and the tests.
-add_library(kartrecomp_build STATIC src/unit_split.cpp src/unit_split.h src/build_runner.cpp src/build_runner.h)
-target_link_libraries(kartrecomp_build PUBLIC Qt6::Core)
+add_library(kartrecomp_build STATIC src/unit_split.cpp src/unit_split.h src/build_runner.cpp src/build_runner.h
+    src/nsp_info.cpp src/nsp_info.h src/keys_check.cpp src/keys_check.h src/setup_validate.cpp src/setup_validate.h src/setup_paths.cpp src/setup_paths.h src/zip_archive.cpp src/zip_archive.h)
+find_package(ZLIB REQUIRED)
+target_link_libraries(kartrecomp_build PUBLIC Qt6::Core ZLIB::ZLIB)
 target_include_directories(kartrecomp_build PUBLIC src)
 
 qt_add_executable(kartrecomp
@@ -17,6 +19,8 @@ qt_add_executable(kartrecomp
     src/updater.cpp
     src/updater.h
     src/main_window.h
+    src/setup_page.cpp
+    src/setup_page.h
     src/ctgp_convert.cpp
     src/ctgp_convert.h
     src/mod_addon.cpp
@@ -25,7 +29,6 @@ qt_add_executable(kartrecomp
     src/mod_addon.h
     src/overlay_settings.cpp
     src/overlay_settings.h
-    src/zip_archive.cpp
     src/zip_archive.h
 )
 target_link_libraries(kartrecomp PRIVATE Qt6::Widgets Qt6::Network ZLIB::ZLIB kartrecomp_build)

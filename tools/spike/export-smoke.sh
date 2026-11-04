@@ -20,4 +20,12 @@ msg=$("$bin" --base "$base" --update "$old" --keys "$keys" --out "$out-old" 2>&1
 msg=$("$bin" --base "$base" --update "$upd" --keys /nonexistent/prod.keys --out "$out-nokeys" 2>&1); rc=$?
 [ $rc -eq 2 ] && echo "$msg" | grep -qi "prod.keys" || { echo "FAIL: missing keys must exit 2 naming prod.keys (exit $rc): $msg"; exit 1; }
 rm -rf "$out-old" "$out-nokeys"
+# --info: one JSON line about an NSP (title id, version, 64-bit program), used by the launcher's Setup page
+info=$("$bin" --info "$upd" --keys "$keys" 2>/dev/null)
+echo "$info" | grep -q '"titleId":"0100152000022800"' && echo "$info" | grep -q '"version":1310720' && echo "$info" | grep -q '"aarch64":true' \
+  || { echo "FAIL: --info on the 3.0.4 update: $info"; exit 1; }
+info=$("$bin" --info "$old" --keys "$keys" 2>/dev/null)
+echo "$info" | grep -q '"aarch64":false' && echo "$info" | grep -q '"version":1245184' || { echo "FAIL: --info on the 3.0.3 update: $info"; exit 1; }
+info=$("$bin" --info "$base" --keys "$keys" 2>/dev/null)
+echo "$info" | grep -q '"titleId":"0100152000022000"' && echo "$info" | grep -q '"version":0' || { echo "FAIL: --info on the base game: $info"; exit 1; }
 echo PASS

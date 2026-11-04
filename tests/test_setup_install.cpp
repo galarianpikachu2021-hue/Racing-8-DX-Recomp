@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include <QtTest>
+
+#include "setup_paths.h"
+
+namespace {
+void Write(const QString& path, const QByteArray& bytes) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    f.open(QIODevice::WriteOnly);
+    f.write(bytes);
+}
+} // namespace
+
+class TestSetupInstall : public QObject {
+    Q_OBJECT
+private slots:
+    void layoutFollowsTheXdgFolders() {
+        const auto l = DataLayout::FromRoots("/data/kartrecomp", "/cache/kartrecomp");
+        QCOMPARE(l.base(), QString("/data/kartrecomp/content/base.nsp"));
+        QCOMPARE(l.update(), QString("/data/kartrecomp/content/update-3.0.4.nsp"));
+        QCOMPARE(l.keysFile(), QString("/data/kartrecomp/keys/prod.keys"));
+        QCOMPARE(l.firmwareDir(), QString("/data/kartrecomp/nand/system/Contents/registered"));
+        QCOMPARE(l.moduleDir(), QString("/data/kartrecomp/module"));
+        QCOMPARE(l.exportDir(), QString("/cache/kartrecomp/export"));
+        QCOMPARE(l.workDir(), QString("/cache/kartrecomp/build-work"));
+    }
+    void installPlacesEveryInputWhereTheEngineLooksForIt() {
+        QTemporaryDir src, dst;
+        // a folder name with spaces and non-ASCII letters, like a user's Downloads folder
+        const QString dl = src.filePath(QString::fromUtf8("Mein Spiel äö"));
+        Write(dl + "/base.nsp", "BASE");
+        Write(dl + "/upd.nsp", "UPD");
+        Write(dl + "/dlc1.nsp", "D1");
+        Write(dl + "/prod.keys", "header_key = 00\n");
+        Write(dl + "/title.keys", "00 = 00\n");
+        Write(dl + "/fw/0001.nca", "FW1");
+        Write(dl + "/fw/0002.cnmt.nca", "FW2");
+        SetupInputs in{dl + "/base.nsp", dl + "/upd.nsp", dl + "/prod.keys", dl + "/fw", {dl + "/dlc1.nsp"}};
+        const auto l = DataLayout::FromRoots(dst.filePath("data"), dst.filePath("cache"));
+        QCOMPARE(InstallInputs(in, l), QString());
+        QCOMPARE(QFile(l.base()).size(), qint64(4));
+        QCOMPARE(QFile(l.update()).size(), qint64(3));
+        QVERIFY(QFile::exists(l.dlcDir() + "/dlc1.nsp"));
+        QVERIFY(QFile::exists(l.keysFile()));
+        QVERIFY(QFile::exists(QFileInfo(l.keysFile()).absolutePath() + "/title.keys"));
+        QVERIFY(QFile::exists(l.firmwareDir() + "/0001.nca") && QFile::exists(l.firmwareDir() + "/0002.cnmt.nca"));
+    }
+    void installingAgainReplacesWhatWasThere() {
+        QTemporaryDir src, dst;
+        Write(src.filePath("base.nsp"), "ONE");
+        Write(src.filePath("upd.nsp"), "U");
+        Write(src.filePath("prod.keys"), "header_key = 00\n");
+        Write(src.filePath("fw/a.nca"), "F");
+        SetupInputs in{src.filePath("base.nsp"), src.filePath("upd.nsp"), src.filePath("prod.keys"), src.filePath("fw"), {}};
+        const auto l = DataLayout::FromRoots(dst.filePath("data"), dst.filePath("cache"));
+        QCOMPARE(InstallInputs(in, l), QString());
+        Write(src.filePath("base.nsp"), "TWO22");
+        QCOMPARE(InstallInputs(in, l), QString());
+        QCOMPARE(QFile(l.base()).size(), qint64(5));
+    }
+    void aMissingSourceFileIsReportedNotIgnored() {
+        QTemporaryDir src, dst;
+        SetupInputs in{src.filePath("none.nsp"), src.filePath("none2.nsp"), src.filePath("none.keys"), src.filePath("fw"), {}};
+        const auto l = DataLayout::FromRoots(dst.filePath("data"), dst.filePath("cache"));
+        QVERIFY(!InstallInputs(in, l).isEmpty());
+    }
+    void detectionPrefersTheEnvironmentOverrides() {
+        qputenv("KARTRECOMP_EXPORTER", "/x/exporter");
+        qputenv("KARTRECOMP_ENGINE", "/x/engine");
+        qputenv("KARTRECOMP_TOOLCHAIN", "/x/toolchain");
+        const auto p = BuilderPaths::Detect();
+        QCOMPARE(p.exporter, QString("/x/exporter"));
+        QCOMPARE(p.engine, QString("/x/engine"));
+        QCOMPARE(p.toolchain, QString("/x/toolchain"));
+        QString missing;
+        QVERIFY(!p.complete(&missing));
+        QVERIFY(missing.contains("exporter"));
+        qunsetenv("KARTRECOMP_EXPORTER");
+        qunsetenv("KARTRECOMP_ENGINE");
+        qunsetenv("KARTRECOMP_TOOLCHAIN");
+    }
+    void builtStateNeedsAModuleJsonForThisEngine() {
+        QTemporaryDir d;
+        const auto l = DataLayout::FromRoots(d.filePath("data"), d.filePath("cache"));
+        QVERIFY(!IsBuilt(l, "eng-1"));
+        Write(l.moduleDir() + "/recompiled_image.so", "x");
+        QVERIFY(!IsBuilt(l, "eng-1")); // modules but no stamp: not verified
+        Write(l.moduleDir() + "/module.json", R"({ "engineVersion": "eng-0" })");
+        QVERIFY(!IsBuilt(l, "eng-1")); // built for another engine
+        Write(l.moduleDir() + "/module.json", R"({ "engineVersion": "eng-1" })");
+        QVERIFY(IsBuilt(l, "eng-1"));
+    }
+};
+QTEST_APPLESS_MAIN(TestSetupInstall)
+#include "test_setup_install.moc"
