@@ -1,0 +1,53 @@
+# Builds the Windows engine and exporter from the pinned upstream fork plus our patches, and runs the Windows tests that need no game.
+# Runs on pushes to the windows-port branch and by hand. CI never sees game files.
+name: Windows engine
+on:
+  push:
+    branches: [windows-port]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Vulkan SDK (glslangValidator)
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
+          "$($sdk.FullName)\Bin" >> $env:GITHUB_PATH
+      - name: Fetch the fork and apply our patches
+        shell: bash
+        run: packaging/windows/fetch-fork.sh fork
+      - name: Configure
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: '1'
+        run: |
+          VERSION="$(cat patches/suyu/*.patch | sha256sum | cut -c1-10)-abi6"
+          echo "ENGINE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          cmake -S fork -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT=OFF -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF \
+            -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON -DKARTRECOMP_ENGINE_VERSION="$VERSION"
+      - name: Build
+        shell: bash
+        run: cmake --build build --target mk8d-engine kartrecomp-export
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage\engine | Out-Null
+          Copy-Item build\bin\mk8d-engine.exe, build\bin\kartrecomp-export.exe stage\engine\
+          Get-ChildItem build\bin -Filter *.dll | Copy-Item -Destination stage\engine\
+          $env:ENGINE_VERSION | Set-Content stage\engine\ENGINE_VERSION
+      - name: Module guard test
+        shell: pwsh
+        run: tests\test_module_guard.ps1 -EngineDir stage\engine
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-engine
+          path: stage
+          if-no-files-found: error
