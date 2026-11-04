@@ -20,6 +20,7 @@
 #include "build_runner.h"
 #include "keys_check.h"
 #include "nsp_info.h"
+#include "verify_build.h"
 
 namespace {
 QString StatusText(const QString& reason) { return reason.isEmpty() ? QStringLiteral("✔") : QStringLiteral("✘ ") + reason; }
@@ -211,7 +212,13 @@ void SetupPage::runCompile() {
                 message->setText(tr("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
             });
         }, &cancelFlag);
-        QMetaObject::invokeMethod(this, [this, result] { finishBuild(result.ok, result.message); });
+        BuildResult outcome = result;
+        if (result.ok) {
+            QMetaObject::invokeMethod(this, [this] { message->setText(tr("Testing the game\u2026")); });
+            const VerifyResult verdict = VerifyBuild(paths.engine, layout, 150, &cancelFlag);
+            outcome = {verdict.ok, verdict.message};
+        }
+        QMetaObject::invokeMethod(this, [this, outcome] { finishBuild(outcome.ok, outcome.message); });
     }).detach();
 }
 

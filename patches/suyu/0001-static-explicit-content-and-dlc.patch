@@ -22329,7 +22329,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..41742d7e18 100644
+index 03f738eb63..850edd7f4c 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -24,10 +24,13 @@
@@ -22863,7 +22863,7 @@ index 03f738eb63..41742d7e18 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +1856,22 @@ int main(int argc, char** argv) {
+@@ -1797,6 +1856,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -22873,6 +22873,12 @@ index 03f738eb63..41742d7e18 100644
 +        g_configured_backend = Settings::values.renderer_backend.GetValue();
 +        Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
 +        LOG_INFO(Frontend, "kart-recomp: native GPU exclusive, emulated renderer set to Null");
++    }
++    if (std::getenv("KARTRECOMP_VERIFY_BOOT")) {
++        // kart-recomp: the builder's test boot needs no window, display or GPU: the emulated renderer is Null and the native one is off.
++        g_configured_backend = Settings::values.renderer_backend.GetValue();
++        Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
++        LOG_INFO(Frontend, "kart-recomp: verification boot, Null renderer");
 +    }
 +    // Declared after `config`, so it runs first at exit: the config's destructor
 +    // then saves the renderer the user chose, not this run's override.
@@ -22886,7 +22892,7 @@ index 03f738eb63..41742d7e18 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +1900,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +1906,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -22913,7 +22919,7 @@ index 03f738eb63..41742d7e18 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1925,6 +2020,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2026,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -22923,7 +22929,7 @@ index 03f738eb63..41742d7e18 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2245,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2251,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -22931,7 +22937,7 @@ index 03f738eb63..41742d7e18 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2188,6 +2287,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2293,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -22949,7 +22955,7 @@ index 03f738eb63..41742d7e18 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2318,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2324,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -22960,7 +22966,7 @@ index 03f738eb63..41742d7e18 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2346,7 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2352,7 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -22968,7 +22974,7 @@ index 03f738eb63..41742d7e18 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2354,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2360,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
