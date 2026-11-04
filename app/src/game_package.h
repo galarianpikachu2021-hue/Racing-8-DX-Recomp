@@ -5,6 +5,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "setup_paths.h"
+
 // A locally built game package. Nothing in it is ever part of this repository.
 //
 //   <root>/mk8d[.exe]                 strict-static executable built from the user's own dump
@@ -17,6 +19,15 @@
 class GamePackage {
 public:
     explicit GamePackage(QString root = {}, QString suyu_home = {});
+
+    /// The installed layout: the prebuilt engine plus the user's built modules, data in the XDG folders (saves, mods, keys, firmware under
+    /// layout.dataRoot; sdl2-config.ini, the overlay ini and launch.env under configRoot). The developer layout above is unchanged.
+    static GamePackage Installed(const DataLayout& layout, const QString& configRoot, const QString& engine, const QString& engineVersion);
+    bool isInstalled() const { return installed; }
+    QString overlayFile() const;
+    QString modsRoot() const;          // the folder holding mods/ and addons/
+    QString pluginsParent() const;     // the folder holding plugins/
+    QString workingDirectory() const;  // where the game process runs
 
     QString root() const { return root_dir; }
     QString suyuHome() const { return suyu_home; }
@@ -48,4 +59,7 @@ public:
 private:
     QString root_dir;
     QString suyu_home;
+    bool installed = false;
+    DataLayout layout;
+    QString config_root, engine_path, engine_version;
 };

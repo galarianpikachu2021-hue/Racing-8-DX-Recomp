@@ -86,12 +86,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     if (root.isEmpty()) {
         root = GamePackage::findDefaultRoot();
     }
+    // No game folder anywhere (an installed launcher, the AppImage, a fresh Windows folder): the data lives in the XDG folders and the
+    // game is the prebuilt engine plus the modules the Setup page builds. A developer checkout keeps its game folder.
+    if (root.isEmpty() || !qEnvironmentVariableIsEmpty("KARTRECOMP_INSTALLED")) {
+        const BuilderPaths builder = BuilderPaths::Detect();
+        const QString cfgHome = qEnvironmentVariableIsEmpty("XDG_CONFIG_HOME") ? QDir::homePath() + "/.config" : qEnvironmentVariable("XDG_CONFIG_HOME");
+        package = GamePackage::Installed(DataLayout::Default(), cfgHome + "/kartrecomp", builder.engine, builder.engineVersion);
+        root = package.root();
+    }
     QString home = prefs.value(QStringLiteral("suyu_home")).toString();
     if (home.isEmpty()) {
         home = GamePackage::findDefaultSuyuHome(root);
     }
     root_edit->setText(root);
     home_edit->setText(home);
+    if (package.isInstalled()) {
+        // Nothing to browse for: the folders are fixed, the Setup page picks the user's files.
+        root_edit->setReadOnly(true);
+        home_edit->setReadOnly(true);
+        home_edit->setText(tr("(set on the Setup page)"));
+        tabs->setCurrentIndex(IsBuilt(DataLayout::Default(), BuilderPaths::Detect().engineVersion) ? 1 : 0);
+        connect(setup_page, &SetupPage::builtChanged, this, [this] { reloadPackage(); });
+    }
     reloadPackage();
     connectAutoSave();
 
@@ -404,11 +420,13 @@ QWidget* MainWindow::buildDlcTab() {
 }
 
 void MainWindow::reloadPackage() {
-    package.setRoot(root_edit->text().trimmed());
-    package.setSuyuHome(home_edit->text().trimmed());
-    QSettings prefs;
-    prefs.setValue(QStringLiteral("game_root"), package.root());
-    prefs.setValue(QStringLiteral("suyu_home"), package.suyuHome());
+    if (!package.isInstalled()) {
+        package.setRoot(root_edit->text().trimmed());
+        package.setSuyuHome(home_edit->text().trimmed());
+        QSettings prefs;
+        prefs.setValue(QStringLiteral("game_root"), package.root());
+        prefs.setValue(QStringLiteral("suyu_home"), package.suyuHome());
+    }
 
     const QString problems = package.problems();
     status_label->setText(problems.isEmpty() ? tr("Ready.") : problems);
@@ -573,7 +591,7 @@ void MainWindow::launch() {
     }
     log_view->clear();
     if (!resolveCtgpConflict(false, false)) return;
-    game.setWorkingDirectory(package.root());
+    game.setWorkingDirectory(package.workingDirectory());
     auto env = launchEnvironment();
     game.setProcessEnvironment(env);
     game.setProcessChannelMode(QProcess::MergedChannels);
@@ -731,9 +749,9 @@ void MainWindow::loadOverlay() {
     loading_settings = true;
     const QSignalBlocker b1(upscaler_combo), b2(scale_combo), b3(sharpness_combo), b4(framegen_combo), b5(hdr_paper_combo), b6(hdr_peak_combo),
         b7(present_combo), b8(jitter_check), b9(hdr_check), b10(fps_check);
-    overlay.load(QDir(package.root()).filePath(QStringLiteral("user/config/kartrecomp_overlay.ini")));
+    overlay.load(package.overlayFile());
 
-    upscaler_ids = QStringList{QStringLiteral("off"), QStringLiteral("fsr1")} + FindPluginIds(package.root(), QStringLiteral("upscaler"));
+    upscaler_ids = QStringList{QStringLiteral("off"), QStringLiteral("fsr1")} + FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler"));
     upscaler_combo->clear();
     for (const auto& id : upscaler_ids) {
         upscaler_combo->addItem(id == QLatin1String("off")    ? tr("Off")
@@ -744,8 +762,8 @@ void MainWindow::loadOverlay() {
     }
     upscaler_combo->setCurrentIndex(qMax(0, upscaler_ids.indexOf(overlay.value(QStringLiteral("upscaler"), QStringLiteral("off")))));
 
-    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin")} + FindPluginIds(package.root(), QStringLiteral("framegen"));
-    if (!framegen_ids.contains(QStringLiteral("fsr3")) && FindPluginIds(package.root(), QStringLiteral("upscaler")).contains(QStringLiteral("fsr3"))) {
+    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin")} + FindPluginIds(package.pluginsParent(), QStringLiteral("framegen"));
+    if (!framegen_ids.contains(QStringLiteral("fsr3")) && FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler")).contains(QStringLiteral("fsr3"))) {
         framegen_ids << QStringLiteral("fsr3"); // the FSR 3 library carries its frame generation
     }
     framegen_combo->clear();
@@ -773,7 +791,7 @@ void MainWindow::loadOverlay() {
 void MainWindow::saveOverlay() {
     if (loading_settings || game.state() != QProcess::NotRunning || package.root().isEmpty()) return;
     // Re-read first, so anything the game saved since (the speed limit, the resolution rows) is kept.
-    overlay.load(QDir(package.root()).filePath(QStringLiteral("user/config/kartrecomp_overlay.ini")));
+    overlay.load(package.overlayFile());
     overlay.setValue(QStringLiteral("upscaler"), upscaler_ids.value(upscaler_combo->currentIndex(), QStringLiteral("off")));
     overlay.setValue(QStringLiteral("framegen"), framegen_ids.value(framegen_combo->currentIndex(), QStringLiteral("off")));
     overlay.setInt(QStringLiteral("quality"), scale_combo->currentIndex());
@@ -1017,14 +1035,14 @@ void MainWindow::runImport(const std::function<bool(QString*, const std::functio
 namespace {
 
 // Reads the game's own UI/<lang>/message.sarc files (no mods, update applied) into `dir`; the game exits after writing them.
-bool DumpVanillaUi(const QString& root, const QStringList& args, QProcessEnvironment env, const QString& dir, QString* error) {
+bool DumpVanillaUi(const QString& exe, const QString& workDir, const QStringList& args, QProcessEnvironment env, const QString& dir, QString* error) {
     QDir(dir).removeRecursively();
     QProcess dump;
     env.insert(QStringLiteral("KARTRECOMP_ROMFS_DUMP"), QStringLiteral("tree=UI=%1/UI=message.sarc").arg(dir));
     env.insert(QStringLiteral("KARTRECOMP_NO_MODS"), QStringLiteral("1"));
     dump.setProcessEnvironment(env);
-    dump.setWorkingDirectory(root);
-    dump.start(QDir(root).filePath(QStringLiteral("mk8d")), args);
+    dump.setWorkingDirectory(workDir);
+    dump.start(exe, args);
     if (!dump.waitForFinished(240000) || dump.exitCode() != 0) {
         if (error) *error = QStringLiteral("Could not read the game's message files (is the game package set up?)");
         return false;
@@ -1046,10 +1064,11 @@ void MainWindow::syncTextMerge() {
     }
     const QStringList args = package.launchArguments(false);
     const auto env = package.launchEnvironment();
-    runImport([root, args, env](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
+    const QString exe = package.executable(), workDir = package.workingDirectory();
+    runImport([root, args, env, exe, workDir](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
         progress(0, 1, QStringLiteral("merging mod texts"));
         const QString vanilla = ModAddon::VanillaUiDir(root);
-        if (!QFileInfo::exists(QDir(vanilla).filePath(QStringLiteral("UI/USen/message.sarc"))) && !DumpVanillaUi(root, args, env, vanilla, error)) return false;
+        if (!QFileInfo::exists(QDir(vanilla).filePath(QStringLiteral("UI/USen/message.sarc"))) && !DumpVanillaUi(exe, workDir, args, env, vanilla, error)) return false;
         const bool ok = ModAddon::UpdateTextMerge(root, vanilla, error);
         progress(1, 1, QStringLiteral("done"));
         return ok;
@@ -1102,10 +1121,11 @@ void MainWindow::importCtgp() {
     // Where the converted mod goes; an older conversion (or a disabled one) is replaced.
     const QStringList args = package.launchArguments(false);
     const auto env = package.launchEnvironment();
-    runImport([zip, root, out, args, env](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
+    const QString exe = package.executable(), workDir = package.workingDirectory();
+    runImport([zip, root, out, args, env, exe, workDir](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
         // The game's own message files come from the game itself (it can list and extract its RomFS), so the names are edited in the user's copy.
         const QString tmp = ModAddon::VanillaUiDir(root);
-        if (!DumpVanillaUi(root, args, env, tmp, error)) return false;
+        if (!DumpVanillaUi(exe, workDir, args, env, tmp, error)) return false;
         CtgpConvert::Options options;
         options.cups_list_path = QDir(root).filePath(QStringLiteral("extra_cups.txt"));
         QString old_error;
