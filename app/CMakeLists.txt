@@ -2,6 +2,11 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 find_package(ZLIB REQUIRED)
 qt_standard_project_setup()
 
+# The build pipeline (unit splitting, compile scheduling), shared by the launcher and the tests.
+add_library(kartrecomp_build STATIC src/unit_split.cpp src/unit_split.h src/build_runner.cpp src/build_runner.h)
+target_link_libraries(kartrecomp_build PUBLIC Qt6::Core)
+target_include_directories(kartrecomp_build PUBLIC src)
+
 qt_add_executable(kartrecomp
     src/main.cpp
     src/ini_file.cpp
@@ -23,7 +28,7 @@ qt_add_executable(kartrecomp
     src/zip_archive.cpp
     src/zip_archive.h
 )
-target_link_libraries(kartrecomp PRIVATE Qt6::Widgets Qt6::Network ZLIB::ZLIB)
+target_link_libraries(kartrecomp PRIVATE Qt6::Widgets Qt6::Network ZLIB::ZLIB kartrecomp_build)
 target_compile_definitions(kartrecomp PRIVATE PROJECT_VERSION_STRING="${PROJECT_VERSION}")
 set_target_properties(kartrecomp PROPERTIES WIN32_EXECUTABLE ON)
 if (MSVC)
@@ -31,3 +36,7 @@ if (MSVC)
 else()
     target_compile_options(kartrecomp PRIVATE -Wall -Wextra)
 endif()
+
+# Command-line front end of the build pipeline.
+add_executable(kartrecomp-build src/build_cli.cpp)
+target_link_libraries(kartrecomp-build PRIVATE kartrecomp_build)

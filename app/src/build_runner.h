@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Compiles an export's generated C into the game's module libraries (recompiled_<name>.so) with a bundled clang: splits the units
+// (UnitSplit), plans one compile job per piece, runs them in parallel sized by free RAM, resumes after an interruption (a piece counts
+// as finished only when its object file AND its .done marker exist) and links the modules. Blocking: run Build() on a worker thread.
+#pragma once
+
+#include <QString>
+#include <QStringList>
+#include <atomic>
+#include <functional>
+
+struct CompileJob {
+    QString source;
+    QString object;
+    QString marker; // <object>.done, written only after the object was produced successfully
+    QStringList args;
+    bool hot;
+};
+
+struct BuildPlan {
+    QString exportDir; // kartrecomp-export output: <exportDir>/{rtld,main,subsdk0,sdk}/{src,recomp_export.c,recomp_runtime.c}
+    QString workDir;   // split pieces and objects, kept between runs for resuming
+    QString outDir;    // recompiled_<name>.so
+    QString compiler;  // clang
+    QString hotList;   // file with one hot block function name per line (may be empty: everything compiled cold)
+    QStringList extraArgs; // e.g. --sysroot=..., -fuse-ld=lld
+    int jobs = 1;
+};
+
+struct BuildResult {
+    bool ok = false;
+    QString message;
+};
+
+class BuildRunner {
+public:
+    /// Concurrent compiles that fit: 2 GB per job, at least 1, at most `threads`; 0 when under 3 GB is free (refuse).
+    static int JobsForRam(qint64 availableBytes, int threads);
+    static bool HasDiskSpace(const QString& dir, qint64 neededBytes);
+    /// One job per file in `files` (names inside srcDir). `hotFiles` get full optimisation, the rest -O0.
+    /// `includeDir` defaults to the folder above srcDir (where recomp_runtime.h lives).
+    static QList<CompileJob> PlanCompileJobs(const QString& srcDir, const QString& objDir, const QStringList& files,
+                                             const QStringList& hotFiles, const QString& includeDir = {});
+    static bool IsDone(const CompileJob& job);
+    static bool RunCompileJob(const QString& compiler, const CompileJob& job, QString* error);
+
+    /// Whole build. `progress(done, total, what)` is called from worker threads after every finished job (serialised).
+    static BuildResult Build(const BuildPlan& plan, const std::function<void(int, int, const QString&)>& progress,
+                             const std::atomic<bool>* cancel = nullptr);
+};

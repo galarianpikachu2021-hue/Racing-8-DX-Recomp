@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 runs="${1:-3}"
-moddir="$PWD/local/spike/modules"
+moddir="${MODDIR:-$PWD/local/spike/modules}"
 [ -e "$moddir/recompiled_image.so" ] || { echo "FAIL: no module build in $moddir"; exit 1; }
 pgrep -x mk8d >/dev/null && { echo "FAIL: mk8d is running"; exit 1; }
 game="$PWD/local/game"
@@ -26,6 +26,7 @@ one() {  # <label> [extra env...]
         KARTRECOMP_PROFILE=60,60 KARTRECOMP_PROFILE_OUT="$PWD/user/log/profile-spike-$label.txt" "$@" \
         timeout -s INT 170 ./play.sh -t >/dev/null 2>&1 || true )
   grep -q "fully static" "$game/user/log/recomp_coverage.txt" || { echo "FAIL: $label not fully static"; exit 1; }
+  case "$label" in module*) grep -aq "LoadModuleDir: Recompiled module \[3\] loaded from" "$game/user/log/suyu_log.txt" || { echo "FAIL: $label did not load the module libraries"; exit 1; } ;; esac
   local n slow
   n=$(tools/profile-report.py "$game/user/log/profile-spike-$label.txt" "$game/mk8d" --summary | awk '$1=="CPUCore_0"{print $2}')
   slow=$(grep -a 'PERF game_fps' "$game/user/log/suyu_log.txt" | sed -E 's/.*game_fps=([0-9.]+).*/\1/' | awk 'NR>=45&&NR<=135&&$1<58{c++} END{print c+0}')
