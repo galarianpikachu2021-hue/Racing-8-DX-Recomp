@@ -17,26 +17,23 @@ jobs:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG }}
       - uses: jurplel/install-qt-action@v4
         with:
           version: 6.7.3
           arch: win64_msvc2019_64
           cache: true
       - name: zlib
-        run: vcpkg install zlib:x64-windows
+        run: vcpkg install zlib:x64-windows-static-md
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
           cmake --build build
-      - name: Bundle Qt and zlib
+      - name: Bundle Qt
         run: |
           New-Item -ItemType Directory -Force dist/KartRecomp-Launcher | Out-Null
           Copy-Item build/app/kartrecomp.exe dist/KartRecomp-Launcher/
           windeployqt --release --no-translations dist/KartRecomp-Launcher/kartrecomp.exe
-          Copy-Item "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/zlib1.dll" dist/KartRecomp-Launcher/
           Copy-Item LEGAL.md dist/KartRecomp-Launcher/ -ErrorAction SilentlyContinue
           Compress-Archive -Path dist/KartRecomp-Launcher -DestinationPath KartRecomp-Launcher-windows-x64.zip
           (Get-FileHash KartRecomp-Launcher-windows-x64.zip -Algorithm SHA256).Hash.ToLower() + "  KartRecomp-Launcher-windows-x64.zip" | Out-File -Encoding ascii KartRecomp-Launcher-windows-x64.zip.sha256
