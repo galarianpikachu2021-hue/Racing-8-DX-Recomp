@@ -112,3 +112,22 @@ Hand-made state that is NOT in a fresh export and still comes from the splitter:
 (`split_export.py --hot=...`), shared guard tables, the per-module `recomp_registration.c` and `recomp_*_v1.h` markers (static link only).
 Generator finding: the top-level `project(<game name>_recompiled C)` is unquoted, so a title name with spaces broke the tree's own
 CMake; the exporter now passes `mk8d` as the name.
+
+## From your files to the game: the builder (Linux, 2026-11-04)
+The release AppImage (`KartRecomp-Launcher-x86_64.AppImage`, about 260 MB) is the whole pipeline: launcher (Setup page), `kartrecomp-setup`
+(the same pipeline from a shell: `AppRun setup --base .. --update .. --keys .. --firmware ..`), `kartrecomp-build` (units to modules),
+`kartrecomp-export` (NSP to C), `mk8d-engine` (the prebuilt runtime, no game code) and the toolchain (LLVM 20.1.8 clang + lld, compiler-rt
+builtins, a glibc 2.31 sysroot, so the modules need glibc 2.14 at most). `packaging/make-release-appimage.sh` assembles it and refuses to
+if anything game-derived is inside.
+- Pipeline (`app/src/setup_pipeline.cpp`): validate (update 20<<16 = 3.0.4 and 64-bit, base title, keys, firmware, DLC) -> install into the
+  XDG layout (NSPs linked, keys and firmware copied) -> export (about 2 s, 1.7 GB) -> split units + compile (clang, hot `-O2` / cold `-O0`,
+  RAM-based job count, resumable) -> link `recompiled_<module>.so` -> headless Null-renderer test boot -> stamp `module.json`.
+- The engine refuses modules built for another engine or ABI (`KartStaticRecomp::CheckEngineModules`, exit 4) and starts with a clear
+  message when no game is built (exit 5). `ENGINE_VERSION` = hash of `patches/suyu` + ABI.
+- Measured (8 threads, 16 GB, the author's files): clean-machine acceptance `tests/acceptance-linux.sh` (fresh home, no compiler on PATH):
+  setup 274 s, the built game fully static at 58.1 fps average in the menus. Modules vs the static build in the scripted effects race: core-0
+  samples 38-39 k vs 40-41 k (no slower).
+- Tests: `ctest` (unit split, build runner, validators, install, verification, game package, pipeline), `tests/test_module_guard.sh`,
+  `tests/test_toolchain.sh`, `tools/spike/export-smoke.sh`, `tests/acceptance-linux.sh`.
+- Not done yet: the Windows build of the same pipeline (docs/superpowers/plans/2026-11-04-nsp-to-game-windows.md), a glibc-old base for the
+  engine itself (built on this PC's glibc 2.44), trimming the toolchain (485 MB unpacked, 128 MB compressed).

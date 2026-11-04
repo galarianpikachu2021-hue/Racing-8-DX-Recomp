@@ -31,7 +31,14 @@ int BuildRunner::JobsForRam(qint64 availableBytes, int threads) {
 }
 
 bool BuildRunner::HasDiskSpace(const QString& dir, qint64 neededBytes) {
-    return QStorageInfo(dir).bytesAvailable() >= neededBytes;
+    // The folder may not exist yet (first run): measure the closest parent that does.
+    QString probe = QDir::cleanPath(QDir(dir).absolutePath());
+    while (!QFileInfo::exists(probe)) {
+        const QString parent = QFileInfo(probe).absolutePath();
+        if (parent == probe) break;
+        probe = parent;
+    }
+    return QStorageInfo(probe).bytesAvailable() >= neededBytes;
 }
 
 QList<CompileJob> BuildRunner::PlanCompileJobs(const QString& srcDir, const QString& objDir, const QStringList& files,

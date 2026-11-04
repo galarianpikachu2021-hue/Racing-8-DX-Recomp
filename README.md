@@ -36,14 +36,15 @@ Everything above is a row in the F10 menu. The launcher's Enhancements tab sets 
 
 ## How it works
 
-1. You supply the base game, the 3.0.4 update, optional DLC, and your own keys and firmware.
-2. The suyu fork's AOT exporter translates the game's AArch64 executables (`rtld`, `main`, `subsdk0`,
-   `sdk`) into C.
-3. The C is compiled (clang, hot code optimised, cold code compiled fast: about 7 minutes on an 8-thread PC) and linked with suyu's HLE
-   services into one executable in strict-static mode (`-DSUYU_NO_JIT=ON`).
-4. The launcher starts that executable with your settings and passes your base game, update and DLC files
-   directly. Nothing is installed into an emulator profile. When you are happy, it can pack the result into an AppImage for your own
-   machine (never share it: it contains the translated game code).
+1. Open the launcher (the AppImage on Linux). Its **Setup** page asks for your own files: the base game, the 3.0.4 update, optional DLC,
+   your `prod.keys` and your firmware. Each file is checked on the spot and a wrong one says why (an old 32-bit update, another game, a key
+   missing).
+2. **Build game** turns them into the game on your PC. The AppImage carries everything it needs: the prebuilt engine, the exporter that
+   translates the game's AArch64 code into C, and a compiler. The tiered build (hot code optimised, cold code compiled fast) takes about
+   5 minutes on an 8-thread PC; a test boot then checks that every instruction runs as recompiled code (no JIT, ever) before **Play**
+   is enabled.
+3. Nothing from the game is ever shipped: the translated code and your files stay in your own folders
+   (`~/.local/share/kartrecomp`, `~/.config/kartrecomp`, `~/.cache/kartrecomp`).
 
 The full recipe, including memory and time costs, is in [docs/PIPELINE.md](docs/PIPELINE.md).
 

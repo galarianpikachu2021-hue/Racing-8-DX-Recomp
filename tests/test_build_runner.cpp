@@ -22,6 +22,11 @@ private slots:
         QVERIFY(BuildRunner::HasDiskSpace(dir.path(), 1024));
         QVERIFY(!BuildRunner::HasDiskSpace(dir.path(), 10LL * 1024 * 1024 * 1024 * 1024));
     }
+    void diskSpaceIsMeasuredOnTheClosestExistingParentOfAFolderNotYetCreated() {
+        QTemporaryDir dir;
+        QVERIFY(BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 1024));
+        QVERIFY(!BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 10LL * 1024 * 1024 * 1024 * 1024));
+    }
     void aPieceWithAnObjectButNoMarkerIsPlannedAgain() {
         QTemporaryDir dir;
         QDir(dir.path()).mkpath("src");

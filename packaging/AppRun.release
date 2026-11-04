@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Racing 8 DX Recomp release AppImage: the launcher by default; `AppRun setup|build|export|engine ...` runs the matching tool.
+here="$(dirname "$(readlink -f "$0")")"
+# The generated code is built for x86-64-v3 (AVX2, BMI2, FMA, MOVBE).
+for f in avx2 bmi2 fma movbe; do
+  grep -m1 -qw "$f" /proc/cpuinfo || { echo "This CPU lacks '$f': the game needs an x86-64-v3 CPU (Intel Haswell / AMD Zen or newer)." >&2; exit 1; }
+done
+case "${1:-}" in
+  setup|build|export) tool="kartrecomp-$1"; shift; exec "$here/usr/bin/$tool" "$@";;
+  engine) shift; exec "$here/usr/bin/mk8d-engine" "$@";;
+esac
+exec "$here/usr/bin/kartrecomp" "$@"

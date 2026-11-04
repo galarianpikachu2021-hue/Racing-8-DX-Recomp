@@ -20,7 +20,7 @@
 #include "build_runner.h"
 #include "keys_check.h"
 #include "nsp_info.h"
-#include "verify_build.h"
+#include "setup_pipeline.h"
 
 namespace {
 QString StatusText(const QString& reason) { return reason.isEmpty() ? QStringLiteral("✔") : QStringLiteral("✘ ") + reason; }
@@ -65,16 +65,6 @@ SetupPage::SetupPage(QWidget* parent)
     connect(buildButton, &QPushButton::clicked, this, &SetupPage::build);
     connect(cancelButton, &QPushButton::clicked, this, &SetupPage::cancel);
     connect(playButton, &QPushButton::clicked, this, &SetupPage::play);
-    connect(&exporter, &QProcess::readyReadStandardOutput, this, [this] {
-        while (exporter.canReadLine()) {
-            const QByteArray line = exporter.readLine().trimmed();
-            const auto parts = line.split(' ');
-            if (parts.value(0) != "PROGRESS") continue;
-            bar->setValue(parts.value(1).toInt()); // the export is the first 100 of the bar's 1000
-            message->setText(QString::fromUtf8(line.mid(line.indexOf(' ', 9) + 1)));
-        }
-    });
-
     QSettings s;
     base.edit->setText(s.value("setup/base").toString());
     update.edit->setText(s.value("setup/update").toString());
@@ -89,10 +79,7 @@ SetupPage::SetupPage(QWidget* parent)
     if (QFileInfo::exists(layout.moduleDir())) emit builtChanged(IsBuilt(layout, paths.engineVersion));
 }
 
-SetupPage::~SetupPage() {
-    cancelFlag = true;
-    if (exporter.state() != QProcess::NotRunning) exporter.kill();
-}
+SetupPage::~SetupPage() { cancelFlag = true; }
 
 SetupPage::Row SetupPage::addRow(QGridLayout* grid, int r, const QString& title, const QString& hint, std::function<void()> browse) {
     Row row;
@@ -169,65 +156,24 @@ void SetupPage::build() {
     QString missing;
     if (!paths.complete(&missing)) { QMessageBox::warning(this, tr("Build"), missing); return; }
     saveInputs();
-    if (!BuildRunner::HasDiskSpace(QDir::homePath(), 8LL << 30)) {
-        QMessageBox::warning(this, tr("Build"), tr("Not enough free disk space: the build needs about 8 GB."));
-        return;
-    }
-    message->setText(tr("Installing your files…"));
-    if (const QString err = InstallInputs(inputs(), layout); !err.isEmpty()) { finishBuild(false, err); return; }
     building = true;
     cancelFlag = false;
     refreshButtons();
-    QDir(layout.moduleDir()).removeRecursively();
-    exporter.start(paths.exporter, {"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"});
-    disconnect(&exporter, &QProcess::finished, nullptr, nullptr);
-    connect(&exporter, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-        if (cancelFlag) { finishBuild(false, tr("Cancelled.")); return; }
-        if (code != 0) { finishBuild(false, tr("Reading the game failed: %1").arg(QString::fromUtf8(exporter.readAllStandardError()).trimmed())); return; }
-        runCompile();
-    });
-}
-
-void SetupPage::runCompile() {
-    const int jobs = BuildRunner::JobsForRam([] {
-        QFile f("/proc/meminfo");
-        f.open(QIODevice::ReadOnly);
-        for (const QByteArray& line : f.readAll().split('\n'))
-            if (line.startsWith("MemAvailable:")) return line.simplified().split(' ').value(1).toLongLong() * 1024;
-        return 8LL << 30;
-    }(), QThread::idealThreadCount());
-    if (jobs == 0) { finishBuild(false, tr("Not enough free memory: close other programs (the build needs at least 3 GB free) and try again.")); return; }
-    BuildPlan plan;
-    plan.useToolchain(paths.toolchain);
-    plan.exportDir = layout.exportDir();
-    plan.workDir = layout.workDir();
-    plan.outDir = layout.moduleDir();
-    plan.hotList = paths.hotList;
-    plan.jobs = jobs;
-    message->setText(tr("Compiling the game with %1 parallel jobs…").arg(jobs));
-    std::thread([this, plan] {
-        const auto result = BuildRunner::Build(plan, [this](int done, int total, const QString& what) {
-            QMetaObject::invokeMethod(this, [this, done, total, what] {
-                bar->setValue(100 + 900 * done / std::max(total, 1));
-                message->setText(tr("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
+    const SetupInputs in = inputs();
+    std::thread([this, in] {
+        const auto result = RunSetupPipeline(in, layout, paths, [this](int permille, const QString& text) {
+            QMetaObject::invokeMethod(this, [this, permille, text] {
+                bar->setValue(permille);
+                message->setText(text);
             });
         }, &cancelFlag);
-        BuildResult outcome = result;
-        if (result.ok) {
-            QMetaObject::invokeMethod(this, [this] { message->setText(tr("Testing the game\u2026")); });
-            const VerifyResult verdict = VerifyBuild(paths.engine, layout, 150, &cancelFlag);
-            outcome = {verdict.ok, verdict.message};
-        }
-        QMetaObject::invokeMethod(this, [this, outcome] { finishBuild(outcome.ok, outcome.message); });
+        QMetaObject::invokeMethod(this, [this, result] { finishBuild(result.ok, result.message); });
     }).detach();
 }
 
 void SetupPage::finishBuild(bool ok, const QString& text) {
     building = false;
     if (ok) {
-        QFile stamp(layout.moduleDir() + "/module.json");
-        if (stamp.open(QIODevice::WriteOnly))
-            stamp.write("{ \"engineVersion\": \"" + paths.engineVersion.toUtf8() + "\" }\n");
         message->setText(tr("The game is built. Press Play."));
     } else {
         message->setText(tr("Build failed: %1").arg(text));
@@ -238,7 +184,6 @@ void SetupPage::finishBuild(bool ok, const QString& text) {
 
 void SetupPage::cancel() {
     cancelFlag = true;
-    if (exporter.state() != QProcess::NotRunning) exporter.kill();
     message->setText(tr("Cancelling…"));
 }
 

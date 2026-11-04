@@ -35,7 +35,7 @@ BuilderPaths BuilderPaths::Detect() {
         return QString();
     };
     p.exporter = pick("KARTRECOMP_EXPORTER", {"tools/kartrecomp-export", "bin/kartrecomp-export"});
-    p.engine = pick("KARTRECOMP_ENGINE", {"engine/mk8d-engine", "local/game/mk8d-engine"});
+    p.engine = pick("KARTRECOMP_ENGINE", {"bin/mk8d-engine", "engine/mk8d-engine", "local/game/mk8d-engine"});
     p.toolchain = pick("KARTRECOMP_TOOLCHAIN", {"toolchain", "local/toolchain"});
     p.hotList = pick("KARTRECOMP_HOT_LIST", {"data/mk8d-3.0.4/hot_blocks.txt"});
     if (!p.engine.isEmpty()) {

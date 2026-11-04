@@ -36,7 +36,6 @@ private:
     SetupInputs inputs() const;
     void build();
     void cancel();
-    void runCompile();
     void finishBuild(bool ok, const QString& message);
     void play();
     void refreshButtons();
@@ -49,7 +48,6 @@ private:
     QPushButton *buildButton, *cancelButton, *playButton;
     QProgressBar* bar;
     QLabel* message;
-    QProcess exporter;
     QProcess game;
     std::atomic<bool> cancelFlag{false};
     bool building = false;
