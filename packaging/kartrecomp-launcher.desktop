@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=KartRecomp Launcher
+Comment=Launcher for the Racing 8 DX Recomp: settings, mods, DLC and updates (no game files included)
+Exec=kartrecomp
+Icon=kartrecomp
+Categories=Game;
+Terminal=false
