@@ -896,10 +896,10 @@ index ea309dd691..d450f5d8cc 100644
                                     system.GetContentProvider()};
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..a4875c5769
+index 0000000000..8ab51659a7
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,363 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -930,6 +930,7 @@ index 0000000000..a4875c5769
 +#include "common/lz4_compression.h"
 +#include "common/swap.h"
 +#include "core/file_sys/content_archive.h"
++#include "core/file_sys/nca_metadata.h"
 +#include "core/file_sys/submission_package.h"
 +#include "core/file_sys/vfs/vfs.h"
 +#include "core/file_sys/vfs/vfs_real.h"
@@ -1098,10 +1099,51 @@ index 0000000000..a4875c5769
 +    flag = !(v && std::string(v) == "0"); // on unless "0", like the GUI export
 +}
 +
++
++/// --info: one JSON line about an NSP (for the launcher's Setup page). Never fails hard: problems go in "error".
++int PrintInfo(const fs::path& nsp_path, const fs::path& keys) {
++    const auto emit = [](const std::string& tid, u32 version, bool aarch64, bool program, const std::string& error) {
++        std::printf("{\"titleId\":\"%s\",\"version\":%u,\"aarch64\":%s,\"hasProgram\":%s,\"error\":\"%s\"}\n", tid.c_str(), version,
++                    aarch64 ? "true" : "false", program ? "true" : "false", error.c_str());
++        return 0;
++    };
++    std::error_code ec;
++    if (!fs::is_regular_file(keys, ec)) return emit("", 0, false, false, "prod.keys not found");
++    if (!fs::is_regular_file(nsp_path, ec)) return emit("", 0, false, false, "file not found");
++    static const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
++    auto file = vfs->OpenFile(fs::absolute(nsp_path).string(), FileSys::OpenMode::Read);
++    auto nsp = file ? std::make_shared<FileSys::NSP>(file) : nullptr;
++    if (!nsp || nsp->GetStatus() != Loader::ResultStatus::Success)
++        return emit("", 0, false, false, "not an NSP, or the keys cannot open it");
++    char tid[17];
++    std::snprintf(tid, sizeof(tid), "%016llx", static_cast<unsigned long long>(nsp->GetProgramTitleID()));
++    u32 version = 0;
++    FileSys::VirtualDir exefs = nsp->GetExeFS();
++    for (const auto& [title_id, ncas] : nsp->GetNCAs()) {
++        for (const auto& [key, nca] : ncas) {
++            if (!nca) continue;
++            if (key.second == FileSys::ContentRecordType::Meta && !nca->GetSubdirectories().empty()) {
++                for (const auto& f : nca->GetSubdirectories()[0]->GetFiles())
++                    if (f->GetExtension() == "cnmt") version = FileSys::CNMT{f}.GetTitleVersion();
++            }
++            if (!exefs && key.second == FileSys::ContentRecordType::Program && nca->GetExeFS()) exefs = nca->GetExeFS();
++        }
++    }
++    bool aarch64 = false;
++    if (exefs) {
++        for (const auto& f : exefs->GetFiles()) {
++            if (f->GetName() != "main.npdm") continue;
++            const auto npdm = f->ReadAllBytes();
++            aarch64 = npdm.size() > 0x0C && std::memcmp(npdm.data(), "META", 4) == 0 && (npdm[0x0C] & 1) != 0;
++        }
++    }
++    return emit(tid, version, aarch64, exefs != nullptr, "");
++}
++
 +} // namespace
 +
 +int main(int argc, char** argv) {
-+    fs::path base, update, keys, out;
++    fs::path base, update, keys, out, info;
 +    for (int i = 1; i < argc; ++i) {
 +        const std::string a = argv[i];
 +        const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string{}; };
@@ -1109,8 +1151,20 @@ index 0000000000..a4875c5769
 +        else if (a == "--update") update = next();
 +        else if (a == "--keys") keys = next();
 +        else if (a == "--out") out = next();
++        else if (a == "--info") info = next();
 +        else if (a == "--progress-fd") g_progress_fd = std::atoi(next().c_str());
 +        else return Fail(2, "unknown argument: " + a);
++    }
++    if (!info.empty()) {
++        if (!keys.empty()) {
++#ifdef _WIN32
++            _putenv_s("XDG_DATA_HOME", (fs::temp_directory_path() / "kartrecomp-info-home").string().c_str());
++#else
++            setenv("XDG_DATA_HOME", (fs::temp_directory_path() / "kartrecomp-info-home").string().c_str(), 1);
++#endif
++            Common::FS::SetSuyuPath(Common::FS::SuyuPath::KeysDir, fs::absolute(keys).parent_path());
++        }
++        return PrintInfo(info, keys);
 +    }
 +    if (update.empty() || out.empty() || keys.empty())
 +        return Fail(2, "usage: kartrecomp-export --base <base.nsp> --update <update.nsp> --keys <prod.keys> --out <dir>");
