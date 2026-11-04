@@ -134,7 +134,19 @@ user data (per user, XDG on Linux, %APPDATA% on Windows)
   stripped, chaining, cold attribute); the headless exporter is "extract the GUI's export code", unless the spike finds hand-edited
   state outside the generator, in which case fixing the generator comes first.
 
+## Decisions the user made after the builder check
+
+- **Speed: no slower than today, a hard requirement.** The plan starts with a measured spike of the engine/module split (the scripted
+  effects race, core-0 CPU samples and sub-58-fps seconds against the current unhooked build, mods off). If the split costs anything,
+  the runtime helpers and dispatch that sit on the hot path are compiled into the module (the engine stays prebuilt; the module build
+  gets a little longer). Do not accept a regression because the design is simpler.
+- **Windows plugins in the first Windows build: yes**, FSR 3.x (upscaling and frame generation) and DLSS, but built against the
+  **current Windows SDKs** (AMD FidelityFX for Windows, NVIDIA's Windows DLSS/NGX SDK), not as straight ports of the Linux plugins. Each
+  Windows plugin follows its vendor's current Windows guidance (library layout, device and instance extensions, backend choice). The
+  builder must research which backends the current Windows SDKs offer for the Vulkan renderer, and where a vendor offers a newer
+  upscaler on Windows only, report it before choosing (user decides new upscalers; FSR 4 is still waiting for a Vulkan release from AMD).
+  Vendor SDK libraries stay out of the repository and are not redistributed unless the vendor's license allows it.
+
 ## Open decisions for the user
 
-1. Performance budget for the engine/module split (see the question asked in chat).
-2. Whether the FSR 3 / DLSS plugins ship in the first Windows build.
+None left. Waiting for approval of this document.
