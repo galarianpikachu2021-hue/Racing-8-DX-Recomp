@@ -87,3 +87,13 @@ Built on Arch (current glibc): runs on distros with the same or newer glibc; an 
   42,117 core-0 samples, plain race 38,386 vs 37,438; gcc 40,944 / 36,316). So the tiers cost ~nothing; clang's code for these
   blocks is ~3% slower than gcc's. Default for the pipeline (and the only option on Android): clang tiered. Desktop users who
   want the last 3% can build with gcc -O2 (~205 CPU-min).
+
+## Modules as shared libraries (spike, 2026-11-04)
+The engine can load the game's code from `recompiled_<rtld|image|subsdk0..9|sdk>.so` in `KARTRECOMP_MODULE_DIR` instead of the modules linked into
+it (`KartStaticRecomp::Register`, same handshakes as the Windows `recompiled_*.dll` path). `tools/spike/build-modules.sh <export tree> <out>` builds
+them with clang (each module project separately: their target names collide; the export's top-level `project(Mario Kart 8 Deluxe_recompiled C)`
+has an unquoted name with spaces and does not configure; both are generator things to fix in the exporter). About 8 minutes at 4 jobs; image 875 MB,
+sdk 224 MB, subsdk0 161 MB, rtld 0.3 MB (unstripped).
+`tools/spike/module-vs-static.sh 3` (scripted effects race, mods off, 3 runs each, profile 60-120 s): core-0 samples static mean 40,682, module
+mean 38,045 (module not slower; the noise band is about 3%), `fully static` both. So the engine/module split costs nothing measurable and no helper
+needs moving into the module beyond what it already contains (`recomp_runtime.c` is compiled into each module).
