@@ -97,3 +97,18 @@ sdk 224 MB, subsdk0 161 MB, rtld 0.3 MB (unstripped).
 `tools/spike/module-vs-static.sh 3` (scripted effects race, mods off, 3 runs each, profile 60-120 s): core-0 samples static mean 40,682, module
 mean 38,045 (module not slower; the noise band is about 3%), `fully static` both. So the engine/module split costs nothing measurable and no helper
 needs moving into the module beyond what it already contains (`recomp_runtime.c` is compiled into each module).
+
+## Headless exporter and export reproducibility (2026-11-04)
+`kartrecomp-export --base <base.nsp> --update <update-3.0.4.nsp> --keys <prod.keys> --out <dir> [--progress-fd <n>]` (fork target
+`kartrecomp-export`, `suyu_cmd/kartrecomp_export.cpp`, no Qt, no window, no NAND profile) writes the same per-module C trees the GUI
+export wrote: opens the update NSP (its Program NCA holds the whole 64-bit ExeFS), refuses a 32-bit update (exit 2, "32-bit"), runs the
+generator (`core/recompiler/arm64_to_c.h`, translate-all, ABI 6 with FM1/GG1/FPX1 like the GUI defaults, no block hooks) and writes
+`<out>/{rtld,main,subsdk0,sdk}`, `nso/` and `export.json`. About 2 s and 1.7 GB for the whole game. Exit codes: 0 ok, 2 bad input
+(reason on stderr), 3 export failed. `tools/spike/export-smoke.sh` is its test.
+`tools/spike/compare-export.py <fresh> <reference>` compares block functions body by body: a fresh export matches
+`local/exefs-304b-tiered3` exactly (rtld 385, main 630,449, subsdk0 194,660, sdk 250,239 blocks, 0 body differences) once the
+generation-guard slot numbers (renumbered by the unit splitter) are ignored. So the generator needs no fixes: decision `generator-clean`.
+Hand-made state that is NOT in a fresh export and still comes from the splitter: unit splitting into hot/cold pieces
+(`split_export.py --hot=...`), shared guard tables, the per-module `recomp_registration.c` and `recomp_*_v1.h` markers (static link only).
+Generator finding: the top-level `project(<game name>_recompiled C)` is unquoted, so a title name with spaces broke the tree's own
+CMake; the exporter now passes `mk8d` as the name.
