@@ -84,6 +84,8 @@ private slots:
         plan.workDir = dir.filePath("work");
         plan.outDir = dir.filePath("out");
         plan.compiler = dir.filePath("fakecc");
+        plan.compileArgs = {"--sysroot=/toolchain/sysroot"};
+        plan.linkArgs = {"-nostdlib", "-lm"};
         plan.jobs = 2;
         const auto result = BuildRunner::Build(plan, nullptr);
         QVERIFY2(result.ok, qPrintable(result.message));
@@ -94,6 +96,11 @@ private slots:
         QVERIFY(calls.contains("recompiled_rtld_0_p0.c"));     // a split piece
         QVERIFY(calls.contains("recomp_runtime.c") && calls.contains("recomp_export.c"));
         QVERIFY(QFile::exists(dir.filePath("out/recompiled_rtld.so")));
+        // compile args go to every compile, link args only to the link
+        for (const QByteArray& line : calls.split('\n')) {
+            if (line.contains(" -c ")) QVERIFY2(line.contains("--sysroot=/toolchain/sysroot") && !line.contains("-nostdlib"), line.constData());
+            if (line.contains("-shared")) QVERIFY2(line.contains("-nostdlib") && !line.contains("--sysroot"), line.constData());
+        }
     }
 };
 QTEST_APPLESS_MAIN(TestBuildRunner)

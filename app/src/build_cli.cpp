@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // kartrecomp-build: command-line front end of BuildRunner (CI, acceptance runs, support).
-//   kartrecomp-build <export dir> <work dir> <out dir> --compiler <clang> [--hot <list>] [--jobs <n>] [-- <extra compiler args>]
+//   kartrecomp-build <export dir> <work dir> <out dir> (--toolchain <dir> | --compiler <clang>) [--hot <list>] [--jobs <n>] [-- <extra args>]
 // Exit codes: 0 ok, 1 build failed, 2 bad input or not enough RAM/disk.
 #include <QCoreApplication>
 #include <QFile>
@@ -28,13 +28,14 @@ int main(int argc, char** argv) {
     int jobs = 0;
     for (int i = 0; i < a.size(); ++i) {
         if (a[i] == "--compiler" && i + 1 < a.size()) plan.compiler = a[++i];
+        else if (a[i] == "--toolchain" && i + 1 < a.size()) plan.useToolchain(a[++i]);
         else if (a[i] == "--hot" && i + 1 < a.size()) plan.hotList = a[++i];
         else if (a[i] == "--jobs" && i + 1 < a.size()) jobs = a[++i].toInt();
-        else if (a[i] == "--") { plan.extraArgs = a.mid(i + 1); break; }
+        else if (a[i] == "--") { plan.compileArgs += a.mid(i + 1); plan.linkArgs += a.mid(i + 1); break; }
         else positional << a[i];
     }
     if (positional.size() != 3 || plan.compiler.isEmpty()) {
-        std::fprintf(stderr, "usage: kartrecomp-build <export dir> <work dir> <out dir> --compiler <clang> [--hot <list>] [--jobs <n>] [-- <args>]\n");
+        std::fprintf(stderr, "usage: kartrecomp-build <export dir> <work dir> <out dir> (--toolchain <dir> | --compiler <clang>) [--hot <list>] [--jobs <n>] [-- <args>]\n");
         return 2;
     }
     plan.exportDir = positional[0];

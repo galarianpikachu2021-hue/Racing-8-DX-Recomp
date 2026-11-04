@@ -75,6 +75,14 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
     return true;
 }
 
+void BuildPlan::useToolchain(const QString& t) {
+    compiler = QDir(t).filePath("bin/clang");
+    compileArgs = {"--target=x86_64-linux-gnu", "--sysroot=" + QDir(t).filePath("sysroot")};
+    builtins = {QDir(t).filePath("lib/libclang_rt.builtins-x86_64.a")};
+    linkArgs = {"--target=x86_64-linux-gnu", "--sysroot=" + QDir(t).filePath("sysroot"), "-fuse-ld=lld", "-nostdlib",
+                "-L" + QDir(t).filePath("sysroot/lib/x86_64-linux-gnu"), "-L" + QDir(t).filePath("sysroot/usr/lib/x86_64-linux-gnu")};
+}
+
 BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(int, int, const QString&)>& progress,
                                const std::atomic<bool>* cancel) {
     QSet<QByteArray> hot;
@@ -116,6 +124,8 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
     }
     if (modules.isEmpty()) return {false, QStringLiteral("%1 holds no exported modules").arg(plan.exportDir)};
 
+    for (Module& m : modules)
+        for (CompileJob& j : m.jobs) j.args = plan.compileArgs + j.args;
     QList<const CompileJob*> pending;
     int total = 0, done = 0;
     for (const Module& m : modules) {
@@ -163,7 +173,8 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
         for (const CompileJob& j : m.jobs) objects << j.object;
         const QString out = QDir(plan.outDir).filePath(QStringLiteral("recompiled_%1.so").arg(m.name));
         QProcess link;
-        link.start(plan.compiler, QStringList{"-shared"} + plan.extraArgs + QStringList{"-o", out} + objects + QStringList{"-lm"});
+        link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{"-o", out} + objects +
+                       QStringList{"-lm", "-lc"} + plan.builtins);
         link.waitForFinished(-1);
         if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0)
             return {false, QStringLiteral("linking %1 failed: %2").arg(out, QString::fromLocal8Bit(link.readAllStandardError()).trimmed())};

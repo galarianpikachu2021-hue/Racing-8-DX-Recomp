@@ -23,7 +23,11 @@ struct BuildPlan {
     QString outDir;    // recompiled_<name>.so
     QString compiler;  // clang
     QString hotList;   // file with one hot block function name per line (may be empty: everything compiled cold)
-    QStringList extraArgs; // e.g. --sysroot=..., -fuse-ld=lld
+    QStringList compileArgs; // added to every compile, e.g. --target=x86_64-linux-gnu --sysroot=<toolchain>/sysroot
+    QStringList builtins;    // compiler-rt builtins archive(s) linked last, e.g. <toolchain>/lib/libclang_rt.builtins-x86_64.a
+    QStringList linkArgs;    // added to the module link, e.g. -fuse-ld=lld -nostdlib -L... (before the objects) and the libraries
+    /// Fills compiler, compileArgs and linkArgs from a bundled toolchain folder (packaging/make-toolchain.sh).
+    void useToolchain(const QString& toolchainDir);
     int jobs = 1;
 };
 
