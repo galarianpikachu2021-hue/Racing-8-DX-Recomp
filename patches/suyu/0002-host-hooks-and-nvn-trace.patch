@@ -689,10 +689,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..3f2edca302
+index 0000000000..332973b8a3
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,485 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/kart_hook_trace.h"
 +
@@ -747,7 +747,12 @@ index 0000000000..3f2edca302
 +
 +} // namespace
 +
++#if defined(_MSC_VER) && !defined(__clang__)
++// MSVC has no weak symbols. The shipped unhooked build has no hook map at all, so on MSVC it is simply absent.
++#define g_main_hookmap (static_cast<uint8_t*>(nullptr))
++#else
 +extern "C" uint8_t g_main_hookmap[] __attribute__((weak));
++#endif
 +constexpr u64 kHookMapEntries = 0x400000;
 +
 +u64 MainBase() { return g_main_base; }

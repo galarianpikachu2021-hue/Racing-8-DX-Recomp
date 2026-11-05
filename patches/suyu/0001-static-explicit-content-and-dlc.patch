@@ -134,7 +134,7 @@ index bc82572582..ded989a771 100644
      // Amplitude for HD rumble needs no modification
      if (joystick->HasHDRumble()) {
 diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
-index 5fbe66c62b..ff0847c545 100644
+index 5fbe66c62b..1ed7b03bf6 100644
 --- a/src/suyu_cmd/CMakeLists.txt
 +++ b/src/suyu_cmd/CMakeLists.txt
 @@ -24,8 +24,23 @@ if (SUYU_CMD OR YUZU_CMD)
@@ -161,7 +161,7 @@ index 5fbe66c62b..ff0847c545 100644
          sdl_config.cpp
          sdl_config.h
          suyu.cpp
-@@ -48,171 +63,29 @@ if (SUYU_CMD OR YUZU_CMD)
+@@ -48,171 +63,33 @@ if (SUYU_CMD OR YUZU_CMD)
      # This is an *additional* target - plain suyu-cmd stays game-agnostic.
      # ---------------------------------------------------------------------
      if (SUYU_CMD_RECOMP_DIR AND EXISTS "${SUYU_CMD_RECOMP_DIR}/recomp_registration.c")
@@ -346,6 +346,10 @@ index 5fbe66c62b..ff0847c545 100644
 +        add_executable(mk8d-engine ${SUYU_CMD_SOURCES} ../frontend_common/kart_static_recomp.cpp)
 +        target_compile_definitions(mk8d-engine PRIVATE SUYU_CMD_STATIC_RECOMP=1 SUYU_CMD_STATIC_RECOMP_STRICT=1 KARTRECOMP_ENGINE=1
 +                                   KARTRECOMP_ENGINE_VERSION="${KARTRECOMP_ENGINE_VERSION}")
++        if (MSVC)
++            # stb headers define unused static functions; this tree turns that warning into an error
++            target_compile_options(mk8d-engine PRIVATE /wd4505)
++        endif()
 +        list(APPEND SUYU_CMD_TARGETS mk8d-engine)
 +    endif()
 +
@@ -450,17 +454,16 @@ index 0000000000..cfff83c84e
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..9e48a1c1f7 100644
+index bca83ab630..4a88d1c5a7 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-@@ -1,6 +1,16 @@
+@@ -1,6 +1,15 @@
  // SPDX-FileCopyrightText: 2016 Citra Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
-+#include <unistd.h>
++#include "suyu_cmd/kr_platform.h"
 +#include <cstring>
 +#include <cerrno>
-+#include <spawn.h>
 +#include <chrono>
 +#include <mutex>
 +#include <ctime>
@@ -470,7 +473,7 @@ index bca83ab630..9e48a1c1f7 100644
  #include <algorithm>
  #include <cstdlib>
  #include <cwchar>
-@@ -28,6 +38,7 @@ static constexpr Uint8 SDL_RELEASED = 0;
+@@ -28,6 +37,7 @@ static constexpr Uint8 SDL_RELEASED = 0;
  #include "common/settings_input.h"
  #include "suyu_cmd/controller_assign.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
@@ -478,7 +481,7 @@ index bca83ab630..9e48a1c1f7 100644
  #include "suyu_cmd/native_status.h"
  #include "suyu_cmd/sdl_config.h"
  #include "suyu_cmd/suyu_icon.h"
-@@ -85,6 +96,21 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
+@@ -85,6 +95,21 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
          player.motions[motion] = param.Serialize();
      }
  }
@@ -500,7 +503,7 @@ index bca83ab630..9e48a1c1f7 100644
  } // namespace
  
  #ifdef _WIN32
-@@ -885,6 +911,29 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
+@@ -885,6 +910,29 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
          return;
      }
  #endif
@@ -530,7 +533,7 @@ index bca83ab630..9e48a1c1f7 100644
      if (state == SDL_PRESSED) {
          input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
      } else if (state == SDL_RELEASED) {
-@@ -900,7 +949,113 @@ void EmuWindow_SDL2::EnableTasPlayback() {
+@@ -900,7 +948,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
      tas_playback = true;
  }
  
@@ -581,30 +584,18 @@ index bca83ab630..9e48a1c1f7 100644
 +                argv_s.push_back(a[i]);
 +            }
 +        } else {
-+            std::error_code ec;
-+            const auto self = std::filesystem::read_symlink("/proc/self/exe", ec);
++            const auto self = KrPlatform::SelfExe();
 +            argv_s = KartOverlay::LaunchArgs();
-+            if (!ec) argv_s[0] = self.string();
++            if (!self.empty()) argv_s[0] = self.string();
 +        }
-+        std::vector<char*> args;
-+        for (auto& a : argv_s) args.push_back(a.data());
-+        args.push_back(nullptr);
-+        posix_spawnattr_t attr;
-+        posix_spawnattr_init(&attr);
-+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
-+        posix_spawn_file_actions_t actions;
-+        posix_spawn_file_actions_init(&actions);
-+        posix_spawn_file_actions_addclosefrom_np(&actions, 3);
-+        pid_t pid = 0;
-+        const int err = posix_spawn(&pid, args[0], &actions, &attr, args.data(), environ);
-+        posix_spawn_file_actions_destroy(&actions);
-+        posix_spawnattr_destroy(&attr);
++        long pid = 0;
++        const int err = KrPlatform::SpawnDetached(argv_s, &pid);
 +        if (err == 0) {
 +            LOG_INFO(Frontend, "restarting to apply the mod changes (new process {})", pid);
 +            std::fflush(nullptr);
 +            _exit(0);
 +        }
-+        LOG_ERROR(Frontend, "restart failed: {}", std::strerror(err));
++        LOG_ERROR(Frontend, "restart failed: error {}", err);
 +    }
 +    // Start or stop recording (the overlay's request, or KARTRECOMP_RECORD=1 from the first frame).
 +    if (!tas_playback) {
@@ -644,7 +635,7 @@ index bca83ab630..9e48a1c1f7 100644
      if (!tas_playback) {
          return;
      }
-@@ -1215,6 +1370,8 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1215,6 +1357,8 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
      if (gamepad_check_pending) {
          AutoAssignControllers();
      }
@@ -653,7 +644,7 @@ index bca83ab630..9e48a1c1f7 100644
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
-@@ -1243,7 +1400,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1243,7 +1387,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
      if (!g_export_package || !SdlConfig::auto_assign_controllers ||
@@ -662,7 +653,7 @@ index bca83ab630..9e48a1c1f7 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,19 +1425,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,19 +1412,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
@@ -683,7 +674,7 @@ index bca83ab630..9e48a1c1f7 100644
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
      if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
-@@ -1298,6 +1444,117 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1431,117 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
@@ -1285,6 +1276,146 @@ index 0000000000..6edacab4ef
 +    Progress(100, "Done");
 +    return 0;
 +}
+diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
+new file mode 100644
+index 0000000000..6f54febc79
+--- /dev/null
++++ b/src/suyu_cmd/kr_platform.h
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
++#pragma once
++
++#include <cstdlib>
++#include <filesystem>
++#include <string>
++#include <vector>
++
++#ifdef _WIN32
++#define NOMINMAX
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#else
++#include <dlfcn.h>
++#include <spawn.h>
++#include <sys/resource.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++extern char** environ;
++#endif
++
++namespace KrPlatform {
++
++#ifdef _WIN32
++inline constexpr const char* kPluginPrefix = "kr_";
++inline constexpr const char* kPluginExt = ".dll";
++#else
++inline constexpr const char* kPluginPrefix = "libkr_";
++inline constexpr const char* kPluginExt = ".so";
++#endif
++
++// plugins/<prefix><kind>_<name><ext>, e.g. plugins/libkr_upscaler_fsr3.so or plugins/kr_upscaler_fsr3.dll
++inline std::string PluginFile(const std::string& kind, const std::string& name) {
++    return std::string("plugins/") + kPluginPrefix + kind + "_" + name + kPluginExt;
++}
++
++inline void* LibOpen(const std::string& path) {
++#ifdef _WIN32
++    return reinterpret_cast<void*>(::LoadLibraryA(path.c_str()));
++#else
++    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
++#endif
++}
++
++inline void* LibSym(void* lib, const char* name) {
++#ifdef _WIN32
++    return reinterpret_cast<void*>(::GetProcAddress(reinterpret_cast<HMODULE>(lib), name));
++#else
++    return dlsym(lib, name);
++#endif
++}
++
++inline std::string LibError() {
++#ifdef _WIN32
++    return "Windows error " + std::to_string(::GetLastError());
++#else
++    const char* e = dlerror();
++    return e ? e : "unknown error";
++#endif
++}
++
++// The texture pre-decode thread should not compete with the guest threads.
++inline void CurrentThreadLowPriority() {
++#ifdef _WIN32
++    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++#else
++    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
++#endif
++}
++
++// Start `argv` as a fresh detached process (no inherited handles). Returns 0 on success, else an errno-style code.
++inline int SpawnDetached(std::vector<std::string> argv, long* pid_out) {
++#ifdef _WIN32
++    std::string cmd;
++    for (const auto& a : argv) {
++        if (!cmd.empty()) cmd += ' ';
++        cmd += '"' + a + '"';
++    }
++    STARTUPINFOA si{};
++    si.cb = sizeof(si);
++    PROCESS_INFORMATION pi{};
++    if (!::CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
++        return static_cast<int>(::GetLastError());
++    }
++    if (pid_out) *pid_out = static_cast<long>(pi.dwProcessId);
++    ::CloseHandle(pi.hThread);
++    ::CloseHandle(pi.hProcess);
++    return 0;
++#else
++    std::vector<char*> args;
++    for (auto& a : argv) args.push_back(a.data());
++    args.push_back(nullptr);
++    posix_spawnattr_t attr;
++    posix_spawnattr_init(&attr);
++    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
++    posix_spawn_file_actions_t actions;
++    posix_spawn_file_actions_init(&actions);
++    posix_spawn_file_actions_addclosefrom_np(&actions, 3);
++    pid_t pid = 0;
++    const int err = posix_spawn(&pid, args[0], &actions, &attr, args.data(), environ);
++    posix_spawn_file_actions_destroy(&actions);
++    posix_spawnattr_destroy(&attr);
++    if (pid_out) *pid_out = static_cast<long>(pid);
++    return err;
++#endif
++}
++
++// The path of the running executable.
++inline std::filesystem::path SelfExe() {
++#ifdef _WIN32
++    std::wstring buf(32768, L'\0');
++    const DWORD n = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
++    buf.resize(n);
++    return std::filesystem::path(buf);
++#else
++    std::error_code ec;
++    return std::filesystem::read_symlink("/proc/self/exe", ec);
++#endif
++}
++
++// XDG-style base folders on Linux; on Windows the launcher sets the same variables, with %APPDATA% / %LOCALAPPDATA% as fallbacks.
++inline std::filesystem::path DataDirectory(const std::string& env_name) {
++    if (const char* v = std::getenv(env_name.c_str()); v && *v) return v;
++#ifdef _WIN32
++    const char* fallback = env_name == "XDG_CACHE_HOME" ? "LOCALAPPDATA" : "APPDATA";
++    if (const char* v = std::getenv(fallback); v && *v) return v;
++    return {};
++#else
++    return {};
++#endif
++}
++
++} // namespace KrPlatform
 diff --git a/src/suyu_cmd/mem_scan.h b/src/suyu_cmd/mem_scan.h
 new file mode 100644
 index 0000000000..25c60e1a3a
@@ -13961,14 +14092,14 @@ index 0000000000..e8bd970ace
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/upscaler.cpp b/src/suyu_cmd/native_gpu/upscaler.cpp
 new file mode 100644
-index 0000000000..e0db87d7c2
+index 0000000000..6f543ed9b7
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/upscaler.cpp
 @@ -0,0 +1,228 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/upscaler.h"
 +
-+#include <dlfcn.h>
++#include "suyu_cmd/kr_platform.h"
 +
 +#include <filesystem>
 +
@@ -14065,13 +14196,13 @@ index 0000000000..e0db87d7c2
 +        api = &kPassthrough;
 +    } else {
 +        const char* lib_env = std::getenv("KARTRECOMP_UPSCALER_LIB");
-+        const std::string path = lib_env ? lib_env : "plugins/libkr_upscaler_" + name + ".so";
-+        library = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
++        const std::string path = lib_env ? lib_env : KrPlatform::PluginFile("upscaler", name);
++        library = KrPlatform::LibOpen(path);
 +        if (!library) {
-+            LOG_ERROR(Frontend, "upscaler '{}': cannot load {} ({})", name, path, dlerror());
++            LOG_ERROR(Frontend, "upscaler '{}': cannot load {} ({})", name, path, KrPlatform::LibError());
 +            return false;
 +        }
-+        const auto get = reinterpret_cast<KrUpscalerGetApi>(dlsym(library, "kr_upscaler_get_api"));
++        const auto get = reinterpret_cast<KrUpscalerGetApi>(KrPlatform::LibSym(library, "kr_upscaler_get_api"));
 +        api = get ? get() : nullptr;
 +        if (!api || api->abi_version != KR_UPSCALER_ABI_VERSION) {
 +            LOG_ERROR(Frontend, "upscaler '{}': {} has no compatible kr_upscaler_get_api", name, path);
@@ -14134,7 +14265,7 @@ index 0000000000..e0db87d7c2
 +    std::error_code ec;
 +    for (const auto& entry : std::filesystem::directory_iterator("plugins", ec)) {
 +        const std::string file = entry.path().filename().string();
-+        if (file.rfind("libkr_framegen_", 0) == 0 && entry.path().extension() == ".so") {
++        if (file.rfind(std::string(KrPlatform::kPluginPrefix) + "framegen_", 0) == 0 && entry.path().extension() == KrPlatform::kPluginExt) {
 +            names.push_back(file.substr(15, file.size() - 15 - 3));
 +        }
 +    }
@@ -14146,13 +14277,13 @@ index 0000000000..e0db87d7c2
 +    if (name.empty() || name == "builtin") {
 +        return false;
 +    }
-+    const std::string path = "plugins/libkr_framegen_" + name + ".so";
-+    library = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
++    const std::string path = KrPlatform::PluginFile("framegen", name);
++    library = KrPlatform::LibOpen(path);
 +    if (!library) {
-+        LOG_ERROR(Frontend, "frame generation '{}': cannot load {} ({})", name, path, dlerror());
++        LOG_ERROR(Frontend, "frame generation '{}': cannot load {} ({})", name, path, KrPlatform::LibError());
 +        return false;
 +    }
-+    const auto get = reinterpret_cast<KrFrameGenGetApi>(dlsym(library, "kr_framegen_get_api"));
++    const auto get = reinterpret_cast<KrFrameGenGetApi>(KrPlatform::LibSym(library, "kr_framegen_get_api"));
 +    api = get ? get() : nullptr;
 +    if (!api || api->abi_version != KR_FRAMEGEN_ABI_VERSION) {
 +        LOG_ERROR(Frontend, "frame generation '{}': {} has no compatible kr_framegen_get_api", name, path);
@@ -14391,10 +14522,10 @@ index 0000000000..9407f3a6c5
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..f4518d7090
+index 0000000000..e66d0c42fe
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7652 @@
+@@ -0,0 +1,7650 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -14421,9 +14552,7 @@ index 0000000000..f4518d7090
 +#include <chrono>
 +#include <cmath>
 +#include <condition_variable>
-+#include <sys/resource.h>
-+#include <sys/syscall.h>
-+#include <unistd.h>
++#include "suyu_cmd/kr_platform.h"
 +#include <cstdlib>
 +#include <cstring>
 +#include <filesystem>
@@ -18660,7 +18789,7 @@ index 0000000000..f4518d7090
 +    }
 +
 +    void PredecodeWorker() {
-+        setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
++        KrPlatform::CurrentThreadLowPriority();
 +        while (true) {
 +            std::pair<u64, Tegra::Texture::TICEntry> job;
 +            {
@@ -22351,10 +22480,18 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..b028d514a6 100644
+index 03f738eb63..24d6d7d05c 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
-@@ -24,10 +24,13 @@
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: 2014 Citra Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "suyu_cmd/kr_platform.h"
+ #include <algorithm>
+ #include <atomic>
+ #include <array>
+@@ -24,10 +25,13 @@
  #include <stb_image_write.h>
  #include <SDL3/SDL_messagebox.h>
  #include <SDL3/SDL_misc.h>
@@ -22368,7 +22505,7 @@ index 03f738eb63..b028d514a6 100644
  #include "common/logging/log.h"
  #include "common/microprofile.h"
  #include "common/fs/path_util.h"
-@@ -45,6 +48,8 @@
+@@ -45,6 +49,8 @@
  #include "core/cpu_manager.h"
  #include "core/crypto/key_manager.h"
  #include "core/file_sys/content_archive.h"
@@ -22377,7 +22514,7 @@ index 03f738eb63..b028d514a6 100644
  #include "core/file_sys/nca_metadata.h"
  #include "core/file_sys/registered_cache.h"
  #include "core/file_sys/card_image.h"
-@@ -54,6 +59,8 @@
+@@ -54,6 +60,8 @@
  #include "core/hle/service/am/applet_manager.h"
  #include "core/hle/service/am/service/library_applet_creator.h"
  #include "core/hle/service/filesystem/filesystem.h"
@@ -22386,7 +22523,7 @@ index 03f738eb63..b028d514a6 100644
  #include <map>
  #include "common/lz4_compression.h"
  #include "core/loader/nso.h"
-@@ -62,8 +69,14 @@
+@@ -62,8 +70,14 @@
  #include "frontend_common/config.h"
  #include "input_common/main.h"
  #include "network/network.h"
@@ -22401,7 +22538,7 @@ index 03f738eb63..b028d514a6 100644
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2_gl.h"
  #ifdef __APPLE__
-@@ -173,56 +186,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
+@@ -173,56 +187,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
  } // namespace
  #endif
  
@@ -22458,7 +22595,7 @@ index 03f738eb63..b028d514a6 100644
  
  static void PrintHelp(const char* argv0) {
      std::cout << "Usage: " << argv0
-@@ -233,6 +196,7 @@ static void PrintHelp(const char* argv0) {
+@@ -233,6 +197,7 @@ static void PrintHelp(const char* argv0) {
                   "--app-name            Display name when the loader has no title metadata\n"
                   "--content-base        Read-only base XCI/NSP for an explicit update pair\n"
                   "--content-update      Read-only matching update NSP (both flags required)\n"
@@ -22466,7 +22603,7 @@ index 03f738eb63..b028d514a6 100644
                   "--content-probe       Verify that pair and exit without a window or game\n"
                   "--content-dump        New directory for resolved data (requires --content-probe)\n"
                   "-h, --help            Display this help and exit\n"
-@@ -366,9 +330,43 @@ bool g_native_export_mode = false;
+@@ -366,9 +331,43 @@ bool g_native_export_mode = false;
  bool g_export_package = false;
  SdlConfig* g_sdl_config = nullptr;
  
@@ -22510,7 +22647,7 @@ index 03f738eb63..b028d514a6 100644
      }
  }
  
-@@ -917,7 +915,105 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +916,105 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -22616,7 +22753,7 @@ index 03f738eb63..b028d514a6 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1074,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1075,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -22626,15 +22763,15 @@ index 03f738eb63..b028d514a6 100644
 +        const char* app_name = std::getenv("KARTRECOMP_APP_NAME");
 +        const bool xdg_app = app_name && *app_name;
 +        const std::filesystem::path user_root =
-+            xdg_app ? FS::GetDataDirectory("XDG_DATA_HOME") / app_name : exe_dir / "user";
++            xdg_app ? KrPlatform::DataDirectory("XDG_DATA_HOME") / app_name : exe_dir / "user";
 +        const std::filesystem::path config_root =
-+            xdg_app ? FS::GetDataDirectory("XDG_CONFIG_HOME") / app_name : user_root / "config";
++            xdg_app ? KrPlatform::DataDirectory("XDG_CONFIG_HOME") / app_name : user_root / "config";
 +        const std::filesystem::path cache_root =
-+            xdg_app ? FS::GetDataDirectory("XDG_CACHE_HOME") / app_name : user_root / "cache";
++            xdg_app ? KrPlatform::DataDirectory("XDG_CACHE_HOME") / app_name : user_root / "cache";
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1109,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1110,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -22650,7 +22787,7 @@ index 03f738eb63..b028d514a6 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1133,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1134,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -22668,7 +22805,18 @@ index 03f738eb63..b028d514a6 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1091,6 +1202,7 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1151,8 @@ int main(int argc, char** argv) {
+                 installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
+                 installed_config = installed_root / "config";
+ #else
+-                installed_root = FS::GetDataDirectory("XDG_DATA_HOME") / "suyu";
+-                installed_config = FS::GetDataDirectory("XDG_CONFIG_HOME") / "suyu";
++                installed_root = KrPlatform::DataDirectory("XDG_DATA_HOME") / "suyu";
++                installed_config = KrPlatform::DataDirectory("XDG_CONFIG_HOME") / "suyu";
+ #endif
+             }
+             // Coverage gaps are pooled in the installed suyu's user folder, which
+@@ -1091,6 +1203,7 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -22676,7 +22824,7 @@ index 03f738eb63..b028d514a6 100644
      bool explicit_content_probe = false;
      std::string explicit_content_dump;
      std::string program_args;
-@@ -1126,12 +1238,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1239,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -22691,7 +22839,7 @@ index 03f738eb63..b028d514a6 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1271,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1272,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -22701,7 +22849,7 @@ index 03f738eb63..b028d514a6 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1279,7 +1395,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1396,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -22711,7 +22859,7 @@ index 03f738eb63..b028d514a6 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1408,34 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1409,34 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -22747,7 +22895,7 @@ index 03f738eb63..b028d514a6 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1521,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1522,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -22764,7 +22912,7 @@ index 03f738eb63..b028d514a6 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1575,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1576,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -22859,7 +23007,7 @@ index 03f738eb63..b028d514a6 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1742,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1743,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -22867,7 +23015,7 @@ index 03f738eb63..b028d514a6 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1776,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1777,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -22875,7 +23023,7 @@ index 03f738eb63..b028d514a6 100644
 +        // KARTRECOMP_NO_MODS (with the RomFS dump): read the game as it is without any mod, for the launcher's text merge and conversion.
 +        // KARTRECOMP_MODS_DIR: a different mods folder (tests); KARTRECOMP_NO_MODS: none at all.
 +        const char* app_name = std::getenv("KARTRECOMP_APP_NAME");
-+        const auto mods_base = app_name && *app_name ? Common::FS::GetDataDirectory("XDG_DATA_HOME") / app_name : exe_dir;
++        const auto mods_base = app_name && *app_name ? KrPlatform::DataDirectory("XDG_DATA_HOME") / app_name : exe_dir;
 +        const auto local_mods = std::getenv("KARTRECOMP_MODS_DIR")
 +                                    ? std::filesystem::path(std::getenv("KARTRECOMP_MODS_DIR"))
 +                                    : mods_base / (std::getenv("KARTRECOMP_NO_MODS") ? "mods-none" : "mods");
@@ -22885,7 +23033,7 @@ index 03f738eb63..b028d514a6 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1783,7 +1851,7 @@ int main(int argc, char** argv) {
+@@ -1783,7 +1852,7 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -22894,7 +23042,7 @@ index 03f738eb63..b028d514a6 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +1865,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +1866,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -22923,7 +23071,7 @@ index 03f738eb63..b028d514a6 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +1915,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +1916,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -22950,7 +23098,7 @@ index 03f738eb63..b028d514a6 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1925,6 +2035,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2036,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -22960,7 +23108,7 @@ index 03f738eb63..b028d514a6 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2260,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2261,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -22968,7 +23116,7 @@ index 03f738eb63..b028d514a6 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2188,6 +2302,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2303,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -22986,7 +23134,7 @@ index 03f738eb63..b028d514a6 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2333,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2334,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -22997,7 +23145,7 @@ index 03f738eb63..b028d514a6 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2361,7 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2362,7 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -23005,7 +23153,7 @@ index 03f738eb63..b028d514a6 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2369,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2370,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
