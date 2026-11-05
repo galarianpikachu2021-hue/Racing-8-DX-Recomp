@@ -70,6 +70,35 @@ int BuildRunner::JobsForRam(qint64 availableBytes, int threads) {
     return static_cast<int>(std::max<qint64>(1, std::min<qint64>(cpuJobs, availableBytes / (2 * kGiB))));
 }
 
+bool BuildRunner::LinkModule(const QString& compiler, const QStringList& linkArgs, const QStringList& libs, const QStringList& builtins,
+                             const QStringList& objects, const QString& out, const QString& rspPath, QString* error,
+                             const std::atomic<bool>* cancel) {
+    QDir().mkpath(QFileInfo(rspPath).absolutePath());
+    QFile rsp(rspPath);
+    if (!rsp.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error) *error = QStringLiteral("cannot write %1").arg(rspPath);
+        return false;
+    }
+    for (const QString& o : objects) rsp.write("\"" + QString(o).replace('\\', '/').toUtf8() + "\"\n");
+    rsp.close();
+    QProcess link;
+    DieWithParent(link);
+    link.start(compiler, QStringList{"-shared"} + linkArgs + QStringList{"-o", out, "@" + rspPath} + libs + builtins);
+    if (!link.waitForStarted()) {
+        if (error) *error = QStringLiteral("cannot start %1: %2").arg(compiler, link.errorString());
+        return false;
+    }
+    while (!link.waitForFinished(200)) {
+        if (link.state() == QProcess::NotRunning) break; // never wait on a process that is already gone
+        if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); if (error) *error = QStringLiteral("Cancelled."); return false; }
+    }
+    if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0) {
+        if (error) *error = QString::fromLocal8Bit(link.readAllStandardError()).trimmed();
+        return false;
+    }
+    return true;
+}
+
 void BuildRunner::OrderForScheduling(QList<const CompileJob*>& jobs) {
     QHash<const CompileJob*, qint64> size;
     for (const CompileJob* j : jobs) size.insert(j, QFileInfo(j->source).size());
@@ -297,17 +326,12 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
             QStringList objects;
             for (const CompileJob& j : mp->jobs) objects << j.object;
             const QString out = QDir(plan.outDir).filePath(ModuleFileName(mp->name));
-            QProcess link;
-            DieWithParent(link);
-            link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{linkThreads, "-o", out} + objects +
-                           plan.linkLibs + plan.builtins);
-            while (!link.waitForFinished(200)) {
-                if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); return; }
-            }
+            QString error;
+            const bool ok = LinkModule(plan.compiler, plan.linkArgs + QStringList{linkThreads}, plan.linkLibs, plan.builtins, objects, out,
+                                       QDir(plan.workDir).filePath(mp->name + ".link.rsp"), &error, cancel);
             std::lock_guard<std::mutex> lock(mutex);
-            if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0) {
-                if (linkFailure.isEmpty())
-                    linkFailure = QStringLiteral("linking %1 failed: %2").arg(out, QString::fromLocal8Bit(link.readAllStandardError()).trimmed());
+            if (!ok) {
+                if (linkFailure.isEmpty()) linkFailure = QStringLiteral("linking %1 failed: %2").arg(out, error);
                 return;
             }
             ++linked;

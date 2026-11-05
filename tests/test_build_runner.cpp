@@ -137,6 +137,68 @@ private slots:
         QVERIFY(!BuildRunner::RunCompileJob(dir.filePath("fakecc"), jobs[0], &err));
         QVERIFY2(err.contains("memory"), qPrintable(err));
     }
+    void aCompilerThatPrintsAHugeAmountOfWarningsDoesNotHang() {
+        NEEDS_SH();
+        QTemporaryDir dir;
+        QDir(dir.path()).mkpath("src");
+        QFile(dir.filePath("src/a.c")).open(QIODevice::WriteOnly);
+        QFile fake(dir.filePath("fakecc"));
+        fake.open(QIODevice::WriteOnly);
+        // 2 MB on stderr and 2 MB on stdout (far beyond any pipe buffer), then the object, exit 0
+        fake.write("#!/bin/sh\nout=; while [ $# -gt 0 ]; do case \"$1\" in -o) out=$2; shift;; esac; shift; done\n"
+                   "head -c 2000000 /dev/zero | tr '\\0' 'w' >&2\nhead -c 2000000 /dev/zero | tr '\\0' 'o'\necho obj > \"$out\"\n");
+        fake.close();
+        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
+        auto jobs = BuildRunner::PlanCompileJobs(dir.filePath("src"), dir.filePath("obj"), {"a.c"}, {});
+        std::atomic<bool> cancel{false};
+        std::thread watchdog([&] { for (int i = 0; i < 100 && !cancel; ++i) QThread::msleep(100); cancel = true; });
+        QString err;
+        const bool ok = BuildRunner::RunCompileJob(dir.filePath("fakecc"), jobs[0], &err, &cancel);
+        const bool hung = cancel.load();
+        cancel = true;
+        watchdog.join();
+        QVERIFY2(!hung && ok, "the compiler blocked on a full output pipe");
+    }
+    void aLinkerThatCannotStartIsAnErrorNotAnEndlessWait() {
+        QTemporaryDir dir;
+        std::atomic<bool> cancel{false};
+        std::thread watchdog([&] { for (int i = 0; i < 50 && !cancel; ++i) QThread::msleep(100); cancel = true; });
+        QString err;
+        const bool ok = BuildRunner::LinkModule(dir.filePath("no-such-linker"), {"-shared"}, {"-lm"}, {}, {"a.o"}, dir.filePath("out.so"),
+                                                dir.filePath("out.rsp"), &err, &cancel);
+        const bool hung = cancel.load();
+        cancel = true;
+        watchdog.join();
+        QVERIFY2(!hung, "the link wait never ended");
+        QVERIFY(!ok);
+        QVERIFY2(err.contains("start"), qPrintable(err));
+    }
+    void aThousandsOfObjectsGoInAResponseFileNotOnTheCommandLine() {
+        NEEDS_SH();
+        QTemporaryDir dir;
+        QFile fake(dir.filePath("fakeld"));
+        fake.open(QIODevice::WriteOnly);
+        // records its own command line length and copies the response file, then writes the -o file
+        fake.write(("#!/bin/sh\nout=; for a in \"$@\"; do case \"$prev\" in -o) out=$a;; esac; prev=$a; done\n"
+                    "echo \"$*\" | wc -c > " + dir.filePath("cmdlen").toLocal8Bit() + "\n"
+                    "for a in \"$@\"; do case \"$a\" in @*) cp \"${a#@}\" " + dir.filePath("rsp.copy").toLocal8Bit() + ";; esac; done\n"
+                    "echo dll > \"$out\"\n"));
+        fake.close();
+        fake.setPermissions(fake.permissions() | QFileDevice::ExeOwner);
+        QStringList objects;
+        for (int i = 0; i < 6000; ++i) objects << QString("/very/long/work folder/path/to/object/recompiled_main_%1.c.o").arg(i);
+        QString err;
+        QVERIFY2(BuildRunner::LinkModule(dir.filePath("fakeld"), {"-shared", "--target=x"}, {"-lm"}, {"/b/builtins.a"}, objects, dir.filePath("out.so"),
+                                         dir.filePath("out.rsp"), &err), qPrintable(err));
+        QFile len(dir.filePath("cmdlen"));
+        QVERIFY(len.open(QIODevice::ReadOnly));
+        QVERIFY2(len.readAll().trimmed().toInt() < 2000, "the objects were passed on the command line");
+        QFile rsp(dir.filePath("rsp.copy"));
+        QVERIFY(rsp.open(QIODevice::ReadOnly));
+        const QList<QByteArray> lines = rsp.readAll().split('\n');
+        QCOMPARE(lines.value(0), QByteArray("\"/very/long/work folder/path/to/object/recompiled_main_0.c.o\""));
+        QCOMPARE(lines.size(), 6000 + 1); // every object, one per line, plus the empty piece after the trailing newline
+    }
     void aPieceWithAnObjectButNoMarkerIsPlannedAgain() {
         QTemporaryDir dir;
         QDir(dir.path()).mkpath("src");
