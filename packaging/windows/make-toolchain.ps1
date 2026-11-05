@@ -21,7 +21,8 @@ New-Item -ItemType Directory -Path "$Out\bin" | Out-Null
 foreach ($f in 'clang.exe', 'clang-*.exe', 'lld.exe', 'ld.lld.exe', 'llvm-objdump.exe', '*.dll') {
     Get-ChildItem "$src\bin" -Filter $f -ErrorAction SilentlyContinue | Copy-Item -Destination "$Out\bin"
 }
-Copy-Item -Recurse "$src\x86_64-w64-mingw32" "$Out\x86_64-w64-mingw32"
+# every target folder at the top (x86_64-w64-mingw32, and generic-w64-mingw32 which holds the shared mingw-w64 headers), nothing else
+Get-ChildItem $src -Directory | Where-Object { $_.Name -like '*-w64-mingw32' } | ForEach-Object { Copy-Item -Recurse $_.FullName "$Out\$($_.Name)" }
 Copy-Item -Recurse "$src\lib" "$Out\lib"
 Remove-Item -Recurse -Force "$Out\lib\clang\*\lib\*" -Exclude 'windows' -ErrorAction SilentlyContinue
 "llvm-mingw $tag (ucrt, x86_64)" | Set-Content "$Out\TOOLCHAIN_VERSION"
