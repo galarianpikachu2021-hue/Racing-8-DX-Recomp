@@ -19,6 +19,17 @@
 #include <FidelityFX/host/ffx_fsr3upscaler.h>
 #include <FidelityFX/host/ffx_opticalflow.h>
 
+#ifdef _WIN32
+#include <malloc.h>
+static void* KrAlignedAlloc(size_t align, size_t size) { return _aligned_malloc(size, align); }
+static void KrAlignedFree(void* p) { _aligned_free(p); }
+#define KR_EXPORT __declspec(dllexport)
+#else
+static void* KrAlignedAlloc(size_t align, size_t size) { return std::aligned_alloc(align, size); }
+static void KrAlignedFree(void* p) { std::free(p); }
+#define KR_EXPORT __attribute__((visibility("default")))
+#endif
+
 #include "colorspace_spv.h"
 #include "kr_upscaler_abi.h"
 
@@ -167,6 +178,7 @@ void Teardown(Fsr3* f) {
 }
 
 void* Create(const KrUpscalerDevice* device) {
+    if (!device || !device->device || !device->get_device_proc_addr) return nullptr; // no GPU instance: nothing to create
     auto* f = new Fsr3();
     f->dev = *device;
     const auto gipa = device->get_instance_proc_addr;
@@ -400,7 +412,7 @@ int Configure(void* instance, uint32_t render_w, uint32_t render_h, uint32_t out
         const size_t size = ffxGetScratchMemorySizeVK(f->dev.physical, FFX_FSR3UPSCALER_CONTEXT_COUNT);
         // The backend's context types are alignas(32): plain calloc (16) is not enough.
         const size_t rounded = (size + 63) & ~size_t{63};
-        f->scratch = std::aligned_alloc(64, rounded);
+        f->scratch = KrAlignedAlloc(64, rounded);
         if (f->scratch) std::memset(f->scratch, 0, rounded);
         FfxErrorCode e = ffxGetInterfaceVK(&f->desc.backendInterface, ffxGetDeviceVK(&f->devctx), f->scratch, size,
                                            FFX_FSR3UPSCALER_CONTEXT_COUNT);
@@ -662,7 +674,7 @@ void Destroy(void* instance) {
     auto* f = static_cast<Fsr3*>(instance);
     if (g_up == f) g_up = nullptr;
     Teardown(f);
-    std::free(f->scratch);
+    KrAlignedFree(f->scratch);
     delete f;
 }
 
@@ -719,6 +731,7 @@ void FgTeardown(Fg* g) {
 }
 
 void* FgCreate(const KrUpscalerDevice* device) {
+    if (!device || !device->device || !device->get_device_proc_addr) return nullptr; // no GPU instance: nothing to create
     auto* g = new Fg(); // the upscaler need not exist yet: Configure (at the first frame) looks for it
     g->dev = *device;
     g->wait_idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(device->get_device_proc_addr(device->device, "vkDeviceWaitIdle"));
@@ -745,7 +758,7 @@ int FgConfigure(void* instance, uint32_t render_w, uint32_t render_h, uint32_t o
         if (scratch) return true;
         const size_t size = ffxGetScratchMemorySizeVK(g->dev.physical, contexts);
         const size_t rounded = (size + 63) & ~size_t{63};
-        scratch = std::aligned_alloc(64, rounded);
+        scratch = KrAlignedAlloc(64, rounded);
         if (!scratch) return false;
         std::memset(scratch, 0, rounded);
         return ffxGetInterfaceVK(&be, ffxGetDeviceVK(&g->devctx), scratch, size, contexts) == FFX_OK;
@@ -913,7 +926,7 @@ int FgDispatch(void* instance, const KrFrameGenFrame* fr) {
 void FgDestroy(void* instance) {
     auto* g = static_cast<Fg*>(instance);
     FgTeardown(g);
-    std::free(g->scratch_fi);
+    KrAlignedFree(g->scratch_fi);
     delete g;
 }
 
@@ -928,10 +941,10 @@ FFX_API FfxErrorCode ffxSetFrameGenerationConfigToSwapchainVK(FfxFrameGeneration
     return FFX_ERROR_INVALID_ARGUMENT;
 }
 
-extern "C" __attribute__((visibility("default"))) const KrUpscalerApi* kr_upscaler_get_api(void) {
+extern "C" KR_EXPORT const KrUpscalerApi* kr_upscaler_get_api(void) {
     return &kApi;
 }
 
-extern "C" __attribute__((visibility("default"))) const KrFrameGenApi* kr_framegen_get_api(void) {
+extern "C" KR_EXPORT const KrFrameGenApi* kr_framegen_get_api(void) {
     return &kFgApi;
 }

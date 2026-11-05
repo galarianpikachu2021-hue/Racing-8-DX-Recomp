@@ -1281,10 +1281,10 @@ index 0000000000..6edacab4ef
 +}
 diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
 new file mode 100644
-index 0000000000..a77d42a7a4
+index 0000000000..e7292beb46
 --- /dev/null
 +++ b/src/suyu_cmd/kr_platform.h
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,174 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
 +#pragma once
@@ -1322,6 +1322,17 @@ index 0000000000..a77d42a7a4
 +// plugins/<prefix><kind>_<name><ext>, e.g. plugins/libkr_upscaler_fsr3.so or plugins/kr_upscaler_fsr3.dll
 +inline std::string PluginFile(const std::string& kind, const std::string& name) {
 +    return std::string("plugins/") + kPluginPrefix + kind + "_" + name + kPluginExt;
++}
++
++// "libkr_upscaler_fsr3.so" / "kr_upscaler_fsr3.dll" -> "fsr3" when file is a plugin of this kind for this platform, else "".
++inline std::string PluginId(const std::string& file, const std::string& kind) {
++    const std::string head = std::string(kPluginPrefix) + kind + "_";
++    const std::string ext = kPluginExt;
++    if (file.size() <= head.size() + ext.size() || file.compare(0, head.size(), head) != 0 ||
++        file.compare(file.size() - ext.size(), ext.size(), ext) != 0) {
++        return {};
++    }
++    return file.substr(head.size(), file.size() - head.size() - ext.size());
 +}
 +
 +inline void* LibOpen(const std::string& path) {
@@ -12866,10 +12877,10 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..eb71bdbac9
+index 0000000000..831ea3094c
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,563 @@
+@@ -0,0 +1,574 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
 +#include "suyu_cmd/native_gpu/overlay_menu.h"
@@ -12929,6 +12940,7 @@ index 0000000000..eb71bdbac9
 +Menu::Menu(std::vector<std::string> upscaler_names) {
 +    items.resize(kRowCount);
 +    items[kUpscaler] = {"Upscaler", std::move(upscaler_names), 0, true, ""};
++    items[kModel] = {"Model", {"Auto"}, 0, true, ""};
 +    items[kGraphics] = {"Graphics quality", {"Launcher setting", "Low (handheld)", "High (docked)"}, 0, true, ""};
 +    items[kResolution] = {"Output resolution", {"Launcher setting", "720p", "1080p", "1440p", "4K (2160p)"}, 0, true, ""};
 +    items[kQuality] = {"3D render scale",
@@ -13009,6 +13021,14 @@ index 0000000000..eb71bdbac9
 +    for (const auto& n : names) items[kFrameGen].options.push_back(n + " (2x)");
 +}
 +
++void Menu::SetModels(const std::vector<std::string>& names, const std::string& active, int choice) {
++    Item& item = items[kModel];
++    item.options = names.size() > 1 ? names : std::vector<std::string>{"Auto"};
++    item.value = std::clamp(choice, 0, static_cast<int>(item.options.size()) - 1);
++    item.note = active.empty() ? "" : "running " + active;
++    live.model = item.value;
++}
++
 +void Menu::SetHdrAvailable(bool on) {
 +    items[kHdr].enabled = on;
 +    items[kHdr].note = on ? "" : "display not in HDR mode";
@@ -13024,6 +13044,7 @@ index 0000000000..eb71bdbac9
 +    const int v = items[row].value;
 +    switch (row) {
 +    case kUpscaler: live.upscaler = v; return kChangeUpscaler;
++    case kModel: live.model = v; return kChangeModel;
 +    case kGraphics: live.graphics = v; return kChangeGraphics;
 +    case kResolution: live.resolution = v; return kChangeResolution;
 +    case kRecord: live.record = v != 0; return kChangeRecord;
@@ -13087,8 +13108,9 @@ index 0000000000..eb71bdbac9
 +}
 +
 +// Rows only testers need (camera jitter, the paused CTGP extra cup) are hidden unless KARTRECOMP_DEV_MENU=1.
-+bool Menu::Visible(int row) {
++bool Menu::Visible(int row) const {
 +    static const bool dev = [] { const char* v = std::getenv("KARTRECOMP_DEV_MENU"); return v && *v == '1'; }();
++    if (row == kModel) return items[kModel].options.size() > 1; // only for an upscaler that has models
 +    return dev || (row != kJitter && row != kExtraCup);
 +}
 +
@@ -13435,10 +13457,10 @@ index 0000000000..eb71bdbac9
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.h b/src/suyu_cmd/native_gpu/overlay_menu.h
 new file mode 100644
-index 0000000000..6f119071d1
+index 0000000000..db50f383fa
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.h
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,138 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the in-game overlay menu (model and layout; drawing is in vk_shadow_backend.cpp).
 +//
@@ -13464,6 +13486,7 @@ index 0000000000..6f119071d1
 +/// Settings the renderer applies as they change.
 +struct Live {
 +    int upscaler = 0;     ///< index into the names given to Menu (0 = off)
++    int model = 0;        ///< the upscaler's model (0 = Auto), when it has several
 +    int quality = 0;      ///< render scale: 0 = off (everything at the output resolution), then 100/67/58/50/33 % of it, then 150/200 % (supersampling)
 +    int resolution = 0;   ///< output resolution: 0 = the launcher's, then 720p, 1080p, 1440p, 4K
 +    int graphics = 0;     ///< graphics quality: 0 = the launcher's, 1 = low (handheld), 2 = high (docked)
@@ -13489,6 +13512,7 @@ index 0000000000..6f119071d1
 +    kChangeGraphics = 128,
 +    kChangeRecord = 256,
 +    kChangeFrameGen = 1024, ///< frame-generation backend
++    kChangeModel = 4096, ///< the upscaler's model (the backend is created again with it)
 +    kChangeHdr = 512, ///< HDR on/off: the swapchain is rebuilt
 +    kChangePads = 2048, ///< a player's controller was changed (request posted to the frontend)
 +    kChangeOther = 16, ///< fps counter, quality, hdr: nothing to apply, but worth saving
@@ -13525,6 +13549,8 @@ index 0000000000..6f119071d1
 +    /// Frame-generation choices after Off and Built-in: the plugins found.
 +    void SetFrameGenPlugins(const std::vector<std::string>& names);
 +    void SetFrameGen(int index) { live.framegen = index; items[kFrameGen].value = index; }
++    /// The model choices of the loaded upscaler ("Auto" first); fewer than two hides the row. `choice` is the current one.
++    void SetModels(const std::vector<std::string>& names, const std::string& active, int choice);
 +    /// Refreshes the four player rows from the controllers the frontend published. Call once per frame.
 +    void SyncPads();
 +    /// Appends the quads for this frame (the open menu, or just the fps counter).
@@ -13534,7 +13560,7 @@ index 0000000000..6f119071d1
 +    void SetJitter(bool on) { live.jitter = on; items[kJitter].value = on ? 1 : 0; }
 +
 +    static constexpr int kSpeedDefault = 2; ///< 100%
-+    enum Row { kUpscaler, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kExtraCup, kMods, kClose, kRowCount };
++    enum Row { kUpscaler, kModel, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kExtraCup, kMods, kClose, kRowCount };
 +    /// Sets a row's value (clamped) and applies it; returns the Change bits it caused.
 +    uint32_t Set(Row row, int value);
 +    int Get(Row row) const { return items[row].value; }
@@ -13563,7 +13589,7 @@ index 0000000000..6f119071d1
 +    std::vector<std::string> boot_disabled; ///< the disabled list at start-up (what the running game loaded)
 +    bool boot_known = false;
 +    void UpdateModsChanged();
-+    static bool Visible(int row);
++    bool Visible(int row) const;
 +
 +    std::vector<Item> items;
 +    std::vector<std::string> extra_cups; ///< track folders of each extra cup, parallel to the row's options after "Off"
@@ -14124,10 +14150,10 @@ index 0000000000..e8bd970ace
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/upscaler.cpp b/src/suyu_cmd/native_gpu/upscaler.cpp
 new file mode 100644
-index 0000000000..6f543ed9b7
+index 0000000000..ed20f47aec
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/upscaler.cpp
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,255 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/upscaler.h"
 +
@@ -14137,6 +14163,7 @@ index 0000000000..6f543ed9b7
 +
 +#include <cstdlib>
 +#include <cstring>
++#include <algorithm>
 +#include <string>
 +
 +#include "common/logging/log.h"
@@ -14210,6 +14237,8 @@ index 0000000000..6f543ed9b7
 +    api = nullptr;
 +    instance = nullptr;
 +    library = nullptr;
++    models.clear();
++    active_model.clear();
 +    cfg_rw = cfg_rh = cfg_ow = cfg_oh = 0;
 +    cfg_fmt = VK_FORMAT_UNDEFINED;
 +}
@@ -14242,13 +14271,37 @@ index 0000000000..6f543ed9b7
 +            return false;
 +        }
 +    }
++    using SetModelFn = void (*)(int);
++    using ModelsFn = int (*)(void*, const char**, int);
++    using ActiveFn = const char* (*)(void*);
++    const auto set_model = library ? reinterpret_cast<SetModelFn>(KrPlatform::LibSym(library, "kr_upscaler_set_model")) : nullptr;
++    if (set_model) {
++        set_model(model);
++    }
 +    instance = api->create(&device);
 +    if (!instance) {
 +        LOG_ERROR(Frontend, "upscaler '{}': this GPU or driver can't run it", api->name);
 +        Unload();
 +        return false;
 +    }
-+    LOG_INFO(Frontend, "upscaler '{}' ready", api->name);
++    if (library) {
++        if (const auto list = reinterpret_cast<ModelsFn>(KrPlatform::LibSym(library, "kr_upscaler_models"))) {
++            const char* names[16]{};
++            const int n = std::min(list(instance, names, 16), 16);
++            for (int i = 0; i < n; ++i) {
++                models.emplace_back(names[i] ? names[i] : "?");
++            }
++        }
++        if (const auto active = reinterpret_cast<ActiveFn>(KrPlatform::LibSym(library, "kr_upscaler_active_model"))) {
++            if (const char* a = active(instance)) {
++                active_model = a;
++            }
++        }
++    }
++    if (models.size() < 2) {
++        models.clear(); // nothing to choose from
++    }
++    LOG_INFO(Frontend, "upscaler '{}' ready{}{}", api->name, active_model.empty() ? "" : ", model ", active_model);
 +    return true;
 +}
 +
@@ -14297,8 +14350,8 @@ index 0000000000..6f543ed9b7
 +    std::error_code ec;
 +    for (const auto& entry : std::filesystem::directory_iterator("plugins", ec)) {
 +        const std::string file = entry.path().filename().string();
-+        if (file.rfind(std::string(KrPlatform::kPluginPrefix) + "framegen_", 0) == 0 && entry.path().extension() == KrPlatform::kPluginExt) {
-+            names.push_back(file.substr(15, file.size() - 15 - 3));
++        if (const std::string id = KrPlatform::PluginId(file, "framegen"); !id.empty()) {
++            names.push_back(id);
 +        }
 +    }
 +    return names;
@@ -14358,10 +14411,10 @@ index 0000000000..6f543ed9b7
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/upscaler.h b/src/suyu_cmd/native_gpu/upscaler.h
 new file mode 100644
-index 0000000000..9407f3a6c5
+index 0000000000..012165c098
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/upscaler.h
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,205 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: hook for temporal upscalers (FSR 3.1/4, DLSS, XeSS) and frame generators.
 +//
@@ -14520,12 +14573,27 @@ index 0000000000..9407f3a6c5
 +    bool Configure(uint32_t render_w, uint32_t render_h, uint32_t out_w, uint32_t out_h, VkFormat fmt);
 +    void Dispatch(const KrUpscalerFrame& frame);
 +
++    // Optional model choice. A plugin that has several models (FSR 4's INT8 / lightweight INT8 / FP8, DLSS presets) exports
++    //   void        kr_upscaler_set_model(int index);                                       index 0 = "Auto"; applies to the next create
++    //   int         kr_upscaler_models(void* instance, const char** names, int capacity);   number of models, "Auto" first
++    //   const char* kr_upscaler_active_model(void* instance);                               what "Auto" (or the choice) resolved to
++    /// The models of the loaded backend ("Auto" first); empty when it offers no choice.
++    const std::vector<std::string>& Models() const { return models; }
++    /// What the backend is really running (e.g. "FSR 4.1.2 INT8 (lightweight)"); empty when unknown.
++    const std::string& ActiveModel() const { return active_model; }
++    /// Chooses a model for the next Select (0 = Auto).
++    void SetModel(int index) { model = index; }
++    int Model() const { return model; }
++
 +private:
 +    const KrUpscalerApi* api = nullptr;
 +    void* instance = nullptr;
 +    void* library = nullptr;
 +    uint32_t cfg_rw = 0, cfg_rh = 0, cfg_ow = 0, cfg_oh = 0;
 +    VkFormat cfg_fmt = VK_FORMAT_UNDEFINED;
++    int model = 0;
++    std::vector<std::string> models;
++    std::string active_model;
 +};
 +
 +/// A loaded frame-generation backend. Null api = the built-in interpolator (or none).
@@ -14554,10 +14622,10 @@ index 0000000000..9407f3a6c5
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..bdffaccc62
+index 0000000000..52d156c892
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7654 @@
+@@ -0,0 +1,7683 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -19105,7 +19173,7 @@ index 0000000000..bdffaccc62
 +    void LoadOverlaySettings() {
 +        std::ifstream in{OverlaySettingsPath()};
 +        std::string line;
-+        std::string upscaler_id, framegen_id;
++        std::string upscaler_id, framegen_id, model_name;
 +        while (std::getline(in, line)) {
 +            const auto eq = line.find('=');
 +            if (eq == std::string::npos) continue;
@@ -19113,6 +19181,7 @@ index 0000000000..bdffaccc62
 +            const int n = std::atoi(value.c_str());
 +            using M = KartOverlay::Menu;
 +            if (key == "upscaler") upscaler_id = value;
++            else if (key == "model") model_name = value;
 +            else if (key == "jitter") overlay->Set(M::kJitter, n);
 +            else if (key == "quality") overlay->Set(M::kQuality, n);
 +            else if (key == "resolution") overlay->Set(M::kResolution, n);
@@ -19137,6 +19206,7 @@ index 0000000000..bdffaccc62
 +            if (it != overlay_upscaler_ids.end() && it != overlay_upscaler_ids.begin()) {
 +                overlay->SetUpscaler(static_cast<int>(it - overlay_upscaler_ids.begin()));
 +                SelectUpscaler(upscaler_id);
++                if (!model_name.empty()) ApplyModelByName(upscaler_id, model_name);
 +            }
 +        }
 +        if (!framegen_id.empty()) {
@@ -19163,6 +19233,7 @@ index 0000000000..bdffaccc62
 +        const size_t up = static_cast<size_t>(overlay->Settings().upscaler);
 +        using M = KartOverlay::Menu;
 +        out << "upscaler=" << (up < overlay_upscaler_ids.size() ? overlay_upscaler_ids[up] : "off") << '\n'
++            << "model=" << (static_cast<size_t>(upscaler.Model()) < upscaler.Models().size() ? upscaler.Models()[static_cast<size_t>(upscaler.Model())] : "Auto") << '\n'
 +            << "jitter=" << overlay->Get(M::kJitter) << '\n'
 +            << "quality=" << overlay->Get(M::kQuality) << '\n'
 +            << "resolution=" << overlay->Get(M::kResolution) << '\n'
@@ -19183,8 +19254,7 @@ index 0000000000..bdffaccc62
 +        std::error_code ec;
 +        for (const auto& entry : std::filesystem::directory_iterator("plugins", ec)) {
 +            const std::string file = entry.path().filename().string();
-+            if (file.rfind("libkr_upscaler_", 0) == 0 && entry.path().extension() == ".so") {
-+                const std::string id = file.substr(15, file.size() - 15 - 3);
++            if (const std::string id = KrPlatform::PluginId(file, "upscaler"); !id.empty()) {
 +                overlay_upscaler_ids.push_back(id);
 +                names.push_back(id);
 +            }
@@ -19255,6 +19325,17 @@ index 0000000000..bdffaccc62
 +                SelectUpscaler(overlay_upscaler_ids[i]);
 +            }
 +        }
++        if (changes & KartOverlay::kChangeModel) {
++            const size_t i = static_cast<size_t>(live.upscaler);
++            if (i < overlay_upscaler_ids.size()) {
++                vk.vkDeviceWaitIdle(device);
++                upscaler.SetModel(live.model);
++                SelectUpscaler(overlay_upscaler_ids[i], true);
++            }
++        }
++        if (changes & (KartOverlay::kChangeUpscaler | KartOverlay::kChangeModel)) {
++            SaveOverlaySettings(); // now that the backend (and its model) is the new one
++        }
 +        if (changes & KartOverlay::kChangeFrameGen) {
 +            vk.vkDeviceWaitIdle(device);
 +            SelectFrameGen(live.framegen);
@@ -19308,12 +19389,28 @@ index 0000000000..bdffaccc62
 +    }
 +
 +    /// "off", "fsr1" (present-time spatial upscaler) or a hook backend (passthrough, plugins).
-+    void SelectUpscaler(const std::string& id) {
++    void SelectUpscaler(const std::string& id, bool keep_model = false) {
 +        fsr1_selected = id == "fsr1";
++        if (!keep_model) {
++            upscaler.SetModel(0); // models belong to one backend: a new backend starts on Auto
++        }
 +        if (fsr1_selected || id == "off") {
 +            upscaler.Unload();
 +        } else {
 +            upscaler.Select(UpscalerDevice(), id);
++        }
++        if (overlay) {
++            overlay->SetModels(upscaler.Models(), upscaler.ActiveModel(), upscaler.Models().empty() ? 0 : upscaler.Model());
++        }
++    }
++
++    /// Picks the saved model by name once the backend is loaded (the names are the plugin's own).
++    void ApplyModelByName(const std::string& id, const std::string& name) {
++        const auto& names = upscaler.Models();
++        const auto it = std::find(names.begin(), names.end(), name);
++        if (it != names.end() && it != names.begin()) {
++            upscaler.SetModel(static_cast<int>(it - names.begin()));
++            SelectUpscaler(id, true);
 +        }
 +    }
 +

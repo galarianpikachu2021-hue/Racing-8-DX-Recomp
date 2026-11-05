@@ -15,8 +15,15 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define KR_EXPORT __declspec(dllexport)
+#else
 #include <dlfcn.h>
 #include <libgen.h>
+#define KR_EXPORT __attribute__((visibility("default")))
+#endif
 
 #include <vulkan/vulkan.h>
 
@@ -53,6 +60,21 @@ bool Ok(NVSDK_NGX_Result r, const char* what) {
 
 /// Where this library lives: the NGX runtime snippets (libnvidia-ngx-dlss.so.*) are looked for next to it.
 std::wstring LibraryDir() {
+#ifdef _WIN32
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&LibraryDir), &self)) {
+        return L".";
+    }
+    wchar_t buf[MAX_PATH * 4];
+    const DWORD n = GetModuleFileNameW(self, buf, static_cast<DWORD>(sizeof(buf) / sizeof(buf[0])));
+    if (n == 0 || n >= sizeof(buf) / sizeof(buf[0])) {
+        return L".";
+    }
+    std::wstring dir(buf, n);
+    const size_t slash = dir.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? L"." : dir.substr(0, slash);
+#else
     Dl_info info{};
     if (!dladdr(reinterpret_cast<void*>(&LibraryDir), &info) || !info.dli_fname) {
         return L".";
@@ -62,8 +84,45 @@ std::wstring LibraryDir() {
     buf.push_back('\0');
     const std::string dir = dirname(buf.data());
     return std::wstring(dir.begin(), dir.end());
+#endif
 }
 
+/// NGX keeps its logs and cache here.
+std::wstring NgxDataDir() {
+#ifdef _WIN32
+    wchar_t tmp[MAX_PATH + 1];
+    const DWORD n = GetTempPathW(MAX_PATH, tmp);
+    return (n > 0 && n <= MAX_PATH ? std::wstring(tmp, n) : std::wstring(L".\\")) + L"kartrecomp-ngx";
+#else
+    return L"/tmp/kartrecomp-ngx";
+#endif
+}
+
+// The "models": DLSS render presets. Auto leaves the choice to NVIDIA's driver (the transformer model for DLAA/quality/balanced).
+struct Preset {
+    const char* name;
+    unsigned value;
+};
+const Preset kPresets[] = {
+    {"Auto (driver default)", NVSDK_NGX_DLSS_Hint_Render_Preset_Default},
+    {"Preset K (transformer, best quality)", NVSDK_NGX_DLSS_Hint_Render_Preset_K},
+    {"Preset J (transformer, less ghosting)", NVSDK_NGX_DLSS_Hint_Render_Preset_J},
+    {"Preset M (transformer, performance)", NVSDK_NGX_DLSS_Hint_Render_Preset_M},
+    {"Preset L (transformer, ultra performance)", NVSDK_NGX_DLSS_Hint_Render_Preset_L},
+    {"Preset E (CNN, older)", NVSDK_NGX_DLSS_Hint_Render_Preset_E},
+};
+constexpr int kPresetCount = static_cast<int>(sizeof(kPresets) / sizeof(kPresets[0]));
+int g_model = 0;
+
+void ApplyPreset(NVSDK_NGX_Parameter* params) {
+    if (g_model <= 0 || g_model >= kPresetCount) return;
+    const unsigned v = kPresets[g_model].value;
+    for (const char* key : {NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
+                            NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality}) {
+        NVSDK_NGX_Parameter_SetUI(params, key, v);
+    }
+}
 
 // One NGX session per process, shared by the upscaler and the frame-generation backend of this library.
 NVSDK_NGX_Parameter* g_caps = nullptr;
@@ -76,7 +135,7 @@ bool NgxAcquire(const KrUpscalerDevice* device, NVSDK_NGX_Parameter** caps) {
         NVSDK_NGX_FeatureCommonInfo info{};
         info.PathListInfo.Path = paths;
         info.PathListInfo.Length = 1;
-        const std::wstring data_path = L"/tmp/kartrecomp-ngx";
+        const std::wstring data_path = NgxDataDir();
         NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_Init_with_ProjectID("7c1f0f5e-6e3c-4a3b-9b5a-6d2a64f3a7d1", NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0",
                                                                data_path.c_str(), device->instance, device->physical, device->device,
                                                                device->get_instance_proc_addr, device->get_device_proc_addr, &info,
@@ -115,6 +174,7 @@ void ReleaseFeature(Dlss* d) {
 }
 
 void* Create(const KrUpscalerDevice* device) {
+    if (!device || !device->device || !device->get_device_proc_addr) return nullptr; // no GPU instance: nothing to create
     auto* d = new Dlss;
     d->dev = *device;
     d->wait_idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(device->get_device_proc_addr(device->device, "vkDeviceWaitIdle"));
@@ -186,6 +246,7 @@ void Dispatch(void* instance, const KrUpscalerFrame* fr) {
         return;
     }
     if (!d->feature) {
+        ApplyPreset(d->params);
         NVSDK_NGX_DLSS_Create_Params create{};
         create.Feature.InWidth = d->rw;
         create.Feature.InHeight = d->rh;
@@ -244,7 +305,20 @@ const KrUpscalerApi kApi = {KR_UPSCALER_ABI_VERSION, "dlss", &Create, &Configure
 
 } // namespace
 
-extern "C" __attribute__((visibility("default"))) const KrUpscalerApi* kr_upscaler_get_api(void) {
+// Optional model choice (see UpscalerHost in the engine): applies to the next create.
+extern "C" KR_EXPORT void kr_upscaler_set_model(int index) {
+    g_model = index;
+}
+extern "C" KR_EXPORT int kr_upscaler_models(void*, const char** names, int capacity) {
+    const int n = kPresetCount < capacity ? kPresetCount : capacity;
+    for (int i = 0; i < n; ++i) names[i] = kPresets[i].name;
+    return n;
+}
+extern "C" KR_EXPORT const char* kr_upscaler_active_model(void*) {
+    return g_model > 0 && g_model < kPresetCount ? kPresets[g_model].name : "DLSS, driver-chosen preset";
+}
+
+extern "C" KR_EXPORT const KrUpscalerApi* kr_upscaler_get_api(void) {
     return &kApi;
 }
 
@@ -418,6 +492,6 @@ const KrFrameGenApi kGApi = {KR_FRAMEGEN_ABI_VERSION, "dlss-g", &GCreate, &GConf
 
 } // namespace
 
-extern "C" __attribute__((visibility("default"))) const KrFrameGenApi* kr_framegen_get_api(void) {
+extern "C" KR_EXPORT const KrFrameGenApi* kr_framegen_get_api(void) {
     return &kGApi;
 }

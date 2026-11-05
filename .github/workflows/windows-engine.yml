@@ -98,8 +98,92 @@ jobs:
           path: stage\launcher
           if-no-files-found: error
 
+  ffx-prepared:
+    # AMD's FidelityFX SDK v1.1.4 with our edits and its FSR 3 shader blobs (plain SPIR-V, the same on every platform), generated with the Linux port of AMD's
+    # shader compiler. The Windows plugin job builds the DLLs from this. Nothing from the SDK is committed or released as source.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: ffx-prepared
+          key: ffx-prepared-${{ hashFiles('plugins/fsr3/prepare-sdk.sh', 'plugins/fsr3/gen-ffx-shaders.sh', 'plugins/fsr3/port-ffx-sc.py') }}
+      - name: Prepare the SDK and generate the shader blobs
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q glslang-tools
+          plugins/fsr3/prepare-sdk.sh "$PWD/work"
+          mkdir -p ffx-prepared/sdk/sdk
+          cp -r work/sdk/sdk/include work/sdk/sdk/src ffx-prepared/sdk/sdk/
+          cp -r work/shaders ffx-prepared/shaders
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffx-prepared
+          path: ffx-prepared
+          if-no-files-found: error
+
+  plugins:
+    needs: [ffx-prepared]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Vulkan SDK (headers and vulkan-1.lib)
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffx-prepared
+          path: ffx-prepared
+      - name: FSR 3.1 upscaler and FSR 3 frame generation
+        shell: pwsh
+        run: plugins\fsr3\build-windows.ps1 -Prepared ffx-prepared -Out stage\plugins
+      - name: FSR 4 (AMD FSR SDK 2.4.0, Vulkan)
+        shell: pwsh
+        run: plugins\fsr4\build-windows.ps1 -Out stage\plugins
+      - name: Plugin test
+        shell: pwsh
+        run: tests\windows\test_plugins.ps1 stage\plugins -Expect fsr3,fsr4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-plugins
+          path: stage\plugins
+          if-no-files-found: error
+
+  dlss-local:
+    # The DLSS plugin for the maintainer's OWN testing; runs only when the pushed commit message contains "[dlss]". NVIDIA's libraries must not be
+    # redistributed: the result is a 1-day artifact that is downloaded and then deleted, and it is never part of the zip (test_release_contents.ps1
+    # fails the bundle if anything DLSS/NGX is in it).
+    if: contains(github.event.head_commit.message, '[dlss]')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Vulkan SDK headers
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
+      - name: Build
+        shell: pwsh
+        run: plugins\dlss\build-windows.ps1 -Out stage\dlss
+      - name: Plugin test
+        shell: pwsh
+        run: tests\windows\test_plugins.ps1 stage\dlss -Expect dlss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dlss-plugin-LOCAL-USE-ONLY
+          path: stage\dlss
+          retention-days: 1
+          if-no-files-found: error
+
   bundle:
-    needs: [engine, toolchain, launcher]
+    needs: [engine, toolchain, launcher, plugins]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -115,12 +199,16 @@ jobs:
         with:
           name: windows-launcher
           path: parts\launcher
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-plugins
+          path: parts\plugins
       - name: Assemble
         shell: pwsh
-        run: packaging\windows\assemble.ps1 -Engine parts\engine-all\engine -Launcher parts\launcher -Toolchain parts\toolchain -Out KartRecomp
+        run: packaging\windows\assemble.ps1 -Engine parts\engine-all\engine -Launcher parts\launcher -Toolchain parts\toolchain -Plugins parts\plugins -Out KartRecomp
       - name: Release contents test
         shell: pwsh
-        run: tests\windows\test_release_contents.ps1 KartRecomp
+        run: tests\windows\test_release_contents.ps1 KartRecomp -RequirePlugins
       - name: Zip
         shell: pwsh
         run: |

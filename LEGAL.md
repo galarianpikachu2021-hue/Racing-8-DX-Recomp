@@ -34,3 +34,12 @@ logos or game imagery belong in this repository, including in screenshots.
 
 Our own code is licensed under GPL-3.0-or-later (see `LICENSE`), which is compatible with the suyu code it
 builds on.
+
+## Third-party upscaler libraries
+
+- **AMD FSR (FidelityFX SDK).** The FSR 3 plugin is built from AMD's MIT-licensed SDK sources. The FSR 4 plugin loads AMD's signed
+  `amd_fidelityfx_loader_vk.dll` and `amd_fidelityfx_upscaler_vk.dll` (SDK 2.4.0), which AMD permits to be redistributed in binary form,
+  unmodified, with its licence text; the Windows zip includes them with `AMD-FSR-SDK-LICENSE.txt`. We do not modify, decompile or
+  disassemble them.
+- **NVIDIA DLSS / NGX.** Never redistributed by this project: no NVIDIA library, and no plugin that links one, is in a release, the zip or the
+  repository. The DLSS plugin is built by the user on their own machine (`plugins/dlss/`).

@@ -7,7 +7,11 @@ foreach ($f in 'kartrecomp.exe', 'kartrecomp-setup.exe', 'kartrecomp-build.exe',
                'toolchain\bin\clang.exe', 'toolchain\bin\ld.lld.exe', 'data\mk8d-3.0.4\hot_blocks.txt', 'README-WINDOWS.txt', 'Collect-Logs.cmd') {
     if (-not (Test-Path "$d\$f")) { $fail += "missing $f" }
 }
-if ($RequirePlugins -and -not (Get-ChildItem "$d\engine\plugins" -Filter 'kr_upscaler_fsr3*.dll' -ErrorAction SilentlyContinue)) { $fail += 'no FSR 3 plugin' }
+if ($RequirePlugins) {
+    foreach ($f in 'kr_upscaler_fsr3.dll', 'kr_framegen_fsr3.dll', 'kr_upscaler_fsr4.dll', 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'AMD-FSR-SDK-LICENSE.txt') {
+        if (-not (Test-Path "$d\engine\plugins\$f")) { $fail += "no $f in engine\plugins" }
+    }
+}
 $bad = Get-ChildItem $d -Recurse -File | Where-Object { $_.Extension -in '.nsp', '.nca', '.keys', '.nso', '.xci', '.nsz' -or $_.Name -like 'recompiled_*' -or $_.Name -like 'nvngx*' -or $_.Name -like '*dlss*' -or $_.Name -eq 'prod.keys' }
 foreach ($b in $bad) { $fail += "must not ship: $($b.FullName.Substring($d.Length))" }
 if ((Test-Path "$d\userdata")) { $fail += 'userdata folder must not be shipped' }

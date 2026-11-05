@@ -16,7 +16,10 @@ The game binary carries no third-party SDK code: backends are shared libraries l
 | Camera jitter (`KARTRECOMP_JITTER=1`, overlay row) | works (render-pixel offsets) |
 | Motion vectors | **missing**: the hook passes an RG16F image of zeros |
 | FSR 3.1 plugin (AMD FidelityFX SDK v1.1.4, last release with a Vulkan backend) | done, `plugins/fsr3/` (see below) |
-| FSR 4 (SDK 2.x, DX12 only) / DLSS (NVIDIA only, untestable here) / XeSS | slots only |
+| FSR 4.1.2 (SDK 2.4.0 added official Vulkan, Windows DLLs) | plugin `plugins/fsr4/`, builds on CI; untested on a GPU; see `docs/WINDOWS_PLUGINS.md` |
+| DLSS (NVIDIA) | plugin `plugins/dlss/`, Windows build script added; untested on NVIDIA; never redistributed |
+| Model select (overlay row under Upscaler) | FSR 4 providers (FP8 / INT8 / lightweight INT8 / FSR 3.1), DLSS presets; optional plugin exports `kr_upscaler_set_model`, `kr_upscaler_models`, `kr_upscaler_active_model` |
+| XeSS | slot only |
 | DLAA | the 100% render scale: the hook backends run at 1:1 before the HUD; meaningful once a temporal backend and motion vectors exist |
 | Frame generation | not started; the HUD is already separate (drawn after the upscale point), which is what it needs |
 | HDR output | not started (the game's scene is B10G11R11 HDR before its own tonemap) |
