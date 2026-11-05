@@ -4,12 +4,14 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStorageInfo>
 #include <algorithm>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #ifdef Q_OS_LINUX
 #include <signal.h>
@@ -63,7 +65,18 @@ qint64 BuildRunner::AvailableMemoryBytes() {
 
 int BuildRunner::JobsForRam(qint64 availableBytes, int threads) {
     if (availableBytes < 3 * kGiB) return 0;
-    return static_cast<int>(std::max<qint64>(1, std::min<qint64>(threads, availableBytes / (2 * kGiB))));
+    // Every logical thread counts (hyper-threads included), but 15% stay free so the PC remains usable while it builds.
+    const qint64 cpuJobs = std::max<qint64>(1, static_cast<qint64>(threads) * 85 / 100);
+    return static_cast<int>(std::max<qint64>(1, std::min<qint64>(cpuJobs, availableBytes / (2 * kGiB))));
+}
+
+void BuildRunner::OrderForScheduling(QList<const CompileJob*>& jobs) {
+    QHash<const CompileJob*, qint64> size;
+    for (const CompileJob* j : jobs) size.insert(j, QFileInfo(j->source).size());
+    std::stable_sort(jobs.begin(), jobs.end(), [&](const CompileJob* a, const CompileJob* b) {
+        if (a->hot != b->hot) return a->hot;
+        return size.value(a) > size.value(b);
+    });
 }
 
 bool BuildRunner::HasDiskSpace(const QString& dir, qint64 neededBytes) {
@@ -241,7 +254,7 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
         }
     }
     // The big pieces first, so the long compiles do not start last.
-    std::stable_sort(pending.begin(), pending.end(), [](const CompileJob* a, const CompileJob* b) { return a->hot && !b->hot; });
+    OrderForScheduling(pending);
     std::mutex mutex;
     std::atomic<qsizetype> next{0};
     QString failure;
@@ -273,20 +286,37 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
     if (!failure.isEmpty()) return {false, failure};
 
     QDir().mkpath(plan.outDir);
+    // The modules link side by side (the big main module no longer waits behind the small ones), and the linker gets the same thread
+    // budget as the compiles instead of its own default of every thread.
+    const QString linkThreads = QStringLiteral("-Wl,--threads=%1").arg(std::max(1, plan.jobs));
+    std::vector<std::thread> linkers;
+    QString linkFailure;
+    int linked = 0;
     for (const Module& m : modules) {
-        QStringList objects;
-        for (const CompileJob& j : m.jobs) objects << j.object;
-        const QString out = QDir(plan.outDir).filePath(ModuleFileName(m.name));
-        QProcess link;
-        DieWithParent(link);
-        link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{"-o", out} + objects +
-                       plan.linkLibs + plan.builtins);
-        while (!link.waitForFinished(200)) {
-            if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); return {false, QStringLiteral("Cancelled.")}; }
-        }
-        if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0)
-            return {false, QStringLiteral("linking %1 failed: %2").arg(out, QString::fromLocal8Bit(link.readAllStandardError()).trimmed())};
-        if (progress) progress(total, total, QStringLiteral("linked %1").arg(QFileInfo(out).fileName()));
+        linkers.emplace_back([&, mp = &m] {
+            QStringList objects;
+            for (const CompileJob& j : mp->jobs) objects << j.object;
+            const QString out = QDir(plan.outDir).filePath(ModuleFileName(mp->name));
+            QProcess link;
+            DieWithParent(link);
+            link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{linkThreads, "-o", out} + objects +
+                           plan.linkLibs + plan.builtins);
+            while (!link.waitForFinished(200)) {
+                if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); return; }
+            }
+            std::lock_guard<std::mutex> lock(mutex);
+            if (link.exitStatus() != QProcess::NormalExit || link.exitCode() != 0) {
+                if (linkFailure.isEmpty())
+                    linkFailure = QStringLiteral("linking %1 failed: %2").arg(out, QString::fromLocal8Bit(link.readAllStandardError()).trimmed());
+                return;
+            }
+            ++linked;
+            if (progress) progress(total, total, QStringLiteral("linked %1").arg(QFileInfo(out).fileName()));
+        });
     }
+    for (auto& t : linkers) t.join();
+    if (cancel && cancel->load()) return {false, QStringLiteral("Cancelled.")};
+    if (!linkFailure.isEmpty()) return {false, linkFailure};
+    if (linked != modules.size()) return {false, QStringLiteral("linking was interrupted")};
     return {true, {}};
 }

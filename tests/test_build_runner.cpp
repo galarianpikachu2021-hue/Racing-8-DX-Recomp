@@ -18,10 +18,31 @@ private slots:
     }
     void jobsFollowFreeRamAtTwoGigabytesEach() {
         constexpr qint64 GiB = 1024LL * 1024 * 1024;
-        QCOMPARE(BuildRunner::JobsForRam(16 * GiB, 8), 8);
-        QCOMPARE(BuildRunner::JobsForRam(8 * GiB, 8), 4);
-        QCOMPARE(BuildRunner::JobsForRam(8 * GiB, 2), 2);
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 32), 27);
+        QCOMPARE(BuildRunner::JobsForRam(8 * GiB, 32), 4);
         QCOMPARE(BuildRunner::JobsForRam(3 * GiB, 8), 1);
+    }
+    void jobsUseAtMostEightyFivePercentOfTheLogicalThreads() {
+        constexpr qint64 GiB = 1024LL * 1024 * 1024;
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 24), 20); // hyper-threads count: 24 logical threads -> 20 jobs, not 12
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 8), 6);
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 4), 3);
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 2), 1);
+        QCOMPARE(BuildRunner::JobsForRam(64 * GiB, 1), 1);
+    }
+    void compileJobsAreOrderedHotFirstThenBiggestFirst() {
+        QTemporaryDir dir;
+        const auto make = [&](const char* name, int bytes) {
+            QFile f(dir.filePath(name));
+            if (f.open(QIODevice::WriteOnly)) f.write(QByteArray(bytes, 'x'));
+            f.close();
+            return CompileJob{f.fileName(), {}, {}, {}, false};
+        };
+        CompileJob small = make("small.c", 10), big = make("big.c", 5000), hotSmall = make("hot_small.c", 20);
+        hotSmall.hot = true;
+        QList<const CompileJob*> jobs{&small, &hotSmall, &big};
+        BuildRunner::OrderForScheduling(jobs);
+        QCOMPARE(jobs, (QList<const CompileJob*>{&hotSmall, &big, &small}));
     }
     void refusesBelowThreeGigabytesFree() {
         constexpr qint64 GiB = 1024LL * 1024 * 1024;

@@ -4,6 +4,7 @@
 // as finished only when its object file AND its .done marker exist) and links the modules. Blocking: run Build() on a worker thread.
 #pragma once
 
+#include <QList>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
@@ -47,6 +48,8 @@ public:
     /// Free RAM the build can use (MemAvailable on Linux, GlobalMemoryStatusEx on Windows); 8 GiB if the system will not say.
     static qint64 AvailableMemoryBytes();
     static int JobsForRam(qint64 availableBytes, int threads);
+    /// Hot pieces first, then the biggest source first, so the longest compiles never start last and leave one core busy at the end.
+    static void OrderForScheduling(QList<const CompileJob*>& jobs);
     static bool HasDiskSpace(const QString& dir, qint64 neededBytes);
     /// One job per file in `files` (names inside srcDir). `hotFiles` get full optimisation, the rest -O0.
     /// `includeDir` defaults to the folder above srcDir (where recomp_runtime.h lives).
