@@ -29,6 +29,7 @@ struct BuildPlan {
     QStringList linkArgs;    // added to the module link, e.g. -fuse-ld=lld -nostdlib -L... (before the objects) and the libraries
     /// Fills compiler, compileArgs and linkArgs from a bundled toolchain folder (packaging/make-toolchain.sh).
     void useToolchain(const QString& toolchainDir);
+    QStringList linkLibs = {"-lm", "-lc"}; // after the objects; Windows (mingw) has no libc to name
     QString stamp;   // identifies what the work folder was built with (engine, toolchain, hot list); a different stamp wipes it
     int jobs = 1;
 };
@@ -41,6 +42,8 @@ struct BuildResult {
 class BuildRunner {
 public:
     /// Concurrent compiles that fit: 2 GB per job, at least 1, at most `threads`; 0 when under 3 GB is free (refuse).
+    /// recompiled_<name>.so on Linux, recompiled_<name>.dll on Windows: what the engine looks for in the module folder.
+    static QString ModuleFileName(const QString& name);
     static int JobsForRam(qint64 availableBytes, int threads);
     static bool HasDiskSpace(const QString& dir, qint64 neededBytes);
     /// One job per file in `files` (names inside srcDir). `hotFiles` get full optimisation, the rest -O0.

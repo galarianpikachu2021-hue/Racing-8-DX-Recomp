@@ -7,6 +7,13 @@
 class TestBuildRunner : public QObject {
     Q_OBJECT
 private slots:
+    void modulesNameFollowThePlatform() {
+#ifdef Q_OS_WIN
+        QCOMPARE(BuildRunner::ModuleFileName("image"), QString("recompiled_image.dll"));
+#else
+        QCOMPARE(BuildRunner::ModuleFileName("image"), QString("recompiled_image.so"));
+#endif
+    }
     void jobsFollowFreeRamAtTwoGigabytesEach() {
         constexpr qint64 GiB = 1024LL * 1024 * 1024;
         QCOMPARE(BuildRunner::JobsForRam(16 * GiB, 8), 8);
@@ -177,7 +184,7 @@ private slots:
         QVERIFY(calls.contains("recompiled_rtld.c"));          // the index file (defines _recomp_index_view)
         QVERIFY(calls.contains("recompiled_rtld_0_p0.c"));     // a split piece
         QVERIFY(calls.contains("recomp_runtime.c") && calls.contains("recomp_export.c"));
-        QVERIFY(QFile::exists(dir.filePath("out/recompiled_rtld.so")));
+        QVERIFY(QFile::exists(dir.filePath("out/" + BuildRunner::ModuleFileName("rtld"))));
         // compile args go to every compile, link args only to the link
         for (const QByteArray& line : calls.split('\n')) {
             if (line.contains(" -c ")) QVERIFY2(line.contains("--sysroot=/toolchain/sysroot") && !line.contains("-nostdlib"), line.constData());

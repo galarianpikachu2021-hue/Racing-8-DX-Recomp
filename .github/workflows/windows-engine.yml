@@ -51,3 +51,19 @@ jobs:
           name: windows-engine
           path: stage
           if-no-files-found: error
+
+  toolchain:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble the toolchain
+        shell: pwsh
+        run: packaging\windows\make-toolchain.ps1 -Out stage\toolchain
+      - name: Toolchain test
+        shell: pwsh
+        run: tests\windows\test_toolchain.ps1 -Toolchain stage\toolchain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-toolchain
+          path: stage
+          if-no-files-found: error

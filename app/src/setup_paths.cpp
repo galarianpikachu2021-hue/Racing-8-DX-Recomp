@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "setup_paths.h"
+#include "build_runner.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -123,7 +124,7 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
 }
 
 bool IsBuilt(const DataLayout& l, const QString& engineVersion) {
-    if (!QFileInfo::exists(l.moduleDir() + "/recompiled_image.so")) return false;
+    if (!QFileInfo::exists(l.moduleDir() + "/" + BuildRunner::ModuleFileName("image"))) return false;
     QFile f(l.moduleDir() + "/module.json");
     if (!f.open(QIODevice::ReadOnly)) return false;
     return f.readAll().contains("\"engineVersion\": \"" + engineVersion.toUtf8() + "\"");

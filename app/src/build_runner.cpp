@@ -23,12 +23,23 @@ constexpr qint64 kGiB = 1024LL * 1024 * 1024;
 
 QStringList CommonArgs(bool hot, const QString& includeDir) {
     QStringList a = {"-std=gnu11", "-O2", "-foptimize-sibling-calls", "-ffunction-sections", "-march=x86-64-v3", "-Wno-error",
-                     "-ffp-contract=off", "-fno-fast-math", "-fPIC", "-fvisibility=hidden", "-DNDEBUG", "-DSUYU_HOSTED_RECOMP=1",
+                     "-ffp-contract=off", "-fno-fast-math", "-fvisibility=hidden", "-DNDEBUG", "-DSUYU_HOSTED_RECOMP=1",
                      "-DRECOMP_SHARED_MODULE=1", "-I" + includeDir};
+#ifndef Q_OS_WIN
+    a << "-fPIC"; // Windows DLLs are position-dependent by design (and the mingw driver rejects the flag)
+#endif
     if (!hot) a << "-O0"; // after -O2: the cold pieces are compiled cheaply
     return a;
 }
 } // namespace
+
+QString BuildRunner::ModuleFileName(const QString& name) {
+#ifdef Q_OS_WIN
+    return QStringLiteral("recompiled_%1.dll").arg(name);
+#else
+    return QStringLiteral("recompiled_%1.so").arg(name);
+#endif
+}
 
 int BuildRunner::JobsForRam(qint64 availableBytes, int threads) {
     if (availableBytes < 3 * kGiB) return 0;
@@ -112,11 +123,20 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
 }
 
 void BuildPlan::useToolchain(const QString& t) {
+#ifdef Q_OS_WIN
+    // llvm-mingw: the target's headers, CRT and import libraries sit under the toolchain folder, and clang finds them itself.
+    compiler = QDir(t).filePath("bin/clang.exe");
+    compileArgs = {"--target=x86_64-w64-mingw32"};
+    builtins = {};
+    linkArgs = {"--target=x86_64-w64-mingw32", "-fuse-ld=lld", "-rtlib=compiler-rt", "-unwindlib=none"}; // the generated sources mark their entry points __declspec(dllexport)
+    linkLibs = {"-lm"};
+#else
     compiler = QDir(t).filePath("bin/clang");
     compileArgs = {"--target=x86_64-linux-gnu", "--sysroot=" + QDir(t).filePath("sysroot")};
     builtins = {QDir(t).filePath("lib/libclang_rt.builtins-x86_64.a")};
     linkArgs = {"--target=x86_64-linux-gnu", "--sysroot=" + QDir(t).filePath("sysroot"), "-fuse-ld=lld", "-nostdlib",
                 "-L" + QDir(t).filePath("sysroot/lib/x86_64-linux-gnu"), "-L" + QDir(t).filePath("sysroot/usr/lib/x86_64-linux-gnu")};
+#endif
 }
 
 BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(int, int, const QString&)>& progress,
@@ -218,11 +238,11 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
     for (const Module& m : modules) {
         QStringList objects;
         for (const CompileJob& j : m.jobs) objects << j.object;
-        const QString out = QDir(plan.outDir).filePath(QStringLiteral("recompiled_%1.so").arg(m.name));
+        const QString out = QDir(plan.outDir).filePath(ModuleFileName(m.name));
         QProcess link;
         DieWithParent(link);
         link.start(plan.compiler, QStringList{"-shared"} + plan.linkArgs + QStringList{"-o", out} + objects +
-                       QStringList{"-lm", "-lc"} + plan.builtins);
+                       plan.linkLibs + plan.builtins);
         while (!link.waitForFinished(200)) {
             if (cancel && cancel->load()) { link.kill(); link.waitForFinished(); return {false, QStringLiteral("Cancelled.")}; }
         }
