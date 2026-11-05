@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
+
+#include "test_support.h"
 #include <thread>
 
 #include "build_runner.h"
@@ -36,6 +38,7 @@ private slots:
         QVERIFY(!BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 10LL * 1024 * 1024 * 1024 * 1024));
     }
     void aChangedBuildStampWipesTheWorkFolderAndTheSameStampKeepsIt() {
+        NEEDS_SH();
         QTemporaryDir dir;
         const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
             QDir().mkpath(QFileInfo(dir.filePath(rel)).absolutePath());
@@ -64,6 +67,7 @@ private slots:
         QVERIFY(!QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // different stamp: everything compiled again
     }
     void cancelStopsTheRunningCompilerPromptly() {
+        NEEDS_SH();
         QTemporaryDir dir;
         const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
             QDir().mkpath(QFileInfo(dir.filePath(rel)).absolutePath());
@@ -98,6 +102,7 @@ private slots:
             if (!pid.trimmed().isEmpty()) QVERIFY2(!QFileInfo::exists("/proc/" + pid.trimmed()), "a compiler is still running after cancel");
     }
     void aCompilerKilledBySignalIsReportedAsOutOfMemory() {
+        NEEDS_SH();
         QTemporaryDir dir;
         QDir(dir.path()).mkpath("src");
         QFile(dir.filePath("src/a.c")).open(QIODevice::WriteOnly);
@@ -128,6 +133,7 @@ private slots:
         QVERIFY(jobs[2].args.contains("-O2") && jobs[2].args.contains("-march=x86-64-v3"));
     }
     void aFinishedCompileWritesTheMarkerAndAFailedOneDoesNot() {
+        NEEDS_SH();
         QTemporaryDir dir;
         QDir(dir.path()).mkpath("src");
         QDir(dir.path()).mkpath("obj");
@@ -149,6 +155,7 @@ private slots:
         QVERIFY(err.contains("boom"));
     }
     void aBuildCompilesEveryModuleSourceIncludingTheIndexFile() {
+        NEEDS_SH();
         QTemporaryDir dir;
         const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
             QDir().mkpath(QFileInfo(dir.filePath(rel)).absolutePath());

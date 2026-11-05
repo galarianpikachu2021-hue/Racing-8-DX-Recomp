@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
 
+#include "build_runner.h"
+#include "test_support.h"
+
 #include "game_package.h"
 
 namespace {
@@ -16,6 +19,7 @@ class TestGamePackage : public QObject {
     Q_OBJECT
 private slots:
     void installedPathsFollowTheXdgLayout() {
+        NEEDS_SH();
         const auto l = DataLayout::FromRoots("/d/kartrecomp", "/c/kartrecomp");
         const auto p = GamePackage::Installed(l, "/cfg/kartrecomp", "/app/engine/mk8d-engine", "v1");
         QVERIFY(p.isInstalled());
@@ -51,21 +55,31 @@ private slots:
         QCOMPARE(env.value("KARTRECOMP_PIN"), QString("2,3"));
         QCOMPARE(env.value("KARTRECOMP_NATIVE_HEIGHT"), QString("1440"));
         QCOMPARE(env.value("KARTRECOMP_NATIVE_GPU"), QString("native"));
+#ifndef Q_OS_WIN
         QVERIFY(env.value("XDG_DATA_HOME") != d.filePath("d")); // the engine finds its own XDG folders from the app name
+#else
+        QCOMPARE(env.value("XDG_DATA_HOME"), d.filePath("d")); // portable: the engine's data folder is the launcher's
+#endif
     }
     void installedProblemsAskForTheBuildFirst() {
         QTemporaryDir d;
         const auto l = DataLayout::FromRoots(d.filePath("d/kartrecomp"), d.filePath("c/kartrecomp"));
-        const auto p = GamePackage::Installed(l, d.filePath("cfg"), d.filePath("mk8d-engine"), "v1");
+#ifdef Q_OS_WIN
+        const QString engine = d.filePath("mk8d-engine.exe");
+#else
+        const QString engine = d.filePath("mk8d-engine");
+#endif
+        const auto p = GamePackage::Installed(l, d.filePath("cfg"), engine, "v1");
         QVERIFY(p.problems().contains("engine is missing"));
-        Write(d.filePath("mk8d-engine"), "#!/bin/sh\n");
-        QFile(d.filePath("mk8d-engine")).setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        Write(engine, "#!/bin/sh\n");
+        QFile(engine).setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         QVERIFY(p.problems().contains("Setup")); // engine present, game not built
-        Write(l.moduleDir() + "/recompiled_image.so", "x");
+        Write(l.moduleDir() + "/" + BuildRunner::ModuleFileName("image"), "x");
         Write(l.moduleDir() + "/module.json", R"({ "engineVersion": "v1" })");
         QCOMPARE(p.problems(), QString());
     }
     void theDeveloperLayoutIsUnchanged() {
+        NEEDS_SH();
         const GamePackage p("/g/game", "/g/home");
         QVERIFY(!p.isInstalled());
         QCOMPARE(p.executable(), QString("/g/game/mk8d"));

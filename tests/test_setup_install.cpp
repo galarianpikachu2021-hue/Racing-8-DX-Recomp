@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
 
+#include "build_runner.h"
+
 #include "setup_paths.h"
 
 namespace {
@@ -103,7 +105,7 @@ private slots:
         QTemporaryDir d;
         const auto l = DataLayout::FromRoots(d.filePath("data"), d.filePath("cache"));
         QVERIFY(!IsBuilt(l, "eng-1"));
-        Write(l.moduleDir() + "/recompiled_image.so", "x");
+        Write(l.moduleDir() + "/" + BuildRunner::ModuleFileName("image"), "x");
         QVERIFY(!IsBuilt(l, "eng-1")); // modules but no stamp: not verified
         Write(l.moduleDir() + "/module.json", R"({ "engineVersion": "eng-0" })");
         QVERIFY(!IsBuilt(l, "eng-1")); // built for another engine

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
 
+#include "build_runner.h"
+#include "test_support.h"
+
 #include "setup_pipeline.h"
 
 namespace {
@@ -57,17 +60,19 @@ class TestSetupPipeline : public QObject {
     Q_OBJECT
 private slots:
     void aGoodRunExportsBuildsVerifiesAndStamps() {
+        NEEDS_SH();
         Fixture f;
         QList<int> marks;
         const auto r = RunSetupPipeline(f.in, f.layout, f.paths, [&](int permille, const QString&) { marks << permille; }, nullptr, {0, 0});
         QVERIFY2(r.ok, qPrintable(r.message));
         QVERIFY(IsBuilt(f.layout, "v1"));
-        QVERIFY(QFile::exists(f.layout.moduleDir() + "/recompiled_image.so")); // the main module is called "image"
+        QVERIFY(QFile::exists(f.layout.moduleDir() + "/" + BuildRunner::ModuleFileName("image"))); // the main module is called "image"
         QVERIFY(QFile::exists(f.layout.base()) && QFile::exists(f.layout.keysFile()));
         QVERIFY(std::is_sorted(marks.begin(), marks.end()));
         QCOMPARE(marks.last(), 1000);
     }
     void aNewEngineVersionRebuildsEverythingAndAStaleExportIsCleared() {
+        NEEDS_SH();
         Fixture f;
         const auto touch = [&](const QString& path) { Write(path, "x"); };
         QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
@@ -82,6 +87,7 @@ private slots:
         QVERIFY(IsBuilt(f.layout, "v2"));
     }
     void an32BitUpdateStopsBeforeAnythingIsInstalled() {
+        NEEDS_SH();
         Fixture f("old-update.nsp");
         const auto r = RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0});
         QVERIFY(!r.ok);
@@ -89,6 +95,7 @@ private slots:
         QVERIFY(!QFile::exists(f.layout.base())); // nothing was installed
     }
     void aFailingExportReportsTheExportersOwnMessage() {
+        NEEDS_SH();
         Fixture f;
         qputenv("FAKE_EXPORT_FAILS", "1");
         const auto r = RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0});
@@ -98,6 +105,7 @@ private slots:
         QVERIFY(!IsBuilt(f.layout, "v1"));
     }
     void aCancelledRunLeavesNothingMarkedBuilt() {
+        NEEDS_SH();
         Fixture f;
         std::atomic<bool> cancel{true};
         const auto r = RunSetupPipeline(f.in, f.layout, f.paths, nullptr, &cancel, {0, 0});
@@ -105,6 +113,7 @@ private slots:
         QVERIFY(!IsBuilt(f.layout, "v1"));
     }
     void aFailedVerificationNeverStampsTheModules() {
+        NEEDS_SH();
         Fixture f;
         Write(f.paths.engine, "#!/bin/sh\necho 'boot failed' >&2\nexit 3\n", true);
         const auto r = RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0});

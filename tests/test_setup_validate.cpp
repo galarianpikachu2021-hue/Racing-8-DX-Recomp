@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
 
+#include "test_support.h"
+
 #include "keys_check.h"
 #include "nsp_info.h"
 #include "setup_validate.h"
@@ -27,6 +29,7 @@ private slots:
         QVERIFY(i.error.isEmpty());
     }
     void anExporterThatCrashesIsReportedAsWrongKeysOrADamagedFile() {
+        NEEDS_SH();
         QTemporaryDir d;
         const QString script = d.filePath("crashing-exporter.sh");
         Write(script, "#!/bin/sh\nkill -SEGV $$\n");

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QtTest>
 
+#include "test_support.h"
+
 #include "verify_build.h"
 
 namespace {
@@ -41,20 +43,24 @@ class TestVerifyBuild : public QObject {
     Q_OBJECT
 private slots:
     void aFullyStaticBootThatReachedTheGameLoopPasses() {
+        NEEDS_SH();
         const auto r = Run("good");
         QVERIFY2(r.ok, qPrintable(r.message));
     }
     void anyTransitionToTheJitFails() {
+        NEEDS_SH();
         const auto r = Run("jit");
         QVERIFY(!r.ok);
         QVERIFY2(r.message.contains("not fully static"), qPrintable(r.message));
     }
     void aThreadKilledWithNoFallbackFails() {
+        NEEDS_SH();
         const auto r = Run("killed");
         QVERIFY(!r.ok);
         QVERIFY2(r.message.contains("thread"), qPrintable(r.message));
     }
     void anEngineThatExitsEarlyReportsItsOwnMessage() {
+        NEEDS_SH();
         const auto r = Run("early");
         QVERIFY(!r.ok);
         QVERIFY2(r.message.contains("cannot open the update"), qPrintable(r.message));
@@ -69,11 +75,13 @@ private slots:
         QVERIFY2(r.ok, qPrintable(r.message));
     }
     void aBootThatRunsCodeButNeverPresentsFramesFails() {
+        NEEDS_SH();
         const auto r = Run("noframes", 2);
         QVERIFY(!r.ok);
         QVERIFY2(r.message.contains("frames"), qPrintable(r.message));
     }
     void aBootThatNeverGetsGoingTimesOutWithAClearMessage() {
+        NEEDS_SH();
         const auto r = Run("slow", 2);
         QVERIFY(!r.ok);
         QVERIFY2(r.message.contains("did not reach"), qPrintable(r.message));
