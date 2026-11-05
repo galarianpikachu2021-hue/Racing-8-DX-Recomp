@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 & $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -rtlib=compiler-rt -unwindlib=none -shared -o "$tmp\recompiled_image.dll" "$tmp\m.o" -lm
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: link'; exit 1 }
-& $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -o "$tmp\host.exe" "$tmp\host.c"
+& $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -rtlib=compiler-rt -unwindlib=none -o "$tmp\host.exe" "$tmp\host.c"
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: host build'; exit 1 }
 $imports = & "$T\bin\llvm-objdump.exe" -p "$tmp\recompiled_image.dll" | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[1].Trim().ToLower() }
 $allowed = 'kernel32.dll', 'msvcrt.dll', 'ucrtbase.dll'
