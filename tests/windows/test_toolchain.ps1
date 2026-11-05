@@ -35,7 +35,13 @@ int main(int argc, char** argv) {
 $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
 $flags = '--target=x86_64-w64-mingw32', '-std=gnu11', '-O2', '-march=x86-64-v3', '-fvisibility=hidden'
 & $clang @flags -c "$tmp\m.c" -o "$tmp\m.o"
-if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: compile'; exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'FAIL: compile'
+    Get-ChildItem $T | Select-Object -ExpandProperty Name | Write-Host
+    Get-ChildItem "$T\x86_64-w64-mingw32" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Write-Host
+    & $clang @flags -v -c "$tmp\m.c" -o "$tmp\m.o" 2>&1 | Write-Host
+    exit 1
+}
 & $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -rtlib=compiler-rt -unwindlib=none -shared -o "$tmp\recompiled_image.dll" "$tmp\m.o" -lm
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: link'; exit 1 }
 & $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -o "$tmp\host.exe" "$tmp\host.c"
