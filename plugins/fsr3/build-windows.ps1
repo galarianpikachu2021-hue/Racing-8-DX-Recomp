@@ -6,22 +6,24 @@
 param([Parameter(Mandatory = $true)][string]$Prepared, [Parameter(Mandatory = $true)][string]$Out)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+$Prepared = (Resolve-Path $Prepared).Path
 $sdk = Join-Path $Prepared 'sdk\sdk'
 $shaders = Join-Path $Prepared 'shaders'
 foreach ($p in $sdk, $shaders, $env:VULKAN_SDK) { if (-not $p -or -not (Test-Path $p)) { throw "missing $p" } }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
 $obj = Join-Path ([IO.Path]::GetTempPath()) "kr-fsr3-obj-$([guid]::NewGuid())"
 New-Item -ItemType Directory $obj | Out-Null
-$inc = @("$sdk\include", "$sdk\src\shared", "$sdk\src\backends\shared", "$sdk\src\backends\shared\blob_accessors", "$sdk\src\components", "$sdk\src\backends\vk", $shaders, "$env:VULKAN_SDK\Include") | ForEach-Object { "/I`"$_`"" }
+$inc = @("$sdk\include", "$sdk\src\shared", "$sdk\src\backends\shared", "$sdk\src\backends\shared\blob_accessors", "$sdk\src\components", "$sdk\src\backends\vk", $shaders, "$env:VULKAN_SDK\Include") | ForEach-Object { "/I$_" }
 $defs = '/DFFX_FSR3UPSCALER=1', '/DFFX_FI=1', '/DFFX_OF=1', '/DFFX_API_VK=1', '/DNOMINMAX', '/D_CRT_SECURE_NO_WARNINGS'
 $srcs = @("$sdk\src\components\fsr3upscaler\ffx_fsr3upscaler.cpp", "$sdk\src\backends\vk\ffx_vk.cpp", "$sdk\src\shared\ffx_assert.cpp",
     "$sdk\src\components\frameinterpolation\ffx_frameinterpolation.cpp", "$sdk\src\components\opticalflow\ffx_opticalflow.cpp",
     "$sdk\src\backends\shared\blob_accessors\ffx_frameinterpolation_shaderblobs.cpp", "$sdk\src\backends\shared\blob_accessors\ffx_opticalflow_shaderblobs.cpp",
     "$sdk\src\shared\ffx_message.cpp", "$sdk\src\shared\ffx_breadcrumbs_list.cpp", "$sdk\src\shared\ffx_object_management.cpp",
     "$sdk\src\backends\shared\ffx_shader_blobs.cpp", "$sdk\src\backends\shared\blob_accessors\ffx_fsr3upscaler_shaderblobs.cpp")
-& cl /nologo /std:c++17 /O2 /MD /EHsc /w /MP /c $defs $inc "/Fo$obj\" @srcs
+& cl /nologo /std:c++17 /O2 /MD /EHsc /w /MP /c $defs $inc "/Fo$obj/" @srcs
 if ($LASTEXITCODE) { throw 'compiling the FidelityFX SDK sources failed' }
-& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I`"$sdk\include`"" "/I`"$env:VULKAN_SDK\Include`"" "/I`"$here`"" "/Fo$obj\plugin.obj" "$here\kr_upscaler_fsr3.cpp"
+& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I$sdk\include" "/I$env:VULKAN_SDK\Include" "/I$here" "/Fo$obj\plugin.obj" "$here\kr_upscaler_fsr3.cpp"
 if ($LASTEXITCODE) { throw 'compiling the plugin failed' }
 & link /nologo /DLL "/OUT:$Out\kr_upscaler_fsr3.dll" "$obj\*.obj" "$env:VULKAN_SDK\Lib\vulkan-1.lib"
 if ($LASTEXITCODE) { throw 'linking kr_upscaler_fsr3.dll failed' }

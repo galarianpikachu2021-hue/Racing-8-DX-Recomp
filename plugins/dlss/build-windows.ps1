@@ -14,9 +14,10 @@ if (-not $SdkDir) {
 $lib = "$SdkDir\lib\Windows_x86_64"
 foreach ($p in "$SdkDir\include\nvsdk_ngx.h", "$lib\x64\nvsdk_ngx_d.lib", "$lib\rel\nvngx_dlss.dll", "$lib\rel\nvngx_dlssg.dll") { if (-not (Test-Path $p)) { throw "missing $p" } }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
 $obj = Join-Path ([IO.Path]::GetTempPath()) "kr-dlss-obj-$([guid]::NewGuid())"
 New-Item -ItemType Directory $obj | Out-Null
-& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I`"$SdkDir\include`"" "/I`"$env:VULKAN_SDK\Include`"" "/I`"$here`"" "/Fo$obj\plugin.obj" "$here\kr_upscaler_dlss.cpp"
+& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I$SdkDir\include" "/I$env:VULKAN_SDK\Include" "/I$here" "/Fo$obj\plugin.obj" "$here\kr_upscaler_dlss.cpp"
 if ($LASTEXITCODE) { throw 'compiling the DLSS plugin failed' }
 & link /nologo /DLL "/OUT:$Out\kr_upscaler_dlss.dll" "$obj\plugin.obj" "$lib\x64\nvsdk_ngx_d.lib" advapi32.lib
 if ($LASTEXITCODE) { throw 'linking kr_upscaler_dlss.dll failed' }

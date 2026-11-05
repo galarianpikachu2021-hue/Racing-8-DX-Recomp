@@ -15,9 +15,10 @@ if (-not $SdkDir) {
 $k = Join-Path $SdkDir 'Kits\FidelityFX'
 foreach ($p in "$k\api\include\ffx_api.h", "$k\signedbin\amd_fidelityfx_loader_vk.dll", "$k\signedbin\amd_fidelityfx_upscaler_vk.dll", "$k\docs\license.md") { if (-not (Test-Path $p)) { throw "missing $p" } }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
 $obj = Join-Path ([IO.Path]::GetTempPath()) "kr-fsr4-obj-$([guid]::NewGuid())"
 New-Item -ItemType Directory $obj | Out-Null
-& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I`"$k\api\include`"" "/I`"$k\api\include\vk`"" "/I`"$k\upscalers\include`"" "/I`"$here\..\fsr3`"" "/I`"$env:VULKAN_SDK\Include`"" "/Fo$obj\plugin.obj" "$here\kr_upscaler_fsr4.cpp"
+& cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I$k\api\include" "/I$k\api\include\vk" "/I$k\upscalers\include" "/I$here\..\fsr3" "/I$env:VULKAN_SDK\Include" "/Fo$obj\plugin.obj" "$here\kr_upscaler_fsr4.cpp"
 if ($LASTEXITCODE) { throw 'compiling the FSR 4 plugin failed' }
 & link /nologo /DLL "/OUT:$Out\kr_upscaler_fsr4.dll" "$obj\plugin.obj"
 if ($LASTEXITCODE) { throw 'linking kr_upscaler_fsr4.dll failed' }
