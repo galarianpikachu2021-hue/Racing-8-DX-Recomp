@@ -1,8 +1,18 @@
 diff --git a/src/common/cpu_features.cpp b/src/common/cpu_features.cpp
-index 920dee36eb..fbb40c3a91 100644
+index 920dee36eb..f75fba5367 100644
 --- a/src/common/cpu_features.cpp
 +++ b/src/common/cpu_features.cpp
-@@ -231,6 +231,12 @@ const CPUCaps g_cpu_caps = [] {
+@@ -16,6 +16,9 @@
+ #include <vector>
+ #ifdef _WIN32
+ #include <windows.h>
++#if defined(_MSC_VER) && !defined(__clang__)
++#include <intrin.h>
++#endif
+ #elif defined(__DragonFly__) || defined(__FreeBSD__)
+ #include <sys/types.h>
+ #include <machine/cpufunc.h>
+@@ -231,6 +234,12 @@ const CPUCaps g_cpu_caps = [] {
          caps.max_frequency = cpu_id[1];
          caps.bus_frequency = cpu_id[2];
      }
@@ -15,14 +25,23 @@ index 920dee36eb..fbb40c3a91 100644
      return caps;
  }();
  
-@@ -272,7 +278,9 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
+@@ -269,10 +278,18 @@ std::chrono::milliseconds WallClock::GetTimeMS() const {
+     return std::chrono::milliseconds{MultiplyHigh(GetUptime(), ms_rdtsc_factor)};
+ }
+ 
++#if defined(_MSC_VER) && !defined(__clang__)
++static inline u64 HostRdtsc() { return __rdtsc(); }
++#else
++static inline u64 HostRdtsc() { return __builtin_ia32_rdtsc(); }
++#endif
++
  s64 WallClock::GetCNTPCT() const {
      if (!invariant)
          return GetUptime() * NsToCNTPCTRatio::num / NsToCNTPCTRatio::den;
 -    return MultiplyHigh(GetUptime(), cntpct_rdtsc_factor);
 +    // The guest counter does not need the serialising fences of GetUptime(): a read that lands a few cycles early is still
 +    // monotonic per thread, and the fences cost more than the read.
-+    return MultiplyHigh(static_cast<s64>(__builtin_ia32_rdtsc()), cntpct_rdtsc_factor);
++    return MultiplyHigh(static_cast<s64>(HostRdtsc()), cntpct_rdtsc_factor);
  }
  
  s64 WallClock::GetGPUTick() const {

@@ -35,7 +35,7 @@ jobs:
             -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON -DKARTRECOMP_ENGINE_VERSION="$VERSION"
       - name: Build
         shell: bash
-        run: cmake --build build --target mk8d-engine kartrecomp-export
+        run: cmake --build build --target mk8d-engine kartrecomp-export -- -k 0
       - name: Stage
         shell: pwsh
         run: |
