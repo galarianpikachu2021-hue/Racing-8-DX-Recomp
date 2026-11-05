@@ -1281,10 +1281,10 @@ index 0000000000..6edacab4ef
 +}
 diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
 new file mode 100644
-index 0000000000..7d47e9e0be
+index 0000000000..a77d42a7a4
 --- /dev/null
 +++ b/src/suyu_cmd/kr_platform.h
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,163 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
 +#pragma once
@@ -1438,7 +1438,12 @@ index 0000000000..7d47e9e0be
 +    if (const char* v = std::getenv(fallback); v && *v) return v;
 +    return {};
 +#else
-+    return {};
++    // The XDG defaults, as the rest of the tree does (GetDataDirectory): without them the folder is empty and every path built on it
++    // becomes a relative one ("kartrecomp/keys" next to wherever the game was started).
++    const char* home = std::getenv("HOME");
++    if (!home || !*home) return {};
++    const char* sub = env_name == "XDG_CACHE_HOME" ? ".cache" : env_name == "XDG_CONFIG_HOME" ? ".config" : ".local/share";
++    return std::filesystem::path{home} / sub;
 +#endif
 +}
 +
@@ -14549,10 +14554,10 @@ index 0000000000..9407f3a6c5
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..41cdc8de9b
+index 0000000000..bdffaccc62
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7645 @@
+@@ -0,0 +1,7654 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -20489,7 +20494,16 @@ index 0000000000..41cdc8de9b
 +    /// copy just the cropped rectangle to a picture-sized image, so the rest of the present path (scaling, FSR, HDR, overlay)
 +    /// sees an ordinary frame.
 +    Image* CropToPicture(Image* src) {
-+        const s32 w = crop_w.load(), h = crop_h.load(), x = crop_x.load(), y = crop_y.load();
++        s32 w = crop_w.load(), h = crop_h.load(), x = crop_x.load(), y = crop_y.load();
++        // The crop is in the game's own pixels; the image may be bigger (the output resolution above the game's 1080p): scale the rectangle
++        // by the image's own size over its guest size, or only the top-left part of the frame is shown.
++        if (src->guest_width > 0 && src->guest_height > 0 && (src->width != src->guest_width || src->height != src->guest_height)) {
++            const double sx = static_cast<double>(src->width) / src->guest_width, sy = static_cast<double>(src->height) / src->guest_height;
++            x = static_cast<s32>(std::lround(x * sx));
++            w = static_cast<s32>(std::lround(w * sx));
++            y = static_cast<s32>(std::lround(y * sy));
++            h = static_cast<s32>(std::lround(h * sy));
++        }
 +        if (w <= 0 || h <= 0 || x < 0 || y < 0 || (x == 0 && y == 0 && static_cast<u32>(w) >= src->width && static_cast<u32>(h) >= src->height) ||
 +            static_cast<u32>(x + w) > src->width || static_cast<u32>(y + h) > src->height) {
 +            return src;
