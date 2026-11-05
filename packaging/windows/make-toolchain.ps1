@@ -31,7 +31,13 @@ foreach ($ver in Get-ChildItem "$src\lib\clang" -Directory) {
     $dst = "$Out\lib\clang\$($ver.Name)"
     New-Item -ItemType Directory -Path "$dst\lib" -Force | Out-Null
     Copy-Item -Recurse "$($ver.FullName)\include" "$dst\include"
-    Copy-Item -Recurse "$($ver.FullName)\lib\x86_64-w64-windows-gnu" "$dst\lib\x86_64-w64-windows-gnu"
+    # the zip keeps the builtins in lib\windows (x86_64-w64-windows-gnu is a link there, lost on Windows); clang looks in the latter
+    $rt = "$dst\lib\x86_64-w64-windows-gnu"
+    New-Item -ItemType Directory -Path $rt | Out-Null
+    $from = @("$($ver.FullName)\lib\x86_64-w64-windows-gnu", "$($ver.FullName)\lib\windows") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $from) { Get-ChildItem "$($ver.FullName)\lib" -Recurse | Select-Object -ExpandProperty FullName | Write-Host; throw 'no compiler-rt builtins in the release' }
+    Get-ChildItem $from -Filter 'libclang_rt.builtins*x86_64*.a' | ForEach-Object { Copy-Item $_.FullName "$rt\libclang_rt.builtins.a" }
+    if (-not (Test-Path "$rt\libclang_rt.builtins.a")) { Get-ChildItem $from | Select-Object -ExpandProperty Name | Write-Host; throw 'no x86_64 builtins library' }
 }
 "llvm-mingw $tag (ucrt, x86_64)" | Set-Content "$Out\TOOLCHAIN_VERSION"
 Remove-Item -Recurse -Force $tmp
