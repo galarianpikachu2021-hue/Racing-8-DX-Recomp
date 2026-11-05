@@ -1281,10 +1281,10 @@ index 0000000000..6edacab4ef
 +}
 diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
 new file mode 100644
-index 0000000000..c853b99a19
+index 0000000000..7d47e9e0be
 --- /dev/null
 +++ b/src/suyu_cmd/kr_platform.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,158 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
 +#pragma once
@@ -1301,6 +1301,7 @@ index 0000000000..c853b99a19
 +#else
 +#include <dlfcn.h>
 +#include <pthread.h>
++#include <sched.h>
 +#include <spawn.h>
 +#include <sys/resource.h>
 +#include <sys/syscall.h>
@@ -1355,6 +1356,18 @@ index 0000000000..c853b99a19
 +    ::SetThreadDescription(::GetCurrentThread(), w.c_str());
 +#else
 +    pthread_setname_np(pthread_self(), name);
++#endif
++}
++
++// Keep the calling thread on one CPU (a debugging/tuning aid).
++inline void PinCurrentThreadToCpu(int cpu) {
++#ifdef _WIN32
++    if (cpu >= 0 && cpu < 64) ::SetThreadAffinityMask(::GetCurrentThread(), DWORD_PTR{1} << cpu);
++#else
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    CPU_SET(cpu, &set);
++    sched_setaffinity(0, sizeof(set), &set); // 0 = this thread (glibc and bionic)
 +#endif
 +}
 +
@@ -14536,10 +14549,10 @@ index 0000000000..9407f3a6c5
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..69798e5fa1
+index 0000000000..41cdc8de9b
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7649 @@
+@@ -0,0 +1,7645 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -14581,7 +14594,6 @@ index 0000000000..69798e5fa1
 +#include <string>
 +#include <thread>
 +
-+#include <sched.h>
 +#include <tuple>
 +#include <unordered_map>
 +#include <vector>
@@ -15137,10 +15149,7 @@ index 0000000000..69798e5fa1
 +            KrPlatform::SetCurrentThreadName("NativeRender");
 +            // KARTRECOMP_PIN_RENDER=<cpu> keeps the render thread off the guest cores' CPUs.
 +            if (const char* cpu = std::getenv("KARTRECOMP_PIN_RENDER")) {
-+                cpu_set_t set;
-+                CPU_ZERO(&set);
-+                CPU_SET(std::atoi(cpu), &set);
-+                sched_setaffinity(0, sizeof(set), &set); // 0 = this thread (glibc and bionic)
++                KrPlatform::PinCurrentThreadToCpu(std::atoi(cpu));
 +            }
 +            Run();
 +        });
