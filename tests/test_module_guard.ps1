@@ -31,3 +31,5 @@ Copy-Item "$tmp\badabi\recompiled_image.dll" "$tmp\otherengine\"
 Expect 4 "some-other-engine" "modules built for another engine version" @("--module-dir", "$tmp\otherengine")
 Remove-Item -Recurse -Force $tmp
 Write-Host "PASS"
+
+exit 0

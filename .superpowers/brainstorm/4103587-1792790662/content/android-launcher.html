@@ -1,0 +1,74 @@
+<h2>Android launcher: the pages as I understood them</h2>
+<p class="subtitle">Top screen of the Thor (16:9). Swipe, or push the stick left/right, to move between pages; the dots show where you are. Rough layout only, not final colours.</p>
+
+<style>
+  .scr{width:100%;aspect-ratio:16/9;border-radius:14px;background:linear-gradient(160deg,#1b2233,#10141e);color:#eef;position:relative;overflow:hidden;font-family:system-ui,sans-serif}
+  .tabs{position:absolute;top:4%;left:0;right:0;display:flex;justify-content:center;gap:5%;font-size:clamp(9px,1.3vw,14px);color:#8b93a8;letter-spacing:.04em}
+  .tabs b{color:#fff;border-bottom:3px solid #ffcf2e;padding-bottom:3px}
+  .dots{position:absolute;bottom:4%;left:0;right:0;display:flex;justify-content:center;gap:8px}
+  .dots i{width:8px;height:8px;border-radius:50%;background:#4a5268}.dots i.on{background:#ffcf2e}
+  .drop{position:absolute;left:18%;right:18%;top:24%;bottom:22%;border:3px dashed #5a6480;border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4%;text-align:center}
+  .drop .big{font-size:clamp(12px,2vw,22px);font-weight:700}
+  .drop .small{font-size:clamp(9px,1.1vw,13px);color:#8b93a8}
+  .pill{background:#2a3247;border-radius:999px;padding:.5em 1.2em;font-size:clamp(9px,1.2vw,14px)}
+  .play{position:absolute;left:30%;width:28%;top:38%;height:24%;background:#ffcf2e;color:#1b1b1b;border-radius:20px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:clamp(14px,3vw,34px)}
+  .dlc{position:absolute;left:66%;width:13%;top:44%;height:12%;background:#2a3247;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:clamp(9px,1.1vw,13px)}
+  .list{position:absolute;left:16%;right:16%;top:20%;bottom:16%;display:flex;flex-direction:column;gap:5%}
+  .row{background:#222a3d;border-radius:12px;display:flex;justify-content:space-between;align-items:center;padding:0 4%;flex:1;font-size:clamp(9px,1.2vw,14px)}
+  .row.sel{outline:3px solid #ffcf2e}
+  .tog{background:#3ecf8e;color:#08321f;border-radius:999px;padding:.2em .8em;font-weight:700}
+  .tog.off{background:#4a5268;color:#ccd}
+</style>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">Home, first time (not installed yet)</div>
+    <div class="mockup-body"><div class="scr">
+      <div class="tabs"><b>HOME</b><span>MODS</span><span>CONTROLLERS</span><span>MIIS</span></div>
+      <div class="drop">
+        <div class="big">Drop your game files here</div>
+        <div class="small">base game · update 3.0.4 · keys · firmware</div>
+        <div class="pill">Select a folder</div>
+      </div>
+      <div class="dots"><i class="on"></i><i></i><i></i><i></i></div>
+    </div></div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">Home, once it's built</div>
+    <div class="mockup-body"><div class="scr">
+      <div class="tabs"><b>HOME</b><span>MODS</span><span>CONTROLLERS</span><span>MIIS</span></div>
+      <div class="play">PLAY</div>
+      <div class="dlc">+ Add DLC</div>
+      <div class="dots"><i class="on"></i><i></i><i></i><i></i></div>
+    </div></div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">Mods page (swipe right from Home)</div>
+    <div class="mockup-body"><div class="scr">
+      <div class="tabs"><span>HOME</span><b>MODS</b><span>CONTROLLERS</span><span>MIIS</span></div>
+      <div class="list">
+        <div class="row sel"><span>Dual screen (Thor)</span><span class="tog">On</span></div>
+        <div class="row"><span>Vector</span><span class="tog">On</span></div>
+        <div class="row"><span>Boat kart</span><span class="tog off">Off</span></div>
+        <div class="row"><span>+ Add a mod</span><span></span></div>
+      </div>
+      <div class="dots"><i></i><i class="on"></i><i></i><i></i></div>
+    </div></div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">Controllers page</div>
+    <div class="mockup-body"><div class="scr">
+      <div class="tabs"><span>HOME</span><span>MODS</span><b>CONTROLLERS</b><span>MIIS</span></div>
+      <div class="list">
+        <div class="row sel"><span>Player 1</span><span>Thor built-in</span></div>
+        <div class="row"><span>Player 2</span><span>Disconnected</span></div>
+        <div class="row"><span>Button layout</span><span>Nintendo (A right)</span></div>
+      </div>
+      <div class="dots"><i></i><i></i><i class="on"></i><i></i></div>
+    </div></div>
+  </div>
+</div>
+<p class="subtitle">Not shown: Miis page. Everything else from the desktop launcher (render settings etc.) moves into the in-game menu or goes away.</p>
