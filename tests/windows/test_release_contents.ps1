@@ -21,7 +21,7 @@ if (Test-Path $objdump) {
         $own = @{}; Get-ChildItem $dir -Filter *.dll | ForEach-Object { $own[$_.Name.ToLower()] = $true }
         foreach ($dll in (& $objdump -p "$d\$exe" | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[1].Trim().ToLower() })) {
             $system = Test-Path "$env:SystemRoot\System32\$dll"
-            if (-not $own.ContainsKey($dll) -and -not $system -and $dll -notlike 'api-ms-win-*') { $fail += "$exe needs $dll, which is neither beside it nor a Windows DLL" }
+            if ($dll -ne (Split-Path $exe -Leaf).ToLower() -and -not $own.ContainsKey($dll) -and -not $system -and $dll -notlike 'api-ms-win-*') { $fail += "$exe needs $dll, which is neither beside it nor a Windows DLL" }
         }
     }
 }
