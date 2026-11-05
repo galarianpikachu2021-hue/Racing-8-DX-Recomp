@@ -47,7 +47,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: link'; exit 1 }
 & $clang --target=x86_64-w64-mingw32 -fuse-ld=lld -rtlib=compiler-rt -unwindlib=none -o "$tmp\host.exe" "$tmp\host.c"
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAIL: host build'; exit 1 }
 $imports = & "$T\bin\llvm-objdump.exe" -p "$tmp\recompiled_image.dll" | Select-String 'DLL Name:' | ForEach-Object { ($_ -split ':')[1].Trim().ToLower() }
-$allowed = 'kernel32.dll', 'msvcrt.dll', 'ucrtbase.dll'
+$allowed = 'kernel32.dll', 'msvcrt.dll', 'ucrtbase.dll', 'recompiled_image.dll' # the last is the export table naming itself
 $extra = $imports | Where-Object { ($_ -notin $allowed) -and ($_ -notlike 'api-ms-win-crt-*') }
 if ($extra) { Write-Host "FAIL: the module needs more than the system DLLs: $($extra -join ', ')"; exit 1 }
 $out = & "$tmp\host.exe" "$tmp\recompiled_image.dll"
