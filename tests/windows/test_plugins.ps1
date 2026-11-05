@@ -26,16 +26,16 @@ foreach ($id in $Expect) {
     $m = Load $up
     if ($m -eq [IntPtr]::Zero) { $fail += "kr_upscaler_$id.dll does not load (Windows error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"; continue }
     $get = [KrProbe]::GetProcAddress($m, 'kr_upscaler_get_api')
-    if ($get -eq [IntPtr]::Zero) { $fail += "$id: no kr_upscaler_get_api"; continue }
+    if ($get -eq [IntPtr]::Zero) { $fail += "${id}: no kr_upscaler_get_api"; continue }
     $api = [KrProbe]::CallGetApi($get)
-    if ($api -eq [IntPtr]::Zero) { $fail += "$id: kr_upscaler_get_api returned NULL"; continue }
+    if ($api -eq [IntPtr]::Zero) { $fail += "${id}: kr_upscaler_get_api returned NULL"; continue }
     $abi = [Runtime.InteropServices.Marshal]::ReadInt32($api, 0)
-    if ($abi -ne 1) { $fail += "$id: ABI version $abi, expected 1" }
+    if ($abi -ne 1) { $fail += "${id}: ABI version $abi, expected 1" }
     $createPtr = [Runtime.InteropServices.Marshal]::ReadIntPtr($api, 16)   # { u32 abi; (pad) const char* name; create; ... }
     $zero = [Runtime.InteropServices.Marshal]::AllocHGlobal(256)
     0..31 | ForEach-Object { [Runtime.InteropServices.Marshal]::WriteInt64($zero, $_ * 8, 0) }
-    if ([KrProbe]::CallCreate($createPtr, $zero) -ne [IntPtr]::Zero) { $fail += "$id: create() with no GPU instance must return NULL" }
-    if ($id -in 'fsr4', 'dlss' -and [KrProbe]::GetProcAddress($m, 'kr_upscaler_models') -eq [IntPtr]::Zero) { $fail += "$id: no kr_upscaler_models (the menu's Model row)" }
+    if ([KrProbe]::CallCreate($createPtr, $zero) -ne [IntPtr]::Zero) { $fail += "${id}: create() with no GPU instance must return NULL" }
+    if ($id -in 'fsr4', 'dlss' -and [KrProbe]::GetProcAddress($m, 'kr_upscaler_models') -eq [IntPtr]::Zero) { $fail += "${id}: no kr_upscaler_models (the menu's Model row)" }
     $fg = "$d\kr_framegen_$id.dll"
     if (Test-Path $fg) {
         $f = Load $fg
