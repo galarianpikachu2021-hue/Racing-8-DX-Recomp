@@ -25,10 +25,11 @@ fi
 sdk="$work/sdk/sdk"
 
 # 2. AMD's shader compiler tool, ported to Linux (GLSL path only), and the FSR 3 shader blobs.
+#    (Fortify is off: the ported tool has benign over-reads that Ubuntu's default _FORTIFY_SOURCE=3 turns into aborts.)
 if [ ! -x "$work/ffxsc/ffx_sc" ]; then
   python3 "$here/port-ffx-sc.py" "$sdk/tools/ffx_shader_compiler" "$work/ffxsc"
   ( cd "$work/ffxsc" && mkdir -p obj
-    SCINC=(-Isrc -Ilibs/SPIRV-Reflect -Ilibs/SPIRV-Reflect/include -Ilibs/tiny-process-library -Ilibs/MD5)
+    SCINC=(-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Isrc -Ilibs/SPIRV-Reflect -Ilibs/SPIRV-Reflect/include -Ilibs/tiny-process-library -Ilibs/MD5)
     gcc -c -O1 "${SCINC[@]}" libs/SPIRV-Reflect/spirv_reflect.c -o obj/spirv_reflect.o
     for f in src/ffx_sc.cpp src/glsl_compiler.cpp src/utils.cpp libs/MD5/md5.cpp libs/tiny-process-library/process.cpp libs/tiny-process-library/process_unix.cpp; do
       g++ -std=c++17 -O1 -w -c "${SCINC[@]}" "$f" -o "obj/$(basename "$f").o"
