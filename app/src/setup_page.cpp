@@ -126,7 +126,17 @@ void SetupPage::pickDlc() {
 
 SetupInputs SetupPage::inputs() const { return {base.edit->text(), update.edit->text(), keys.edit->text(), firmware.edit->text(), dlc}; }
 
+// Once a game file has been moved into the data folder, the original path is gone: follow the file to where it now lives.
+void SetupPage::adoptInstalled() {
+    if (!QFileInfo::exists(base.edit->text()) && QFileInfo::exists(layout.base())) base.edit->setText(layout.base());
+    if (!QFileInfo::exists(update.edit->text()) && QFileInfo::exists(layout.update())) update.edit->setText(layout.update());
+    for (QString& d : dlc)
+        if (!QFileInfo::exists(d) && QFileInfo::exists(layout.dlcDir() + "/" + QFileInfo(d).fileName())) d = layout.dlcDir() + "/" + QFileInfo(d).fileName();
+    if (!dlc.isEmpty()) dlcRow.edit->setText(dlc.join("; "));
+}
+
 void SetupPage::revalidate() {
+    adoptInstalled();
     const SetupInputs in = inputs();
     const bool exporterOk = QFileInfo::exists(paths.exporter);
     const auto show = [](Row& r, const QString& reason, bool empty) { r.status->setText(empty ? QString() : StatusText(reason)); };
@@ -165,6 +175,24 @@ void SetupPage::refreshButtons() {
 void SetupPage::build() {
     QString missing;
     if (!paths.complete(&missing)) { QMessageBox::warning(this, tr("Build"), missing); return; }
+    // The NSPs are moved, not copied (13 GB): say so before touching the user's files.
+    QStringList toMove;
+    auto outside = [](const QString& from, const QString& to) {
+        return !from.isEmpty() && !(QFileInfo(to).exists() && QFileInfo(to).canonicalFilePath() == QFileInfo(from).canonicalFilePath());
+    };
+    if (outside(base.edit->text(), layout.base())) toMove << base.edit->text();
+    if (outside(update.edit->text(), layout.update())) toMove << update.edit->text();
+    for (const QString& d : dlc)
+        if (outside(d, layout.dlcDir() + "/" + QFileInfo(d).fileName())) toMove << d;
+    if (!toMove.isEmpty()) {
+        const auto answer = QMessageBox::warning(
+            this, tr("Move your game files?"),
+            tr("To build the game, these files will be MOVED out of their current folder into the launcher's data folder (%1). "
+               "They will no longer be where they are now. Keep your own backup if you want one.\n\n%2\n\nContinue?")
+                .arg(QFileInfo(layout.base()).absolutePath(), toMove.join('\n')),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) return;
+    }
     saveInputs();
     building = true;
     cancelFlag = false;
@@ -184,6 +212,8 @@ void SetupPage::build() {
 
 void SetupPage::finishBuild(bool ok, const QString& text) {
     building = false;
+    adoptInstalled();
+    saveInputs();
     if (ok) {
         message->setText(tr("The game is built. Press Play."));
     } else {

@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QSet>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -57,16 +58,25 @@ bool BuilderPaths::complete(QString* missing) const {
 }
 
 namespace {
-bool PlaceFile(const QString& from, const QString& to, bool link, QString* error) {
-    QDir().mkpath(QFileInfo(to).absolutePath());
-    QFile::remove(to);
-    if (!QFileInfo(from).isFile()) {
+// move=true: the NSPs are big (13 GB), so they are moved into the data folder, not copied or linked; a link would break the moment the
+// user moves or deletes their original. The launcher warns before it does this. Small files (keys) are copied.
+bool PlaceFile(const QString& from, const QString& to, bool move, QString* error) {
+    const QFileInfo src(from);
+    if (move && !src.isFile() && QFileInfo(to).isFile()) return true; // moved by an earlier build; the installed copy is the game file
+    if (!src.isFile()) {
         *error = QStringLiteral("%1 was not found.").arg(from);
         return false;
     }
-    if (link && QFile::link(QFileInfo(from).absoluteFilePath(), to)) return true;
-    if (QFile::copy(from, to)) return true;
-    *error = QStringLiteral("Could not copy %1 to %2 (is there enough free space?).").arg(from, to);
+    if (QFileInfo(to).exists() && QFileInfo(to).canonicalFilePath() == src.canonicalFilePath()) return true; // already in place
+    QDir().mkpath(QFileInfo(to).absolutePath());
+    QFile::remove(to);
+    if (move && QFile::rename(from, to)) return true;
+    if (QFile::copy(from, to)) {
+        if (move) QFile::remove(from);
+        return true;
+    }
+    QFile::remove(to); // never leave half a file behind
+    *error = QStringLiteral("Could not %1 %2 to %3 (is there enough free space?).").arg(move ? QStringLiteral("move") : QStringLiteral("copy"), from, to);
     return false;
 }
 } // namespace
@@ -79,7 +89,11 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
     // title.keys beside prod.keys, when the user has one
     const QString title = QFileInfo(in.keys).absolutePath() + "/title.keys";
     if (QFileInfo(title).isFile() && !PlaceFile(title, QFileInfo(l.keysFile()).absolutePath() + "/title.keys", false, &error)) return error;
-    QDir(l.dlcDir()).removeRecursively();
+    // DLC files already in the folder (moved there by an earlier build) stay; anything the user dropped from the list goes
+    QSet<QString> wanted;
+    for (const QString& dlc : in.dlc) wanted.insert(QFileInfo(dlc).fileName());
+    for (const QFileInfo& old : QDir(l.dlcDir()).entryInfoList(QDir::Files))
+        if (!wanted.contains(old.fileName())) QFile::remove(old.absoluteFilePath());
     for (const QString& dlc : in.dlc)
         if (!PlaceFile(dlc, l.dlcDir() + "/" + QFileInfo(dlc).fileName(), true, &error)) return error;
     // firmware: every .nca of a folder, or of a zip, flat into the registered folder

@@ -41,6 +41,7 @@ private:
     void pick(Row& row, bool folder, const QString& title, const QString& filter);
     void pickDlc();
     void revalidate();
+    void adoptInstalled();
     SetupInputs inputs() const;
     void build();
     void cancel();

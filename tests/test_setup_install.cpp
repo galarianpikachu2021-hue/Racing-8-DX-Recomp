@@ -59,6 +59,25 @@ private slots:
         QCOMPARE(InstallInputs(in, l), QString());
         QCOMPARE(QFile(l.base()).size(), qint64(5));
     }
+    void nspsAreMovedIntoTheDataFolderNotLinked() {
+        QTemporaryDir src, dst;
+        Write(src.filePath("base.nsp"), "BASE");
+        Write(src.filePath("upd.nsp"), "UPD");
+        Write(src.filePath("d.nsp"), "D");
+        Write(src.filePath("prod.keys"), "header_key = 00\n");
+        Write(src.filePath("fw/a.nca"), "F");
+        SetupInputs in{src.filePath("base.nsp"), src.filePath("upd.nsp"), src.filePath("prod.keys"), src.filePath("fw"), {src.filePath("d.nsp")}};
+        const auto l = DataLayout::FromRoots(dst.filePath("data"), dst.filePath("cache"));
+        QCOMPARE(InstallInputs(in, l), QString());
+        QVERIFY(!QFileInfo(l.base()).isSymLink());
+        QVERIFY(!QFile::exists(src.filePath("base.nsp")) && !QFile::exists(src.filePath("upd.nsp")) && !QFile::exists(src.filePath("d.nsp")));
+        QVERIFY(QFile::exists(src.filePath("prod.keys"))); // keys are copied, the user keeps theirs
+        // a second build with the same inputs pointing at the files already in place must not delete them
+        SetupInputs again{l.base(), l.update(), src.filePath("prod.keys"), src.filePath("fw"), {l.dlcDir() + "/d.nsp"}};
+        QCOMPARE(InstallInputs(again, l), QString());
+        QCOMPARE(QFile(l.base()).size(), qint64(4));
+        QVERIFY(QFile::exists(l.dlcDir() + "/d.nsp"));
+    }
     void aMissingSourceFileIsReportedNotIgnored() {
         QTemporaryDir src, dst;
         SetupInputs in{src.filePath("none.nsp"), src.filePath("none2.nsp"), src.filePath("none.keys"), src.filePath("fw"), {}};

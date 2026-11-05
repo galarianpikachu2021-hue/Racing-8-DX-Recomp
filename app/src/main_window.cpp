@@ -28,7 +28,9 @@
 #include <QProgressBar>
 #include <QThread>
 #include <QPushButton>
+#include <QFrame>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -57,6 +59,15 @@ const QString kCore = QStringLiteral("Core");
 const QString kSystem = QStringLiteral("System");
 const QString kControls = QStringLiteral("Controls");
 
+// Every tab scrolls instead of clipping: a tiled or small window must never cut a page off.
+QWidget* scrolled(QWidget* page) {
+    auto* area = new QScrollArea;
+    area->setWidgetResizable(true);
+    area->setFrameShape(QFrame::NoFrame);
+    area->setWidget(page);
+    return area;
+}
+
 QComboBox* makeCombo(const QStringList& items) {
     auto* combo = new QComboBox;
     combo->addItems(items);
@@ -71,16 +82,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     auto* tabs = new QTabWidget;
     setup_page = new SetupPage;
-    tabs->addTab(setup_page, tr("Setup"));
+    tabs->addTab(scrolled(setup_page), tr("Setup"));
     connect(setup_page, &SetupPage::playRequested, this, &MainWindow::launch); // one place starts the game
-    tabs->addTab(buildPlayTab(), tr("Play"));
-    tabs->addTab(buildDisplayTab(), tr("Display"));
-    tabs->addTab(buildFrameRateTab(), tr("Frame rate"));
-    tabs->addTab(buildEnhancementsTab(), tr("Enhancements"));
-    tabs->addTab(buildControllersTab(), tr("Controllers"));
-    tabs->addTab(buildMiiTab(), tr("Miis"));
-    tabs->addTab(buildDlcTab(), tr("DLC"));
-    tabs->addTab(buildModsTab(), tr("Mods"));
+    tabs->addTab(scrolled(buildPlayTab()), tr("Play"));
+    tabs->addTab(scrolled(buildDisplayTab()), tr("Display"));
+    tabs->addTab(scrolled(buildFrameRateTab()), tr("Frame rate"));
+    tabs->addTab(scrolled(buildEnhancementsTab()), tr("Enhancements"));
+    tabs->addTab(scrolled(buildControllersTab()), tr("Controllers"));
+    tabs->addTab(scrolled(buildMiiTab()), tr("Miis"));
+    tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
+    tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
     setCentralWidget(tabs);
 
     QSettings prefs;
