@@ -1,0 +1,27 @@
+# Builds the launcher and its Qt tests on Windows and runs them (no game, no game code).
+name: Windows launcher tests
+on:
+  push:
+    branches: [windows-port]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.7.3
+          arch: win64_msvc2019_64
+          cache: true
+      - name: zlib
+        run: vcpkg install zlib:x64-windows-static-md
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          cmake --build build
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure

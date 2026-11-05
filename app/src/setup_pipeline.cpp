@@ -14,13 +14,7 @@
 #include "verify_build.h"
 
 namespace {
-qint64 AvailableRam() {
-    QFile f("/proc/meminfo");
-    if (!f.open(QIODevice::ReadOnly)) return 8LL << 30;
-    for (const QByteArray& line : f.readAll().split('\n'))
-        if (line.startsWith("MemAvailable:")) return line.simplified().split(' ').value(1).toLongLong() * 1024;
-    return 8LL << 30;
-}
+qint64 AvailableRam() { return BuildRunner::AvailableMemoryBytes(); }
 bool Cancelled(const std::atomic<bool>* c) { return c && c->load(); }
 QString FileText(const QString& path) {
     QFile f(path);

@@ -127,6 +127,12 @@ QProcessEnvironment GamePackage::launchEnvironment() const {
     if (installed) {
         // The engine finds its XDG folders from the app name. launch.env (VAR=value lines, '#' comments) holds the launcher's runtime settings.
         env.insert(QStringLiteral("KARTRECOMP_APP_NAME"), QStringLiteral("kartrecomp"));
+#ifdef Q_OS_WIN
+        // Portable: the engine's <XDG>/kartrecomp folders are the ones beside the launcher, not %APPDATA%.
+        env.insert(QStringLiteral("XDG_DATA_HOME"), QFileInfo(layout.dataRoot).absolutePath());
+        env.insert(QStringLiteral("XDG_CACHE_HOME"), QFileInfo(layout.cacheRoot).absolutePath());
+        env.insert(QStringLiteral("XDG_CONFIG_HOME"), QFileInfo(config_root).absolutePath());
+#endif
         QFile f(QDir(config_root).filePath(QStringLiteral("launch.env")));
         if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
             while (!f.atEnd()) {

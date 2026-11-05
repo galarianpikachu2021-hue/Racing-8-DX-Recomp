@@ -11,13 +11,7 @@
 #include "build_runner.h"
 
 namespace {
-qint64 AvailableRam() {
-    QFile f("/proc/meminfo");
-    if (!f.open(QIODevice::ReadOnly)) return 8LL << 30;
-    for (const QByteArray& line : f.readAll().split('\n'))
-        if (line.startsWith("MemAvailable:")) return line.simplified().split(' ').value(1).toLongLong() * 1024;
-    return 8LL << 30;
-}
+qint64 AvailableRam() { return BuildRunner::AvailableMemoryBytes(); }
 } // namespace
 
 int main(int argc, char** argv) {

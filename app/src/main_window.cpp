@@ -103,8 +103,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // game is the prebuilt engine plus the modules the Setup page builds. A developer checkout keeps its game folder.
     if (root.isEmpty() || !qEnvironmentVariableIsEmpty("KARTRECOMP_INSTALLED")) {
         const BuilderPaths builder = BuilderPaths::Detect();
-        const QString cfgHome = qEnvironmentVariableIsEmpty("XDG_CONFIG_HOME") ? QDir::homePath() + "/.config" : qEnvironmentVariable("XDG_CONFIG_HOME");
-        package = GamePackage::Installed(DataLayout::Default(), cfgHome + "/kartrecomp", builder.engine, builder.engineVersion);
+        package = GamePackage::Installed(DataLayout::Default(), DataLayout::ConfigRoot(), builder.engine, builder.engineVersion);
         root = package.root();
     }
     QString home = prefs.value(QStringLiteral("suyu_home")).toString();

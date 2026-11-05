@@ -15,6 +15,10 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #endif
+#ifdef Q_OS_WIN
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include "unit_split.h"
 
@@ -38,6 +42,21 @@ QString BuildRunner::ModuleFileName(const QString& name) {
     return QStringLiteral("recompiled_%1.dll").arg(name);
 #else
     return QStringLiteral("recompiled_%1.so").arg(name);
+#endif
+}
+
+qint64 BuildRunner::AvailableMemoryBytes() {
+#ifdef Q_OS_WIN
+    MEMORYSTATUSEX m{};
+    m.dwLength = sizeof(m);
+    if (GlobalMemoryStatusEx(&m)) return static_cast<qint64>(m.ullAvailPhys);
+    return 8LL << 30;
+#else
+    QFile f("/proc/meminfo");
+    if (!f.open(QIODevice::ReadOnly)) return 8LL << 30;
+    for (const QByteArray& line : f.readAll().split('\n'))
+        if (line.startsWith("MemAvailable:")) return line.simplified().split(' ').value(1).toLongLong() * 1024;
+    return 8LL << 30;
 #endif
 }
 
@@ -77,6 +96,24 @@ void BuildRunner::DieWithParent(QProcess& process) {
 #ifdef Q_OS_LINUX
     // A child must never outlive the launcher (a closed window, a crash): the kernel kills it when its parent thread ends.
     process.setChildProcessModifier([] { prctl(PR_SET_PDEATHSIG, SIGKILL); });
+#elif defined(Q_OS_WIN)
+    // One job object for the whole launcher; Windows kills everything in it when the launcher's last handle to it closes (exit or crash).
+    static HANDLE job = [] {
+        HANDLE h = CreateJobObjectW(nullptr, nullptr);
+        if (h) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info, sizeof(info));
+        }
+        return h;
+    }();
+    if (!job) return;
+    QObject::connect(&process, &QProcess::started, &process, [&process] {
+        if (HANDLE h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(process.processId()))) {
+            AssignProcessToJobObject(job, h);
+            CloseHandle(h);
+        }
+    });
 #else
     Q_UNUSED(process)
 #endif

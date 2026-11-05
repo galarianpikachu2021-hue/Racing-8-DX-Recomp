@@ -14,13 +14,35 @@
 
 DataLayout DataLayout::FromRoots(const QString& data, const QString& cache) { return {data, cache}; }
 
+QString DataLayout::PortableRoot() { return QDir::cleanPath(QCoreApplication::applicationDirPath() + "/userdata"); }
+
+QString DataLayout::ConfigRoot() {
+#ifdef Q_OS_WIN
+    if (const QString v = qEnvironmentVariable("XDG_CONFIG_HOME"); !v.isEmpty()) return v + "/kartrecomp";
+    return PortableRoot() + "/config/kartrecomp";
+#else
+    const QString v = qEnvironmentVariable("XDG_CONFIG_HOME");
+    return (v.isEmpty() ? QDir::homePath() + "/.config" : v) + "/kartrecomp";
+#endif
+}
+
 DataLayout DataLayout::Default() {
+#ifdef Q_OS_WIN
+    // Windows is portable: everything the launcher and the game write (the built game, saves, mods, logs) sits in a "userdata" folder
+    // next to kartrecomp.exe, so the folder can be moved, copied or zipped as it is. XDG_* variables still override (tests).
+    const auto root = [](const char* env, const QString& fallback) {
+        const QString v = qEnvironmentVariable(env);
+        return (v.isEmpty() ? fallback : v) + "/kartrecomp";
+    };
+    return {root("XDG_DATA_HOME", PortableRoot() + "/data"), root("XDG_CACHE_HOME", PortableRoot() + "/cache")};
+#else
     const auto root = [](const char* env, const QString& fallback) {
         const QString v = qEnvironmentVariable(env);
         return (v.isEmpty() ? fallback : v) + "/kartrecomp";
     };
     const QString home = QDir::homePath();
     return {root("XDG_DATA_HOME", home + "/.local/share"), root("XDG_CACHE_HOME", home + "/.cache")};
+#endif
 }
 
 BuilderPaths BuilderPaths::Detect() {
@@ -28,9 +50,13 @@ BuilderPaths BuilderPaths::Detect() {
     const QString app = QCoreApplication::applicationDirPath();
     // Installed: <root>/{bin/kartrecomp, engine/, tools/, toolchain/, data/}; AppImage: the same under usr/. A source checkout has them
     // under local/ and data/ beside build/app/kartrecomp.
-    const QStringList roots = {QDir::cleanPath(app + "/.."), QDir::cleanPath(app + "/../lib/kartrecomp"), QDir::cleanPath(app + "/../..")};
-    const auto pick = [&](const char* env, const QStringList& rel) {
+    const QStringList roots = {app, QDir::cleanPath(app + "/.."), QDir::cleanPath(app + "/../lib/kartrecomp"), QDir::cleanPath(app + "/../..")};
+    const auto pick = [&](const char* env, QStringList rel) {
         if (const QString v = qEnvironmentVariable(env); !v.isEmpty()) return v;
+#ifdef Q_OS_WIN
+        for (QString& x : rel)
+            if (!x.endsWith(".txt") && !x.contains("toolchain")) x += ".exe";
+#endif
         for (const QString& r : roots)
             for (const QString& x : rel)
                 if (QFileInfo::exists(r + "/" + x)) return QDir::cleanPath(r + "/" + x);

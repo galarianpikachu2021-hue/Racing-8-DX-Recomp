@@ -59,10 +59,16 @@ void OverlaySettings::setInt(const QString& key, int value) { setValue(key, QStr
 
 QStringList FindPluginIds(const QString& root, const QString& kind) {
     QStringList ids;
+#ifdef Q_OS_WIN
+    const QString prefix = QStringLiteral("kr_%1_").arg(kind);
+    const QString ext = QStringLiteral(".dll");
+#else
     const QString prefix = QStringLiteral("libkr_%1_").arg(kind);
+    const QString ext = QStringLiteral(".so");
+#endif
     for (const auto& name : QDir(QDir(root).filePath(QStringLiteral("plugins"))).entryList(QDir::Files, QDir::Name)) {
-        if (name.startsWith(prefix) && name.endsWith(QLatin1String(".so"))) {
-            const QString id = name.mid(prefix.size(), name.size() - prefix.size() - 3);
+        if (name.startsWith(prefix) && name.endsWith(ext)) {
+            const QString id = name.mid(prefix.size(), name.size() - prefix.size() - ext.size());
             if (id != QLatin1String("dump") && !ids.contains(id)) ids << id;
         }
     }
