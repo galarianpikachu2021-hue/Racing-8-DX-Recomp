@@ -132,6 +132,10 @@ void SetupPage::adoptInstalled() {
     if (!QFileInfo::exists(update.edit->text()) && QFileInfo::exists(layout.update())) update.edit->setText(layout.update());
     for (QString& d : dlc)
         if (!QFileInfo::exists(d) && QFileInfo::exists(layout.dlcDir() + "/" + QFileInfo(d).fileName())) d = layout.dlcDir() + "/" + QFileInfo(d).fileName();
+    // The settings may be gone while the game is installed (a new settings folder, a copied data folder): show what is installed.
+    if (!QFileInfo(keys.edit->text()).isFile() && !layout.installedKeys().isEmpty()) keys.edit->setText(layout.installedKeys());
+    if (!QFileInfo::exists(firmware.edit->text()) && !layout.installedFirmware().isEmpty()) firmware.edit->setText(layout.installedFirmware());
+    if (dlc.isEmpty() && !layout.installedDlc().isEmpty()) dlc = layout.installedDlc();
     if (!dlc.isEmpty()) dlcRow.edit->setText(dlc.join("; "));
 }
 

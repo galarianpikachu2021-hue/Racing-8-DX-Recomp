@@ -27,6 +27,40 @@ private slots:
         QCOMPARE(l.exportDir(), QString("/cache/kartrecomp/export"));
         QCOMPARE(l.workDir(), QString("/cache/kartrecomp/build-work"));
     }
+    void installedInputsAreWhatIsActuallyOnDisk() {
+        QTemporaryDir root;
+        const auto l = DataLayout::FromRoots(root.filePath("data/kartrecomp"), root.filePath("cache/kartrecomp"));
+        QVERIFY(l.installedKeys().isEmpty());
+        QVERIFY(l.installedFirmware().isEmpty());
+        QVERIFY(l.installedDlc().isEmpty());
+        Write(l.keysFile(), "header_key = 00\n");
+        Write(l.firmwareDir() + "/0001.nca", "FW");
+        Write(l.dlcDir() + "/b.nsp", "B");
+        Write(l.dlcDir() + "/a.nsp", "A");
+        Write(l.dlcDir() + "/notes.txt", "x");
+        QCOMPARE(l.installedKeys(), l.keysFile());
+        QCOMPARE(l.installedFirmware(), l.firmwareDir());
+        QCOMPARE(l.installedDlc(), (QStringList{l.dlcDir() + "/a.nsp", l.dlcDir() + "/b.nsp"}));
+    }
+    void installingFromTheInstalledFirmwareFolderKeepsTheFirmware() {
+        QTemporaryDir root;
+        const auto l = DataLayout::FromRoots(root.filePath("data/kartrecomp"), root.filePath("cache/kartrecomp"));
+        Write(l.base(), "BASE");
+        Write(l.update(), "UPD");
+        Write(l.keysFile(), "header_key = 00\n");
+        Write(l.firmwareDir() + "/0001.nca", "FW1");
+        Write(l.firmwareDir() + "/0002.nca", "FW2");
+        SetupInputs in;
+        in.base = l.base();
+        in.update = l.update();
+        in.keys = l.keysFile();
+        in.firmware = l.firmwareDir();
+        QCOMPARE(InstallInputs(in, l), QString());
+        QVERIFY(QFileInfo::exists(l.firmwareDir() + "/0001.nca"));
+        QVERIFY(QFileInfo::exists(l.firmwareDir() + "/0002.nca"));
+        QVERIFY(QFileInfo::exists(l.keysFile()));
+        QVERIFY(QFileInfo::exists(l.base()));
+    }
     void installPlacesEveryInputWhereTheEngineLooksForIt() {
         QTemporaryDir src, dst;
         // a folder name with spaces and non-ASCII letters, like a user's Downloads folder

@@ -21,6 +21,10 @@ struct DataLayout {
     QString dlcDir() const { return content() + "/dlc"; }
     QString keysFile() const { return dataRoot + "/keys/prod.keys"; }
     QString firmwareDir() const { return dataRoot + "/nand/system/Contents/registered"; }
+    // What an earlier Setup already installed (empty / none when it is not there): the Setup page shows these when its own settings are gone.
+    QString installedKeys() const;
+    QString installedFirmware() const;
+    QStringList installedDlc() const;
     QString moduleDir() const { return dataRoot + "/module"; }
     QString modsDir() const { return dataRoot + "/mods"; }
     QString exportDir() const { return cacheRoot + "/export"; }

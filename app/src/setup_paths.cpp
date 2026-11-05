@@ -124,6 +124,8 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
     for (const QString& dlc : in.dlc)
         if (!PlaceFile(dlc, l.dlcDir() + "/" + QFileInfo(dlc).fileName(), true, &error)) return error;
     // firmware: every .nca of a folder, or of a zip, flat into the registered folder
+    // Already installed (the page shows the installed folder when its own settings are gone): clearing it first would delete the input.
+    if (QFileInfo(in.firmware).isDir() && QDir(in.firmware).canonicalPath() == QDir(l.firmwareDir()).canonicalPath()) return {};
     QDir(l.firmwareDir()).removeRecursively();
     QDir().mkpath(l.firmwareDir());
     if (QFileInfo(in.firmware).isDir()) {
@@ -154,4 +156,16 @@ bool IsBuilt(const DataLayout& l, const QString& engineVersion) {
     QFile f(l.moduleDir() + "/module.json");
     if (!f.open(QIODevice::ReadOnly)) return false;
     return f.readAll().contains("\"engineVersion\": \"" + engineVersion.toUtf8() + "\"");
+}
+
+QString DataLayout::installedKeys() const { return QFileInfo(keysFile()).isFile() ? keysFile() : QString(); }
+
+QString DataLayout::installedFirmware() const {
+    return QDir(firmwareDir()).entryList({"*.nca"}, QDir::Files).isEmpty() ? QString() : firmwareDir();
+}
+
+QStringList DataLayout::installedDlc() const {
+    QStringList out;
+    for (const QString& f : QDir(dlcDir()).entryList({"*.nsp"}, QDir::Files, QDir::Name)) out << dlcDir() + "/" + f;
+    return out;
 }
