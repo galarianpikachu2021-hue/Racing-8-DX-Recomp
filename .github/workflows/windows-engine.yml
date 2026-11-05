@@ -29,6 +29,9 @@ jobs:
           MSYS_NO_PATHCONV: '1'
         run: |
           VERSION="$(cat patches/suyu/*.patch | sha256sum | cut -c1-10)-abi6"
+          # TEST BUILDS ONLY: a pin keeps the stamp of the first tester build when the module ABI did not change (renderer-only fix), so the
+          # tester's finished game is not rebuilt. Delete the pin file as soon as a change touches the generated code or the ABI.
+          if [ -f packaging/windows/engine-version.pin ]; then VERSION="$(tr -d '[:space:]' < packaging/windows/engine-version.pin)"; fi
           echo "ENGINE_VERSION=$VERSION" >> "$GITHUB_ENV"
           cmake -S fork -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_QT=OFF -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF \
