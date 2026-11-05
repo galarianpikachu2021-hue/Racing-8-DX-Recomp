@@ -25,4 +25,5 @@ if ($LASTEXITCODE) { throw 'linking kr_upscaler_fsr4.dll failed' }
 Copy-Item "$k\signedbin\amd_fidelityfx_loader_vk.dll", "$k\signedbin\amd_fidelityfx_upscaler_vk.dll" $Out
 Copy-Item "$k\docs\license.md" "$Out\AMD-FSR-SDK-LICENSE.txt"
 Remove-Item -Recurse -Force $obj
+Get-ChildItem $Out -Include *.exp, *.lib -Recurse | Remove-Item -Force   # import libraries the linker leaves beside the DLLs
 Get-ChildItem $Out | ForEach-Object { Write-Host ("{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB)) }

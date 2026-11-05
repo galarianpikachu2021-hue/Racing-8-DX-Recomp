@@ -30,4 +30,5 @@ if ($LASTEXITCODE) { throw 'linking kr_upscaler_fsr3.dll failed' }
 & cl /nologo /O2 /LD "$here\..\windows\forwarder.c" "/Fe:$Out\kr_framegen_fsr3.dll" "/Fo$obj\forwarder.obj"
 if ($LASTEXITCODE) { throw 'building the frame-generation forwarder failed' }
 Remove-Item -Recurse -Force $obj
+Get-ChildItem $Out -Include *.exp, *.lib -Recurse | Remove-Item -Force   # import libraries the linker leaves beside the DLLs
 Get-ChildItem $Out -Filter 'kr_*fsr3.dll' | ForEach-Object { Write-Host ("{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB)) }

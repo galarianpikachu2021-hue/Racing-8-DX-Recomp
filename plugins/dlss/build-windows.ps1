@@ -25,4 +25,5 @@ if ($LASTEXITCODE) { throw 'linking kr_upscaler_dlss.dll failed' }
 if ($LASTEXITCODE) { throw 'building the frame-generation forwarder failed' }
 Copy-Item "$lib\rel\nvngx_dlss.dll", "$lib\rel\nvngx_dlssg.dll" $Out
 Remove-Item -Recurse -Force $obj
+Get-ChildItem $Out -Include *.exp, *.lib -Recurse | Remove-Item -Force   # import libraries the linker leaves beside the DLLs
 Get-ChildItem $Out | ForEach-Object { Write-Host ("{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB)) }
