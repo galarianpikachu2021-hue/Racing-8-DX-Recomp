@@ -22,13 +22,19 @@ foreach ($f in 'clang.exe', 'clang-*.exe', 'lld.exe', 'ld.lld.exe', 'llvm-objdum
     Get-ChildItem "$src\bin" -Filter $f -ErrorAction SilentlyContinue | Copy-Item -Destination "$Out\bin"
 }
 # every target folder at the top (x86_64-w64-mingw32, and generic-w64-mingw32 which holds the shared mingw-w64 headers), nothing else
-Get-ChildItem $src -Directory | Where-Object { $_.Name -like '*-w64-mingw32' } | ForEach-Object { Copy-Item -Recurse $_.FullName "$Out\$($_.Name)" }
+Get-ChildItem $src -Directory | Where-Object { $_.Name -eq 'x86_64-w64-mingw32' } | ForEach-Object { Copy-Item -Recurse $_.FullName "$Out\$($_.Name)" }
 # the mingw-w64 C headers live in include\ (the per-target include folders are links to it); libc++'s headers are not needed for C
 New-Item -ItemType Directory -Path "$Out\include" | Out-Null
 Get-ChildItem "$src\include" | Where-Object { $_.Name -ne 'c++' } | Copy-Item -Recurse -Destination "$Out\include"
-Copy-Item -Recurse "$src\lib" "$Out\lib"
-Remove-Item -Recurse -Force "$Out\lib\clang\*\lib\*" -Exclude 'windows' -ErrorAction SilentlyContinue
+# the compiler's own resource folder: its headers and the x86_64 builtins library, nothing for other targets
+foreach ($ver in Get-ChildItem "$src\lib\clang" -Directory) {
+    $dst = "$Out\lib\clang\$($ver.Name)"
+    New-Item -ItemType Directory -Path "$dst\lib" -Force | Out-Null
+    Copy-Item -Recurse "$($ver.FullName)\include" "$dst\include"
+    Copy-Item -Recurse "$($ver.FullName)\lib\x86_64-w64-windows-gnu" "$dst\lib\x86_64-w64-windows-gnu"
+}
 "llvm-mingw $tag (ucrt, x86_64)" | Set-Content "$Out\TOOLCHAIN_VERSION"
 Remove-Item -Recurse -Force $tmp
 $mb = [math]::Round((Get-ChildItem $Out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
 Write-Host "toolchain: $mb MB in $Out"
+Get-ChildItem $Out -Directory | ForEach-Object { "{0,6} MB  {1}" -f [math]::Round((Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), $_.Name } | Write-Host
