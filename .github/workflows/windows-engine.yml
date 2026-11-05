@@ -51,3 +51,84 @@ jobs:
           name: windows-engine
           path: stage
           if-no-files-found: error
+
+  toolchain:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble the toolchain
+        shell: pwsh
+        run: packaging\windows\make-toolchain.ps1 -Out stage\toolchain
+      - name: Toolchain test
+        shell: pwsh
+        run: tests\windows\test_toolchain.ps1 -Toolchain stage\toolchain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-toolchain
+          path: stage\toolchain
+          if-no-files-found: error
+
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.7.3
+          arch: win64_msvc2019_64
+          cache: true
+      - name: zlib
+        run: vcpkg install zlib:x64-windows-static-md
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          cmake --build build
+      - name: Bundle Qt
+        run: |
+          New-Item -ItemType Directory -Force stage\launcher | Out-Null
+          Copy-Item build\app\kartrecomp.exe, build\app\kartrecomp-setup.exe, build\app\kartrecomp-build.exe stage\launcher\
+          windeployqt --release --no-translations stage\launcher\kartrecomp.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-launcher
+          path: stage\launcher
+          if-no-files-found: error
+
+  bundle:
+    needs: [engine, toolchain, launcher]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-engine
+          path: parts\engine-all
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-toolchain
+          path: parts\toolchain
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-launcher
+          path: parts\launcher
+      - name: Assemble
+        shell: pwsh
+        run: packaging\windows\assemble.ps1 -Engine parts\engine-all\engine -Launcher parts\launcher -Toolchain parts\toolchain -Out KartRecomp
+      - name: Release contents test
+        shell: pwsh
+        run: tests\windows\test_release_contents.ps1 KartRecomp
+      - name: Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path KartRecomp -DestinationPath KartRecomp-windows-x64-TEST.zip -CompressionLevel Optimal
+          (Get-FileHash KartRecomp-windows-x64-TEST.zip -Algorithm SHA256).Hash.ToLower() + "  KartRecomp-windows-x64-TEST.zip" | Out-File -Encoding ascii KartRecomp-windows-x64-TEST.zip.sha256
+          "{0:N0} MB" -f ((Get-Item KartRecomp-windows-x64-TEST.zip).Length / 1MB) | Write-Host
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KartRecomp-windows-x64-TEST
+          path: |
+            KartRecomp-windows-x64-TEST.zip
+            KartRecomp-windows-x64-TEST.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
