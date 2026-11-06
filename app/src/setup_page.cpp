@@ -150,7 +150,7 @@ void SetupPage::revalidate() {
     const bool keysOk = !in.keys.isEmpty() && kp == KeyProblem::None;
     const auto read = [&](const QString& p) { return ReadNspInfo(paths.exporter, p, in.keys); };
     const auto nspReason = [&](const QString& path, bool isBase) -> QString {
-        if (!exporterOk) return tr("The exporter is missing: reinstall the launcher.");
+        if (!exporterOk) return tr("The exporter is missing: unzip the whole download and run kartrecomp.exe from inside that folder (tools\\kartrecomp-export.exe must be beside it).");
         if (!keysOk) return tr("Pick your keys first.");
         const NspInfo info = read(path);
         return isBase ? ValidateBase(info) : ValidateUpdate(info);

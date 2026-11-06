@@ -62,7 +62,7 @@ BuilderPaths BuilderPaths::Detect() {
                 if (QFileInfo::exists(r + "/" + x)) return QDir::cleanPath(r + "/" + x);
         return QString();
     };
-    p.exporter = pick("KARTRECOMP_EXPORTER", {"tools/kartrecomp-export", "bin/kartrecomp-export"});
+    p.exporter = pick("KARTRECOMP_EXPORTER", {"tools/kartrecomp-export", "bin/kartrecomp-export", "engine/kartrecomp-export", "kartrecomp-export"});
     p.engine = pick("KARTRECOMP_ENGINE", {"bin/mk8d-engine", "engine/mk8d-engine", "local/game/mk8d-engine"});
     p.toolchain = pick("KARTRECOMP_TOOLCHAIN", {"toolchain", "local/toolchain"});
     p.hotList = pick("KARTRECOMP_HOT_LIST", {"data/mk8d-3.0.4/hot_blocks.txt"});
@@ -77,7 +77,8 @@ bool BuilderPaths::complete(QString* missing) const {
     const std::pair<const char*, QString> parts[] = {{"exporter", exporter}, {"engine", engine}, {"toolchain", toolchain}, {"hot block list", hotList}};
     for (const auto& [name, path] : parts) {
         if (path.isEmpty() || !QFileInfo::exists(path)) {
-            if (missing) *missing = QStringLiteral("The %1 is missing (%2). Reinstall the launcher.").arg(name, path.isEmpty() ? QStringLiteral("not found") : path);
+            if (missing) *missing = QStringLiteral("The %1 is missing (%2). Reinstall the launcher: unzip the whole download and run kartrecomp.exe from inside that folder, with its tools, engine and toolchain folders beside it.")
+                                        .arg(name, path.isEmpty() ? QStringLiteral("not found next to %1").arg(QCoreApplication::applicationDirPath()) : path);
             return false;
         }
     }
