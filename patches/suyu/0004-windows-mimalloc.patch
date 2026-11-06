@@ -1,7 +1,7 @@
 diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
 --- a/src/suyu_cmd/CMakeLists.txt
 +++ b/src/suyu_cmd/CMakeLists.txt
-@@ -93,6 +93,28 @@
+@@ -93,5 +93,27 @@
          if (WIN32)
              target_link_libraries(mk8d-engine PRIVATE iphlpapi ws2_32)
          endif()
@@ -29,7 +29,6 @@ diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
 +        endif()
          list(APPEND SUYU_CMD_TARGETS mk8d-engine)
      endif()
-
 diff --git a/src/suyu_cmd/kart_mimalloc.cpp b/src/suyu_cmd/kart_mimalloc.cpp
 new file mode 100644
 --- /dev/null
