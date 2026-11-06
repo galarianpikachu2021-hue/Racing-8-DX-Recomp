@@ -6,7 +6,7 @@ in `docs/UPSCALER.md`). What exists and what ships:
 | Plugin | Source | Ships in the zip | Notes |
 |---|---|---|---|
 | **FSR 3.1** upscaler + **FSR 3 frame generation** (`kr_upscaler_fsr3.dll`, `kr_framegen_fsr3.dll`) | AMD FidelityFX SDK **v1.1.4** (MIT), built on CI with MSVC from the SDK's own sources and shader blobs | yes | Works on any Vulkan GPU. The framegen file is a tiny forwarder to the upscaler DLL (one loaded module, like the Linux symlink). |
-| **FSR 4.1.2** (`kr_upscaler_fsr4.dll`) | AMD FSR SDK **2.4.0** (2026-10-28): official **Vulkan** support, "feature parity with DX12" | yes, with AMD's two signed DLLs | The plugin holds no AMD code; it loads `amd_fidelityfx_loader_vk.dll` beside it. AMD's licence allows redistributing the DLLs in binary form, unmodified, with the licence text (shipped as `AMD-FSR-SDK-LICENSE.txt`). |
+| **FSR 4.1.2** + **FSR 4 frame generation 4.0.2** (`kr_upscaler_fsr4.dll`, `kr_framegen_fsr4.dll`) | AMD FSR SDK **2.4.0** (2026-10-28): official **Vulkan** support, "feature parity with DX12" | yes, with AMD's two signed DLLs | The plugin holds no AMD code; it loads `amd_fidelityfx_loader_vk.dll` beside it. AMD's licence allows redistributing the DLLs in binary form, unmodified, with the licence text (shipped as `AMD-FSR-SDK-LICENSE.txt`). |
 | **DLSS** super resolution + **DLSS frame generation** (`kr_upscaler_dlss.dll`, `kr_framegen_dlss.dll`) | NVIDIA's public NGX SDK (github.com/NVIDIA/DLSS) | **never** | It links NVIDIA's static NGX library and needs NVIDIA's `nvngx_dlss*.dll`. Built on your own machine (`plugins\dlss\build-windows.ps1`) or from the manual-only CI job; the release test fails if anything DLSS/NGX is in the zip. |
 
 ## FSR 4 models (what "Model" in the in-game menu lists)
@@ -26,7 +26,17 @@ GPU (`ffxQuery` GET_VERSIONS), DLSS lists its render presets (Auto, K, J, M, L, 
 The choice is saved (`model=` in `kartrecomp_overlay.ini`). The Vulkan path of FSR 4 needs AMD Adrenalin 26.10.1 or newer; the driver may carry a
 newer FSR version than the DLL ("Auto" prefers it).
 
-Not done: FSR 4 **frame generation** (SDK 2.4 has it on Vulkan, but its swapchain-based flow is a separate piece of work), HDR-linear input for FSR 4
+## FSR 4 frame generation
+
+Needs a Radeon RX 9000 (AMD's requirement for FSR Frame Generation 4.x), Windows 11 and the Adrenalin 26.10.1+ Vulkan runtime; on any other GPU `create`/`configure`
+fails cleanly and the host falls back to its built-in interpolator. We do not use AMD's swapchain wrapper (the host presents): each game frame the plugin runs
+`ffxConfigure` (NO_SWAPCHAIN_CONTEXT_NOTIFY, frame id +1, +2 on a camera cut), the *prepare* dispatch (the host's depth, its motion vectors in render pixels, jitter,
+camera near/fov, and a camera position/right/up/forward basis derived from the game's view-projection matrices), then the generation dispatch from the HUD-free
+display-referred 3D image into the host's output image. The host lays the HUD over the result and presents it between the real frames. Menu: Frame generation row, "fsr4".
+**Written from AMD's documentation, never run**: the swapchain-less use is what the `NO_SWAPCHAIN_CONTEXT_NOTIFY` flag exists for, but nobody has confirmed it on this
+game; if it fails the log shows `[fsr4-fg] ... failed (<code>)`.
+
+Not done: HDR-linear input for FSR 4
 (the host gives a tonemapped, display-encoded image; the plugin sets the non-linear colour flags).
 
 ## Build
