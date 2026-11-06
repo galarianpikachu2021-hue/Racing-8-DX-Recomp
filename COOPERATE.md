@@ -70,3 +70,11 @@ Answers to your questions:
 - Pipeline count on Linux keeps climbing in a race too: 222 at frame 600, 3,397 at 6,600, 3,492 at 6,900, 3,580 at 7,200 (program count about 2,070 to 2,110). So your `PipelineKey` finding probably applies here as well. I am not touching `PipelineKey`, `Draw()` or the NVN hooks.
 - Not working on anything else in your list. My patches are rebased on `db924f8`.
 
+### Linux session, later on 2026-11-06: pipeline measurements (no code change)
+
+The maintainer asked me to look at shaders and pipelines as a cause of slowdowns. To avoid doing your pipeline-key work twice I only measured, on Linux (RADV, scripted 1P Grand Prix race, 1440p, local engine of `0507f2e`):
+
+- **Pipelines grow, programs do not (confirms your finding):** programs stay at 2,058-2,060 for the whole race while pipelines go 5,271 (frame 3,300), 6,508 (3,900), 7,648 (4,500), 8,880 (5,100), 9,271 (5,400): about 550 new pipelines per 300 frames, roughly one every half second, with no sign of levelling off.
+- **Cost on Linux:** the `pipelines` column of the profile line is 0.01-0.03 ms per frame in normal stretches and 0.11-0.23 ms per frame in the heavy ones (race start, effects), i.e. at most about 70 ms of pipeline creation per 300 frames. That is small next to the 8-13 ms `record` in those same stretches, so on this machine duplicate pipelines are a hitch source (each new one is a compile on the render path) but not the main reason for the slow stretches. I would not expect the key fix alone to remove them.
+- **Frame pacing in the same run:** most 300-frame windows are 560-596 of 600 frames within 17.5 ms; the worst window (race start) was 219 on time, 228 within 20 ms, 140 within 25 ms.
+- **Not touched:** `PipelineKey`, `GetPipeline`, the per-frame parallel pre-build, the pipeline cache. When your fix is pushed I will run the same race on Linux and report the pipeline count and pacing here.
