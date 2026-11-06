@@ -361,10 +361,10 @@ index 5fbe66c62b..d4b2ccca91 100644
      create_resource("../../dist/suyu.bmp" "suyu_cmd/suyu_icon.h" "suyu_icon")
 diff --git a/src/suyu_cmd/cpu_topology.h b/src/suyu_cmd/cpu_topology.h
 new file mode 100644
-index 0000000000..cfff83c84e
+index 0000000000..b9ff87f8ff
 --- /dev/null
 +++ b/src/suyu_cmd/cpu_topology.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,149 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: keeps the emulator off the efficiency cores of hybrid CPUs.
 +//
@@ -376,6 +376,7 @@ index 0000000000..cfff83c84e
 +// KARTRECOMP_PIN_PCORES=0 disables it; KARTRECOMP_PCORE_LIST="0-7,16" forces a CPU list (testing).
 +#pragma once
 +
++#include <algorithm>
 +#include <cstdlib>
 +#include <fstream>
 +#include <sstream>
@@ -386,6 +387,10 @@ index 0000000000..cfff83c84e
 +
 +#ifdef __linux__
 +#include <sched.h>
++#endif
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
 +#endif
 +
 +namespace SuyuCmd {
@@ -451,6 +456,59 @@ index 0000000000..cfff83c84e
 +        std::fprintf(stderr, "hybrid CPU: restricted to the performance cores (%zu logical CPUs: %s)\n", cpus.size(), list.c_str());
 +    } else {
 +        std::fprintf(stderr, "hybrid CPU: could not restrict to the performance cores (%s)\n", list.c_str());
++    }
++#elif defined(_WIN32)
++    // Windows: every core reports an EfficiencyClass (0 = efficiency, higher = performance); when there is more than one class,
++    // the process keeps only the highest one (hyper-threads included). Only the first processor group (64 logical CPUs) is considered.
++    if (const char* off = std::getenv("KARTRECOMP_PIN_PCORES"); off && std::string{off} == "0") {
++        return;
++    }
++    DWORD length = 0;
++    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
++    if (length == 0) {
++        return;
++    }
++    std::vector<unsigned char> buffer(length);
++    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &length)) {
++        return;
++    }
++    struct Core {
++        BYTE efficiency;
++        KAFFINITY mask;
++        WORD group;
++    };
++    std::vector<Core> cores;
++    for (DWORD offset = 0; offset < length;) {
++        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
++        if (info->Relationship == RelationProcessorCore && info->Processor.GroupCount > 0) {
++            cores.push_back({info->Processor.EfficiencyClass, info->Processor.GroupMask[0].Mask, info->Processor.GroupMask[0].Group});
++        }
++        offset += info->Size;
++    }
++    BYTE best = 0, lowest = 255;
++    for (const Core& c : cores) {
++        best = std::max(best, c.efficiency);
++        lowest = std::min(lowest, c.efficiency);
++    }
++    if (cores.empty() || best == lowest) {
++        return; // not a hybrid CPU
++    }
++    KAFFINITY mask = 0;
++    size_t logical = 0;
++    for (const Core& c : cores) {
++        if (c.efficiency == best && c.group == 0) {
++            mask |= c.mask;
++            for (KAFFINITY bits = c.mask; bits; bits &= bits - 1) ++logical;
++        }
++    }
++    if (mask == 0) {
++        return;
++    }
++    if (SetProcessAffinityMask(GetCurrentProcess(), mask)) {
++        std::fprintf(stderr, "hybrid CPU: restricted to the performance cores (%zu logical CPUs, mask %#llx)\n", logical,
++                     static_cast<unsigned long long>(mask));
++    } else {
++        std::fprintf(stderr, "hybrid CPU: could not restrict to the performance cores (Windows error %lu)\n", GetLastError());
 +    }
 +#endif
 +}
@@ -14622,10 +14680,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..52d156c892
+index 0000000000..18deb0306b
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7683 @@
+@@ -0,0 +1,7722 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -16072,6 +16130,21 @@ index 0000000000..52d156c892
 +#endif
 +        sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 +        sci.presentMode = mode;
++        {
++            const auto mode_name = [](VkPresentModeKHR m) {
++                switch (m) {
++                case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate";
++                case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox";
++                case VK_PRESENT_MODE_FIFO_KHR: return "fifo";
++                case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo-relaxed";
++                default: return "other";
++                }
++            };
++            std::string available;
++            for (auto m : modes) available += std::string(available.empty() ? "" : ", ") + mode_name(m);
++            LOG_INFO(Frontend, "nvn-host vulkan: swapchain present mode {} (available: {}), {} images, {}x{}", mode_name(mode),
++                     available, sci.minImageCount, extent.width, extent.height);
++        }
 +        sci.clipped = VK_TRUE;
 +        sci.oldSwapchain = swapchain;
 +        VkSwapchainKHR next = VK_NULL_HANDLE;
@@ -20885,8 +20958,12 @@ index 0000000000..52d156c892
 +            u32 index2 = fg_pending_index;
 +            lk.unlock();
 +            std::this_thread::sleep_until(at);
++            const auto woke = std::chrono::steady_clock::now();
++            double lock_ms = 0.0, present_ms = 0.0;
 +            {
 +                std::scoped_lock qlock{queue_mutex};
++                const auto locked = std::chrono::steady_clock::now();
++                lock_ms = std::chrono::duration<double, std::milli>(locked - woke).count();
 +                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +                pi.waitSemaphoreCount = 1;
 +                pi.pWaitSemaphores = &rendered2;
@@ -20895,8 +20972,15 @@ index 0000000000..52d156c892
 +                pi.pImageIndices = &index2;
 +                const VkResult r = vk.vkQueuePresentKHR(queue_handle, &pi);
 +                if (SwapchainStale(r)) resize_pending = true;
++                present_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - locked).count();
 +            }
 +            lk.lock();
++            // Diagnostics for the periodic log line: how late the wake-up was, how long the queue lock and the present call took.
++            fg_stat_late_max = std::max(fg_stat_late_max, std::chrono::duration<double, std::milli>(woke - at).count());
++            fg_stat_lock_max = std::max(fg_stat_lock_max, lock_ms);
++            fg_stat_present_max = std::max(fg_stat_present_max, present_ms);
++            fg_stat_present_sum += present_ms;
++            ++fg_stat_count;
 +            fg_pending = false;
 +            fg_cv.notify_all();
 +        }
@@ -21840,6 +21924,17 @@ index 0000000000..52d156c892
 +                     "game waited on renderer {:.2f} ms, commands {:.0f}",
 +                     upload_cache_hits / 300.0, descriptor_cache_hits / 300.0, throttle_ns.exchange(0) / 300.0 / 1e6,
 +                     commands_seen / 300.0);
++            {
++                std::scoped_lock fg_lock{fg_mx};
++                if (fg_stat_count) {
++                    LOG_INFO(Frontend, "nvn-host vulkan: frame generation presents {}: present call avg {:.2f} / max {:.2f} ms, queue lock wait max {:.2f} ms, "
++                             "wake-up lateness max {:.2f} ms (frame period {:.1f} ms)",
++                             fg_stat_count, fg_stat_present_sum / static_cast<double>(fg_stat_count), fg_stat_present_max, fg_stat_lock_max,
++                             fg_stat_late_max, fg_period_ms);
++                }
++                fg_stat_count = 0;
++                fg_stat_present_sum = fg_stat_present_max = fg_stat_lock_max = fg_stat_late_max = 0.0;
++            }
 +            commands_seen = 0;
 +            upload_cache_hits = 0;
 +            descriptor_cache_hits = 0;
@@ -22165,6 +22260,8 @@ index 0000000000..52d156c892
 +    std::thread fg_thread;
 +    std::mutex fg_mx;
 +    std::condition_variable fg_cv;
++    u64 fg_stat_count = 0;
++    double fg_stat_present_sum = 0, fg_stat_present_max = 0, fg_stat_lock_max = 0, fg_stat_late_max = 0; ///< guarded by fg_mx; logged and reset every 300 frames
 +    bool fg_pending = false, fg_stop = false;
 +    std::chrono::steady_clock::time_point fg_at{};
 +    u32 fg_pending_index = 0;
