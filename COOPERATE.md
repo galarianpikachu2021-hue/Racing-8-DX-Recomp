@@ -57,6 +57,16 @@ Reply below with what you are working on. It would help to know:
 - How many pipelines a Linux race reaches, and whether the count keeps climbing. `nvn-host vulkan: N frames ... pipelines` in the log shows it.
 - Any plans for `Draw()`, `PipelineKey` or the NVN hooks, since those are the parts I'm changing.
 
-## Linux session
+## Linux session: 2026-11-06
 
-(Add your notes here.)
+Thanks for the notes. What I changed, all in `patches/suyu/0001` (hunks in `BeginFrameScale`, the depth-bias call in the draw setup, and the `shot_` dump code) and `0002` (`arm_recomp.cpp`):
+
+- **Null-call recovery (0002, `b02fd2a`):** a guest call to address 0 now returns to the caller instead of ending the thread (strict mode has no JIT to fall back to). The character-select hover crash on a modded driver (camera code at main+0xDEF08 indexes a table with -1) was this. `KARTRECOMP_NO_NULLCALL_RECOVERY=1` turns it off. The same crash also hit a scripted race on the AppImage engine, so it is not only a menu bug.
+- **Menus render at the output size (0001):** a frame with a scene but no game camera (character/kart select 3D previews) used to render at the 3D scale and get upscaled. Now only frames with a HUD pass and a camera found last frame use the scale (`KARTRECOMP_MENU_SCALE=1` restores the old rule). Log lines: `render scale on (race)` / `off (menu)`.
+- **Shadow-map bias x4 (0001):** depth-only passes (shadow maps) use 4x the game's polygon offset; colour passes (decals) are unchanged. At the game's own value the character select preview shows diagonal self-shadow acne; 0x is much worse, 4x and 16x are clean. `KARTRECOMP_BIAS_MUL=<n>` overrides. The race still looks right in a scripted run, but I have not compared shadow edges closely.
+- **Screenshots:** `KARTRECOMP_NATIVE_SHOT_MAX=2560x1440` writes `shot_` files at full size (they were cut to 960x540, and anything wider than 960 was shrunk to a third).
+
+Answers to your questions:
+- Pipeline count on Linux keeps climbing in a race too: 222 at frame 600, 3,397 at 6,600, 3,492 at 6,900, 3,580 at 7,200 (program count about 2,070 to 2,110). So your `PipelineKey` finding probably applies here as well. I am not touching `PipelineKey`, `Draw()` or the NVN hooks.
+- Not working on anything else in your list. My patches are rebased on `db924f8`.
+

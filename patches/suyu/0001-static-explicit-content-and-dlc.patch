@@ -134,7 +134,7 @@ index bc82572582..ded989a771 100644
      // Amplitude for HD rumble needs no modification
      if (joystick->HasHDRumble()) {
 diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
-index 5fbe66c62b..d4b2ccca91 100644
+index 5fbe66c62b..e51a7cb5c6 100644
 --- a/src/suyu_cmd/CMakeLists.txt
 +++ b/src/suyu_cmd/CMakeLists.txt
 @@ -24,8 +24,23 @@ if (SUYU_CMD OR YUZU_CMD)
@@ -161,7 +161,7 @@ index 5fbe66c62b..d4b2ccca91 100644
          sdl_config.cpp
          sdl_config.h
          suyu.cpp
-@@ -48,169 +63,37 @@ if (SUYU_CMD OR YUZU_CMD)
+@@ -48,169 +63,59 @@ if (SUYU_CMD OR YUZU_CMD)
      # This is an *additional* target - plain suyu-cmd stays game-agnostic.
      # ---------------------------------------------------------------------
      if (SUYU_CMD_RECOMP_DIR AND EXISTS "${SUYU_CMD_RECOMP_DIR}/recomp_registration.c")
@@ -354,6 +354,28 @@ index 5fbe66c62b..d4b2ccca91 100644
 -            message(WARNING "SUYU_CMD_RECOMP_DIR set but no recompiled modules found in it")
 +        if (WIN32)
 +            target_link_libraries(mk8d-engine PRIVATE iphlpapi ws2_32)
++        endif()
++        if (MSVC)
++            # The Windows heap is slow for this workload: per-draw containers, cross-thread frees, and large per-frame buffers that
++            # go to the OS and fault in fresh pages every frame. mimalloc is to this build what tcmalloc is to the Linux one
++            # (docs/NATIVE_GPU.md), for everything allocated with operator new. C malloc and the plugin DLLs keep their own heaps.
++            include(FetchContent)
++            set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
++            set(MI_WIN_REDIRECT OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
++            FetchContent_Declare(mimalloc
++                GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
++                GIT_TAG v2.1.7
++                GIT_SHALLOW TRUE
++                EXCLUDE_FROM_ALL)
++            FetchContent_MakeAvailable(mimalloc)
++            # This tree's warnings-as-errors flags are not meant for third-party code.
++            set_target_properties(mimalloc-static PROPERTIES COMPILE_OPTIONS "/W0;/MP")
++            target_sources(mk8d-engine PRIVATE kart_mimalloc.cpp)
++            set_source_files_properties(kart_mimalloc.cpp PROPERTIES COMPILE_OPTIONS "/W0")
++            target_link_libraries(mk8d-engine PRIVATE mimalloc-static)
          endif()
 +        list(APPEND SUYU_CMD_TARGETS mk8d-engine)
      endif()
@@ -946,6 +968,30 @@ index ea309dd691..d450f5d8cc 100644
      system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &provider);
      const FileSys::PatchManager pm{title_id, system.GetFileSystemController(),
                                     system.GetContentProvider()};
+diff --git a/src/suyu_cmd/kart_mimalloc.cpp b/src/suyu_cmd/kart_mimalloc.cpp
+new file mode 100644
+index 0000000000..e97d71429d
+--- /dev/null
++++ b/src/suyu_cmd/kart_mimalloc.cpp
+@@ -0,0 +1,18 @@
++// SPDX-FileCopyrightText: kart-recomp contributors
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++// Routes operator new/delete of the engine (only) through mimalloc. Exactly one source file may include this header.
++#include <cstdio>
++#include <mimalloc-new-delete.h>
++#include <mimalloc.h>
++
++namespace {
++const int kMimallocSetup = [] {
++    // Keep freed pages for a few seconds: frames allocate and free the same sizes all the time, and giving the pages back only
++    // means faulting them in again a frame later.
++    mi_option_set(mi_option_purge_delay, 5000);
++    std::fprintf(stderr, "allocator: mimalloc %d (operator new/delete)\n", mi_version());
++    std::fflush(stderr);
++    return 0;
++}();
++} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
 index 0000000000..6edacab4ef
@@ -14680,10 +14726,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..18deb0306b
+index 0000000000..f5a6930aba
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7799 @@
+@@ -0,0 +1,7828 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -18271,7 +18317,17 @@ index 0000000000..18deb0306b
 +                     static_cast<u32>(std::max(1, sc_scale(st.scissor[3])))}};
 +        vk.vkCmdSetScissor(cmd, 0, 1, &sc);
 +        // Same conversion as suyu (NVN units are already the hardware's halved value).
-+        vk.vkCmdSetDepthBias(cmd, st.bias_units, st.bias_clamp, st.bias_factor);
++        {
++            // Depth-only passes are the shadow maps. The game's offset (1 / 100) was tuned for its own depth format and
++            // rasteriser; with Vulkan's depth bias units it left self-shadow acne (fine diagonal hatching on karts and
++            // characters, worst in the character select preview), so shadow-map passes use a stronger offset. Decal
++            // offsets (colour passes) stay as the game sets them. KARTRECOMP_BIAS_MUL=<n> sets the factor (default 4;
++            // 1 is the game's own value, 0 none).
++            static const float bias_mul = [] { const char* v = std::getenv("KARTRECOMP_BIAS_MUL"); return v ? std::strtof(v, nullptr) : 4.0f; }();
++            const bool depth_only = st.colors.empty() || !st.colors[0];
++            const float m = depth_only ? bias_mul : 1.0f;
++            vk.vkCmdSetDepthBias(cmd, st.bias_units * m, st.bias_clamp, st.bias_factor * m);
++        }
 +        vk.vkCmdSetBlendConstants(cmd, st.blend_color);
 +        if (KartRe::Enabled() && !st.colors.empty() && st.colors[0] && chain_logs < 60) {
 +            const u32 lw = std::max(1u, st.colors[0]->guest_width >> (st.color_levels.empty() ? 0 : st.color_levels[0]));
@@ -19669,9 +19725,20 @@ index 0000000000..18deb0306b
 +        hud_cmd = nullptr;
 +        frame_has_scene = false;
 +        if (split_mode) FindUpscalePoint(frame);
-+        // Without a found HUD pass but with a 3D scene, the whole frame renders at the scene scale (the
-+        // present step upscales it, HUD included); without a scene (menus) it renders at the output size.
-+        frame_scene_scale = !split_mode ? out_scale : (hud_cmd || frame_has_scene) ? scene_scale : out_scale;
++        // The render scale is for the 3D scene of a race only. A race frame has a HUD pass and a game camera (found in last
++        // frame's uniforms); its scene renders at the scene scale and the HUD at the output size. Menus and their 3D
++        // previews (character and kart select) have a tonemap and a HUD pass as well but no game camera, so they render at the
++        // output size: the menu is never softened or hatched by the render scale. Without a temporal upscaler there is no camera
++        // scan, and every frame with a scene is treated as a race, as before. KARTRECOMP_MENU_SCALE=1 turns the menu rule off.
++        static const bool menu_scaled = [] { const char* v = std::getenv("KARTRECOMP_MENU_SCALE"); return v && *v == '1'; }();
++        const bool race_frame = menu_scaled || !cam_wanted || cam_prev_ok;
++        frame_scene_scale = !split_mode ? out_scale : ((hud_cmd || frame_has_scene) && race_frame) ? scene_scale : out_scale;
++        if (split_mode && (hud_cmd || frame_has_scene) && race_frame != race_logged && race_log_count < 40) {
++            ++race_log_count;
++            LOG_INFO(Frontend, "render scale {} from frame {} (scene {:.2f}x of the output)", race_frame ? "on (race)" : "off (menu)",
++                     frames, scene_ratio);
++        }
++        if (split_mode && (hud_cmd || frame_has_scene)) race_logged = race_frame;
 +        // Jitter only pays off where a temporal upscaler resolves it: frames with an upscale point and a game camera
 +        // (found last frame). Menu backgrounds and other 3D-with-depth screens stay still.
 +        jitter_frame = jitter_enabled && split_mode && hud_cmd != nullptr && cam_wanted && cam_prev_ok;
@@ -21773,7 +21840,13 @@ index 0000000000..18deb0306b
 +        if (!dump_frame && shots_every && frames % shots_every == 0) {
 +            if (Image* w = GetImage(frame.present, false)) {
 +                dump_dir_name = "shots";
-+                ReadbackImage(w, fmt::format("shot_{:06}", frames), 960, 540);
++                // KARTRECOMP_NATIVE_SHOT_MAX=WxH: the largest size written (default 960x540), e.g. 3840x2160 for the full image.
++                static const std::pair<u32, u32> shot_max = [] {
++                    u32 sw = 960, sh = 540;
++                    if (const char* v = std::getenv("KARTRECOMP_NATIVE_SHOT_MAX")) std::sscanf(v, "%ux%u", &sw, &sh);
++                    return std::pair<u32, u32>{sw, sh};
++                }();
++                ReadbackImage(w, fmt::format("shot_{:06}", frames), shot_max.first, shot_max.second);
 +                LOG_INFO(Frontend, "NATIVE SHOT {}", frames);
 +            }
 +        } else if (!dump_frame && frames >= shots_range.first && frames <= shots_range.second) {
@@ -21918,7 +21991,7 @@ index 0000000000..18deb0306b
 +                const auto [w, h] = size;
 +                std::ofstream out(dir / (name + ".ppm"), std::ios::binary);
 +                // Raw full-size dumps are written at a quarter size (nearest).
-+                const u32 step = name.starts_with("window") ? 1 : (w > 960 ? 3 : 1);
++                const u32 step = (name.starts_with("window") || name.starts_with("shot_")) ? 1 : (w > 960 ? 3 : 1);
 +                const u32 ow = w / step, oh = h / step;
 +                out << "P6\n" << ow << " " << oh << "\n255\n";
 +                for (u32 y = 0; y < oh; ++y) {
@@ -22353,6 +22426,8 @@ index 0000000000..18deb0306b
 +    // Camera motion vectors (RunMotionVectors): this and the previous frame's view-projection, row-major.
 +    float cam_cur[16]{}, cam_prev[16]{};
 +    bool cam_cur_ok = false, cam_prev_ok = false, cam_wanted = false;
++    bool race_logged = true;
++    int race_log_count = 0;
 +    std::set<u64> cam_scanned;
 +    u32 cam_logs = 0;
 +    float timestamp_period = 1.0f;
