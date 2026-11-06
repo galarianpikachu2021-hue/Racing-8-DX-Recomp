@@ -35,6 +35,11 @@ logos or game imagery belong in this repository, including in screenshots.
 Our own code is licensed under GPL-3.0-or-later (see `LICENSE`), which is compatible with the suyu code it
 builds on.
 
+## Other third-party code in the Windows engine
+
+- **mimalloc** (Microsoft, MIT licence) is fetched at build time and linked statically into `mk8d-engine.exe` (`patches/suyu/0004-windows-mimalloc.patch`).
+  A release must include its licence text.
+
 ## Third-party upscaler libraries
 
 - **AMD FSR (FidelityFX SDK).** The FSR 3 plugin is built from AMD's MIT-licensed SDK sources. The FSR 4 plugin loads AMD's signed

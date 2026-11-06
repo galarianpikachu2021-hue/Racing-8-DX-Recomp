@@ -1,0 +1,55 @@
+diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
+--- a/src/suyu_cmd/CMakeLists.txt
++++ b/src/suyu_cmd/CMakeLists.txt
+@@ -93,6 +93,28 @@
+         if (WIN32)
+             target_link_libraries(mk8d-engine PRIVATE iphlpapi ws2_32)
+         endif()
++        if (MSVC)
++            # The Windows heap is slow for this workload: per-draw containers, cross-thread frees, and large per-frame buffers that
++            # go to the OS and fault in fresh pages every frame. mimalloc is to this build what tcmalloc is to the Linux one
++            # (docs/NATIVE_GPU.md), for everything allocated with operator new. C malloc and the plugin DLLs keep their own heaps.
++            include(FetchContent)
++            set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
++            set(MI_WIN_REDIRECT OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
++            set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
++            FetchContent_Declare(mimalloc
++                GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
++                GIT_TAG v2.1.7
++                GIT_SHALLOW TRUE
++                EXCLUDE_FROM_ALL)
++            FetchContent_MakeAvailable(mimalloc)
++            # This tree's warnings-as-errors flags are not meant for third-party code.
++            set_target_properties(mimalloc-static PROPERTIES COMPILE_OPTIONS "/W0;/MP")
++            target_sources(mk8d-engine PRIVATE kart_mimalloc.cpp)
++            set_source_files_properties(kart_mimalloc.cpp PROPERTIES COMPILE_OPTIONS "/W0")
++            target_link_libraries(mk8d-engine PRIVATE mimalloc-static)
++        endif()
+         list(APPEND SUYU_CMD_TARGETS mk8d-engine)
+     endif()
+
+diff --git a/src/suyu_cmd/kart_mimalloc.cpp b/src/suyu_cmd/kart_mimalloc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/suyu_cmd/kart_mimalloc.cpp
+@@ -0,0 +1,18 @@
++// SPDX-FileCopyrightText: kart-recomp contributors
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++// Routes operator new/delete of the engine (only) through mimalloc. Exactly one source file may include this header.
++#include <cstdio>
++#include <mimalloc-new-delete.h>
++#include <mimalloc.h>
++
++namespace {
++const int kMimallocSetup = [] {
++    // Keep freed pages for a few seconds: frames allocate and free the same sizes all the time, and giving the pages back only
++    // means faulting them in again a frame later.
++    mi_option_set(mi_option_purge_delay, 5000);
++    std::fprintf(stderr, "allocator: mimalloc %d (operator new/delete)\n", mi_version());
++    std::fflush(stderr);
++    return 0;
++}();
++} // namespace
