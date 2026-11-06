@@ -14683,7 +14683,7 @@ new file mode 100644
 index 0000000000..18deb0306b
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7726 @@
+@@ -0,0 +1,7799 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -14717,6 +14717,9 @@ index 0000000000..18deb0306b
 +#include <fstream>
 +#include <string_view>
 +#include <deque>
++#ifdef _MSC_VER
++#include <intrin.h>
++#endif
 +#include <map>
 +#include <memory>
 +#include <mutex>
@@ -15252,14 +15255,35 @@ index 0000000000..18deb0306b
 +    enum Slot { Wait, Record, TexCheck, Upload, Descriptors, Pipelines, Submit, DrawTotal, IndexScan,
 +                PreDescriptors, Prebuild, PrebuildTextures, PrebuildPipelines, Count };
 +    std::array<u64, Count> ns{};
++#if defined(_MSC_VER) && defined(_M_X64)
++    /// Nanoseconds per TSC tick, measured once.
++    static double NsPerTick() {
++        static const double value = [] {
++            const auto t0 = std::chrono::steady_clock::now();
++            const u64 c0 = __rdtsc();
++            std::this_thread::sleep_for(std::chrono::milliseconds(5));
++            const u64 c1 = __rdtsc();
++            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
++            return c1 > c0 ? static_cast<double>(elapsed) / static_cast<double>(c1 - c0) : 1.0;
++        }();
++        return value;
++    }
++#endif
 +    struct Scope {
 +        Profile& p;
 +        Slot slot;
++#if defined(_MSC_VER) && defined(_M_X64)
++        // Scopes run about ten times per draw: read the TSC rather than QueryPerformanceCounter (steady_clock on Windows).
++        u64 start = __rdtsc();
++        ~Scope() {
++            p.ns[slot] += static_cast<u64>(static_cast<double>(__rdtsc() - start) * NsPerTick());
++#else
 +        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 +        ~Scope() {
 +            p.ns[slot] += static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                                               std::chrono::steady_clock::now() - start)
 +                                               .count());
++#endif
 +        }
 +    };
 +};
@@ -16727,8 +16751,17 @@ index 0000000000..18deb0306b
 +
 +    static VertexLayout ComputeVertexLayout(const ProgramEntry::Stage& vs, const DrawState& st) {
 +        VertexLayout out;
++        ComputeVertexLayoutInto(vs, st, out);
++        return out;
++    }
++
++    /// `out` keeps its capacity: Draw() calls this once per draw.
++    static void ComputeVertexLayoutInto(const ProgramEntry::Stage& vs, const DrawState& st, VertexLayout& out) {
++        out.attrs.clear();
++        out.binds.clear();
++        out.streams.clear();
 +        if (vs.stage != Shader::Stage::VertexB) {
-+            return out;
++            return;
 +        }
 +        std::array<s32, 16> stream_binding;
 +        stream_binding.fill(-1);
@@ -16755,7 +16788,6 @@ index 0000000000..18deb0306b
 +            }
 +            out.attrs.push_back({i, static_cast<u32>(stream_binding[stream]), format, offset});
 +        }
-+        return out;
 +    }
 +
 +    // ------------------------------------------------------------- programs
@@ -17519,13 +17551,14 @@ index 0000000000..18deb0306b
 +                           const std::vector<VkVertexInputAttributeDescription>& attrs,
 +                           const std::vector<VkVertexInputBindingDescription>& binds) {
 +        Profile::Scope ps{prof, Profile::Pipelines};
-+        std::string key = PipelineKey(prog, st, topology, attrs, binds);
++        std::string& key = draw_pipeline_key; // keeps its capacity: this runs once per draw
++        PipelineKeyInto(key, prog, st, topology, attrs, binds);
 +        if (const auto it = pipelines.find(key); it != pipelines.end()) {
 +            return it->second;
 +        }
 +        const VkPipeline pipeline = CreatePipeline(prog, st, topology, attrs, binds);
 +        if (!pipeline) ++pipeline_failures;
-+        pipelines.emplace(std::move(key), pipeline);
++        pipelines.emplace(key, pipeline);
 +        return pipeline;
 +    }
 +
@@ -17550,6 +17583,14 @@ index 0000000000..18deb0306b
 +                                   const std::vector<VkVertexInputAttributeDescription>& attrs,
 +                                   const std::vector<VkVertexInputBindingDescription>& binds) {
 +        std::string key;
++        PipelineKeyInto(key, prog, st, topology, attrs, binds);
++        return key;
++    }
++
++    static void PipelineKeyInto(std::string& key, const ProgramEntry& prog, const DrawState& st, VkPrimitiveTopology topology,
++                                const std::vector<VkVertexInputAttributeDescription>& attrs,
++                                const std::vector<VkVertexInputBindingDescription>& binds) {
++        key.clear();
 +        const auto put = [&key](const void* p, size_t n) {
 +            key.append(static_cast<const char*>(p), n);
 +        };
@@ -17574,7 +17615,6 @@ index 0000000000..18deb0306b
 +        }
 +        const VkFormat depth_format = st.depth ? st.depth->info.format : VK_FORMAT_UNDEFINED;
 +        put(&depth_format, sizeof(depth_format));
-+        return key;
 +    }
 +
 +    /// Thread-safe: reads only its arguments and the (thread-safe) device.
@@ -17868,11 +17908,14 @@ index 0000000000..18deb0306b
 +        }
 +
 +        // Vertex input: the attributes the vertex shader reads, one upload per stream.
-+        const VertexLayout layout = ComputeVertexLayout(prog->stages.front(), st);
++        ComputeVertexLayoutInto(prog->stages.front(), st, draw_layout);
++        const VertexLayout& layout = draw_layout;
 +        const auto& attrs = layout.attrs;
 +        const auto& binds = layout.binds;
-+        std::vector<VkBuffer> vb_buffers;
-+        std::vector<VkDeviceSize> vb_offsets;
++        auto& vb_buffers = draw_vb_buffers;
++        auto& vb_offsets = draw_vb_offsets;
++        vb_buffers.clear();
++        vb_offsets.clear();
 +        for (const u32 stream : layout.streams) {
 +            const u32 stride = stream * 2 < st.streams.size() ? st.streams[stream * 2] : 0;
 +            const u32 divisor = stream * 2 + 1 < st.streams.size() ? st.streams[stream * 2 + 1] : 0;
@@ -17915,14 +17958,26 @@ index 0000000000..18deb0306b
 +        // The set is allocated once the contents are known: identical contents
 +        // (same buffers, views and samplers) reuse this frame's set.
 +        VkDescriptorSet set = VK_NULL_HANDLE;
-+        std::vector<VkWriteDescriptorSet> writes;
++        auto& writes = draw_writes;
++        writes.clear();
 +        // One bit per texture element in pipeline order, as suyu's pipelines push them.
 +        std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_SCALING_WORDS> texture_scaled_bits{};
 +        u32 texture_bit = 0;
-+        std::deque<VkDescriptorBufferInfo> buffer_infos;
-+        std::deque<VkDescriptorImageInfo> image_infos;
-+        // Uniform data per (stage, hardware cbuf), kept to resolve storage buffers.
-+        std::map<std::pair<int, u32>, u64> cbuf_ring;
++        // Reserved up front and never regrown below: the write records point into these, and a texture array's image infos
++        // must be contiguous (pImageInfo[k]). These run once per draw, so they keep their capacity between draws.
++        size_t image_total = 0;
++        for (const auto& d : prog->descriptors) {
++            image_total += d.count;
++        }
++        auto& buffer_infos = draw_buffer_infos;
++        auto& image_infos = draw_image_infos;
++        buffer_infos.clear();
++        image_infos.clear();
++        buffer_infos.reserve(prog->descriptors.size());
++        image_infos.reserve(image_total);
++        // Uniform data per (stage, hardware cbuf), kept to resolve storage buffers. The last entry for a pair is the current one.
++        auto& cbuf_ring = draw_cbuf_ring;
++        cbuf_ring.clear();
 +        for (const auto& d : prog->descriptors) {
 +            const auto& stage = prog->stages[d.stage_index];
 +            const int nvn_stage = NvnStage(stage.stage);
@@ -18053,7 +18108,7 @@ index 0000000000..18deb0306b
 +                                st.depth_layer, st.viewport[2], st.viewport[3], cb.index,
 +                                st.uniforms[0][cb.index - 3].address, v);
 +                }
-+                cbuf_ring[{d.stage_index, cb.index}] = *off;
++                cbuf_ring.push_back({d.stage_index, static_cast<u32>(cb.index), *off});
 +                buffer_infos.push_back({ring, *off, size});
 +                w.pBufferInfo = &buffer_infos.back();
 +                w.descriptorCount = 1;
@@ -18070,9 +18125,11 @@ index 0000000000..18deb0306b
 +                    address = bound.address;
 +                    size = static_cast<u32>(bound.size);
 +                    snapshot = bound.snapshot;
-+                } else if (const auto it = cbuf_ring.find({d.stage_index, sb.cbuf_index}); it != cbuf_ring.end()) {
-+                    std::memcpy(&address, ring_ptr + it->second + sb.cbuf_offset, 8);
-+                    std::memcpy(&size, ring_ptr + it->second + sb.cbuf_offset + 8, 4);
++                } else if (const auto it = std::find_if(cbuf_ring.rbegin(), cbuf_ring.rend(),
++                                                        [&](const DrawCbuf& e) { return e.stage == d.stage_index && e.cbuf == static_cast<u32>(sb.cbuf_index); });
++                           it != cbuf_ring.rend()) {
++                    std::memcpy(&address, ring_ptr + it->offset + sb.cbuf_offset, 8);
++                    std::memcpy(&size, ring_ptr + it->offset + sb.cbuf_offset + 8, 4);
 +                }
 +                const u64 bytes = std::clamp<u64>(size, 16, 1u << 20);
 +                std::optional<u64> off;
@@ -18119,7 +18176,8 @@ index 0000000000..18deb0306b
 +            writes.push_back(w);
 +        }
 +        {
-+            std::string key;
++            std::string& key = draw_descriptor_key;
++            key.clear();
 +            const auto put = [&key](const void* p, size_t n) { key.append(static_cast<const char*>(p), n); };
 +            put(&prog->set_layout, sizeof(prog->set_layout));
 +            for (const auto& w : writes) {
@@ -18144,7 +18202,7 @@ index 0000000000..18deb0306b
 +                }
 +                for (auto& w : writes) w.dstSet = set;
 +                vk.vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-+                descriptor_cache.emplace(std::move(key), set);
++                descriptor_cache.emplace(key, set);
 +            }
 +        }
 +
@@ -22368,6 +22426,21 @@ index 0000000000..18deb0306b
 +    std::unordered_map<u64, SnapSeen> snap_dedupe;     ///< Submit(): ranges already copied by this submit
 +    u64 upload_cache_hits = 0;
 +    std::unordered_map<std::string, VkDescriptorSet> descriptor_cache;
++    // Scratch for Draw(), which runs for every draw of every frame: these keep their capacity, so a draw allocates nothing.
++    struct DrawCbuf {
++        int stage;
++        u32 cbuf;
++        u64 offset;
++    };
++    VertexLayout draw_layout;
++    std::vector<VkBuffer> draw_vb_buffers;
++    std::vector<VkDeviceSize> draw_vb_offsets;
++    std::vector<VkWriteDescriptorSet> draw_writes;
++    std::vector<VkDescriptorBufferInfo> draw_buffer_infos;
++    std::vector<VkDescriptorImageInfo> draw_image_infos;
++    std::vector<DrawCbuf> draw_cbuf_ring;
++    std::string draw_descriptor_key;
++    std::string draw_pipeline_key;
 +    u64 descriptor_cache_hits = 0;
 +    std::atomic<u64> throttle_ns{0};
 +    u64 commands_seen = 0;
