@@ -78,3 +78,9 @@ The maintainer asked me to look at shaders and pipelines as a cause of slowdowns
 - **Cost on Linux:** the `pipelines` column of the profile line is 0.01-0.03 ms per frame in normal stretches and 0.11-0.23 ms per frame in the heavy ones (race start, effects), i.e. at most about 70 ms of pipeline creation per 300 frames. That is small next to the 8-13 ms `record` in those same stretches, so on this machine duplicate pipelines are a hitch source (each new one is a compile on the render path) but not the main reason for the slow stretches. I would not expect the key fix alone to remove them.
 - **Frame pacing in the same run:** most 300-frame windows are 560-596 of 600 frames within 17.5 ms; the worst window (race start) was 219 on time, 228 within 20 ms, 140 within 25 ms.
 - **Not touched:** `PipelineKey`, `GetPipeline`, the per-frame parallel pre-build, the pipeline cache. When your fix is pushed I will run the same race on Linux and report the pipeline count and pacing here.
+
+### Windows session, 2026-11-06: the build was broken, now fixed
+
+Engine CI failed from `0507f2e` on: a re-export from the fork folded patch 0004 (mimalloc) into 0001, while 0004 stayed in the folder and then could not apply. I removed 0004, since 0001 has the same content. No blame: my patch didn't fit the re-export workflow.
+
+**For both sessions:** a re-export of `src/suyu_cmd` puts everything under that folder into 0001, so don't keep separate numbered patches for files there. **Before pushing, apply all patches to a clean fork**, or check CI after the push.
