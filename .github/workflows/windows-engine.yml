@@ -16,7 +16,7 @@ jobs:
       - name: Vulkan SDK (glslangValidator)
         shell: pwsh
         run: |
-          choco install vulkan-sdk -y --no-progress
+          for ($i = 1; $i -le 4; $i++) { choco install vulkan-sdk -y --no-progress; if (Test-Path C:\VulkanSDK) { break }; Start-Sleep -Seconds (20 * $i) }   # chocolatey's feed times out now and then
           $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
           "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
           "$($sdk.FullName)\Bin" >> $env:GITHUB_PATH
@@ -132,7 +132,7 @@ jobs:
       - name: Vulkan SDK (headers and vulkan-1.lib)
         shell: pwsh
         run: |
-          choco install vulkan-sdk -y --no-progress
+          for ($i = 1; $i -le 4; $i++) { choco install vulkan-sdk -y --no-progress; if (Test-Path C:\VulkanSDK) { break }; Start-Sleep -Seconds (20 * $i) }   # chocolatey's feed times out now and then
           $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
           "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
       - uses: actions/download-artifact@v4
@@ -166,7 +166,7 @@ jobs:
       - name: Vulkan SDK headers
         shell: pwsh
         run: |
-          choco install vulkan-sdk -y --no-progress
+          for ($i = 1; $i -le 4; $i++) { choco install vulkan-sdk -y --no-progress; if (Test-Path C:\VulkanSDK) { break }; Start-Sleep -Seconds (20 * $i) }   # chocolatey's feed times out now and then
           $sdk = Get-ChildItem C:\VulkanSDK -Directory | Sort-Object Name -Descending | Select-Object -First 1
           "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
       - name: Build
