@@ -1,4 +1,4 @@
-Racing 8 DX Recomp for Windows (TEST BUILD)
+Racing 8 DX Recomp for Windows
 
 1. Keep this folder anywhere you like (a USB drive works). Everything the program writes goes into the "userdata" folder inside it.
 2. Run kartrecomp.exe. On the Setup tab pick your own files: base game (.nsp), the 3.0.4 update (.nsp), prod.keys, firmware (folder or .zip),

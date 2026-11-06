@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Path "$Out\engine\plugins", "$Out\tools", "$Out\da
 Copy-Item "$Launcher\*" $Out -Recurse
 Copy-Item "$Engine\mk8d-engine.exe", "$Engine\ENGINE_VERSION" "$Out\engine"
 Copy-Item "$Engine\kartrecomp-export.exe" "$Out\tools"
+if (Test-Path "$Engine\mimalloc-LICENSE.txt") { Copy-Item "$Engine\mimalloc-LICENSE.txt" "$Out\engine" }
 Get-ChildItem $Engine -Filter *.dll | ForEach-Object { Copy-Item $_.FullName "$Out\engine"; Copy-Item $_.FullName "$Out\tools" }
 if ($Plugins -and (Test-Path $Plugins)) { Copy-Item "$Plugins\*" "$Out\engine\plugins" -Recurse }
 Copy-Item $Toolchain "$Out\toolchain" -Recurse

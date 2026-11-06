@@ -20,7 +20,7 @@ Windows work happens). Read `CLAUDE.md`, `docs/NATIVE_GPU.md` (renderer), `docs/
 ## How the Windows build is made
 Windows binaries are **built by GitHub Actions** (`.github/workflows/windows-engine.yml`), not on this PC (no toolchain is assumed): jobs `engine` (MSVC, fork =
 upstream pin + `patches/suyu/*.patch`), `toolchain` (llvm-mingw that compiles the game on the user's PC), `launcher` (Qt), `ffx-prepared` (Linux: FSR 3 shader blobs),
-`plugins` (FSR 3 / FSR 4), `bundle` (zip). A run takes ~45 min. `gh run list --branch windows-port`, `gh run download <id> -n KartRecomp-windows-x64-TEST`.
+`plugins` (FSR 3 / FSR 4), `bundle` (zip). A run takes ~45 min. `gh run list --branch windows-port`, `gh run download <id> -n KartRecomp-windows-x64`.
 A commit message containing `[dlss]` also builds the DLSS plugin (1-day artifact for local use; **download, use, then delete it**).
 The engine source of truth is `patches/suyu/0001..0003` applied to the pinned upstream by `packaging/windows/fetch-fork.sh`; to change engine code on this PC either
 edit the fork after running that script, or edit the patch hunks. `packaging/windows/engine-version.pin` pins the engine stamp for TEST builds so a renderer-only

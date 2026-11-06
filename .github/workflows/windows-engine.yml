@@ -46,6 +46,10 @@ jobs:
           Copy-Item build\bin\mk8d-engine.exe, build\bin\kartrecomp-export.exe stage\engine\
           Get-ChildItem build\bin -Filter *.dll | Copy-Item -Destination stage\engine\
           $env:ENGINE_VERSION | Set-Content stage\engine\ENGINE_VERSION
+          # mimalloc (MIT) is linked into mk8d-engine.exe: its licence text ships beside it.
+          $mi = Get-ChildItem build\_deps -Recurse -Filter LICENSE -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'mimalloc' } | Select-Object -First 1
+          if (-not $mi) { throw 'mimalloc LICENSE not found in the build tree' }
+          Copy-Item $mi.FullName stage\engine\mimalloc-LICENSE.txt
       - name: Module guard test
         shell: pwsh
         run: tests\test_module_guard.ps1 -EngineDir stage\engine
@@ -218,14 +222,14 @@ jobs:
       - name: Zip
         shell: pwsh
         run: |
-          Compress-Archive -Path KartRecomp -DestinationPath KartRecomp-windows-x64-TEST.zip -CompressionLevel Optimal
-          (Get-FileHash KartRecomp-windows-x64-TEST.zip -Algorithm SHA256).Hash.ToLower() + "  KartRecomp-windows-x64-TEST.zip" | Out-File -Encoding ascii KartRecomp-windows-x64-TEST.zip.sha256
-          "{0:N0} MB" -f ((Get-Item KartRecomp-windows-x64-TEST.zip).Length / 1MB) | Write-Host
+          Compress-Archive -Path KartRecomp -DestinationPath KartRecomp-windows-x64.zip -CompressionLevel Optimal
+          (Get-FileHash KartRecomp-windows-x64.zip -Algorithm SHA256).Hash.ToLower() + "  KartRecomp-windows-x64.zip" | Out-File -Encoding ascii KartRecomp-windows-x64.zip.sha256
+          "{0:N0} MB" -f ((Get-Item KartRecomp-windows-x64.zip).Length / 1MB) | Write-Host
       - uses: actions/upload-artifact@v4
         with:
-          name: KartRecomp-windows-x64-TEST
+          name: KartRecomp-windows-x64
           path: |
-            KartRecomp-windows-x64-TEST.zip
-            KartRecomp-windows-x64-TEST.zip.sha256
+            KartRecomp-windows-x64.zip
+            KartRecomp-windows-x64.zip.sha256
           if-no-files-found: error
           compression-level: 0

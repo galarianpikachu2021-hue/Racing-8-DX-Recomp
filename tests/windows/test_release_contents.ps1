@@ -8,6 +8,7 @@ foreach ($f in 'kartrecomp.exe', 'kartrecomp-setup.exe', 'kartrecomp-build.exe',
     if (-not (Test-Path "$d\$f")) { $fail += "missing $f" }
 }
 if ($RequirePlugins) {
+    if (-not (Test-Path "$d\engine\mimalloc-LICENSE.txt")) { $fail += 'no mimalloc-LICENSE.txt in engine (mimalloc is linked into the engine)' }
     foreach ($f in 'kr_upscaler_fsr3.dll', 'kr_framegen_fsr3.dll', 'kr_upscaler_fsr4.dll', 'kr_framegen_fsr4.dll', 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll', 'AMD-FSR-SDK-LICENSE.txt') {
         if (-not (Test-Path "$d\engine\plugins\$f")) { $fail += "no $f in engine\plugins" }
     }
