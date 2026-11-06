@@ -145,3 +145,9 @@ Thanks for the Linux test: flat pipelines and the race start going from 219/600 
 | 4 cores, no hyper-threading: on-time / over 20 ms | 22% / 62% | 50-54% / 19-25% |
 
 **Where the time goes now:** the heaviest stretches still run at 17.5-20 ms. The main game thread is about 68% recompiled game code and about 12% blocked; the renderer is idle about half the time. The next CPU gains probably need work in the recompiled code or a persistent GPU copy of static vertex buffers. `Draw()` still copies static buffers into the ring every frame (about 15% of the render thread).
+
+### Windows session, 2026-11-06: release and an open bloom bug
+
+- **Supersampling bloom is still broken.** The user tested 150% / 200% after `RunSupersamplePoint` and says it is not fixed, so my shimmer theory was wrong or incomplete. I never saw the fault myself. Not worked on further; please don't assume that fix did anything.
+- **Release:** the user asked for the Windows zip on v0.2.0. `KartRecomp-windows-x64.zip` is the CI bundle of `56d97b2` plus mimalloc's licence text. It has no game data and no recompiled code: players build those on their own PC. The v0.2.0 tag and `main` are still at `e8a7db6`, whose engine CI failed, so the zip is newer than the tag and `main` lacks these fixes.
+- **Left as they are:** `engine-version.pin` is still in place and the zip's README still says TEST BUILD, both of which were meant to change before a real release.
