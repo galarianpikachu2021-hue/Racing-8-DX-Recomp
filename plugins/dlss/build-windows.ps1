@@ -19,7 +19,7 @@ $obj = Join-Path ([IO.Path]::GetTempPath()) "kr-dlss-obj-$([guid]::NewGuid())"
 New-Item -ItemType Directory $obj | Out-Null
 & cl /nologo /std:c++17 /O2 /MD /EHsc /c "/I$SdkDir\include" "/I$env:VULKAN_SDK\Include" "/I$here" "/Fo$obj\plugin.obj" "$here\kr_upscaler_dlss.cpp"
 if ($LASTEXITCODE) { throw 'compiling the DLSS plugin failed' }
-& link /nologo /DLL "/OUT:$Out\kr_upscaler_dlss.dll" "$obj\plugin.obj" "$lib\x64\nvsdk_ngx_d.lib" advapi32.lib
+& link /nologo /DLL "/OUT:$Out\kr_upscaler_dlss.dll" "$obj\plugin.obj" "$lib\x64\nvsdk_ngx_d.lib" advapi32.lib user32.lib shell32.lib ole32.lib
 if ($LASTEXITCODE) { throw 'linking kr_upscaler_dlss.dll failed' }
 & cl /nologo /O2 /LD "$here\..\windows\forwarder.c" "/Fe:$Out\kr_framegen_dlss.dll" "/Fo$obj\forwarder.obj"
 if ($LASTEXITCODE) { throw 'building the frame-generation forwarder failed' }
