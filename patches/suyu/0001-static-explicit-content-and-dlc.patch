@@ -14683,7 +14683,7 @@ new file mode 100644
 index 0000000000..18deb0306b
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7722 @@
+@@ -0,0 +1,7726 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -20815,6 +20815,10 @@ index 0000000000..18deb0306b
 +            LOG_ERROR(Frontend, "frame generation: cannot create its images");
 +            return false;
 +        }
++        // fg_out stands in for the window image in PresentBody, so CropToPicture must see the same game size. A CreateAuxImage image
++        // reports guest size == host size, which left the crop unscaled: above 1080p, every generated frame showed only the top-left part.
++        fg_out.guest_width = win_img->guest_width;
++        fg_out.guest_height = win_img->guest_height;
 +        // A plugin makes the 3D picture; the compute pass then only lays the HUD over it (mode 1). Without one, or when it
 +        // fails, the built-in interpolator makes it (mode 0).
 +        float mode = 0.0f;
