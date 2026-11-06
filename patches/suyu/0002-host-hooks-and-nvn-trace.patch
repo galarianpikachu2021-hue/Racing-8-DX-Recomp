@@ -351,7 +351,7 @@ index 408daa6839..58f3e192ff 100644
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..cbf276921e 100644
+index 67a55424e9..1b83ba0cd9 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,9 @@
@@ -373,7 +373,7 @@ index 67a55424e9..cbf276921e 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -1974,6 +1979,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1974,7 +1979,43 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              LOG_INFO(Core_ARM, "Early static dispatch #{}: pc={:#x}", early_dispatch,
                       impl->ctx.pc);
          }
@@ -393,9 +393,31 @@ index 67a55424e9..cbf276921e 100644
 +            }
 +        }
          RecompBlockFn block = impl->lookup(impl->ctx.pc);
++        // kart-recomp: a call through a null function pointer (the guest read an empty vtable slot or a table entry
++        // that is not there, e.g. the camera code in the character-select screen with a driver replaced by a mod) would
++        // end this thread, because strict mode has no JIT to hand it to. Treat it like the call returning at once
++        // (what a missing virtual method with no effect would do) and keep playing; the first few are logged.
++        // KARTRECOMP_NO_NULLCALL_RECOVERY=1 turns this off. A run that keeps doing it is stopped normally.
++        if (!block && impl->ctx.pc == 0 && impl->ctx.x[30] != 0) {
++            static const bool disabled = std::getenv("KARTRECOMP_NO_NULLCALL_RECOVERY") != nullptr;
++            static std::atomic<u64> recovered{0};
++            const u64 n = recovered.fetch_add(1, std::memory_order_relaxed);
++            if (!disabled && n < 100000) {
++                if (n < 8) {
++                    LOG_ERROR(Core_ARM,
++                              "recomp: call to null (x30={:#x}, x0={:#x}); returning to the caller instead "
++                              "of ending the thread (recovery #{})",
++                              impl->ctx.x[30], impl->ctx.x[0], n + 1);
++                }
++                impl->ctx.pc = impl->ctx.x[30];
++                impl->ctx.x[0] = 0;
++                continue;
++            }
++        }
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
-@@ -2258,6 +2278,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+                      block != nullptr);
+@@ -2258,6 +2299,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -405,7 +427,7 @@ index 67a55424e9..cbf276921e 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2560,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2581,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
