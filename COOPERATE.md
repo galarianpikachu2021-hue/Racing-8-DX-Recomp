@@ -122,3 +122,26 @@ Applied `0001` and `0002` of `38515a5` to the Linux fork (reverse of my last exp
 - **Null-call recovery** fired twice at about 33 s (race load), the game kept running, which is the intermittent camera-table crash from before.
 - Not yet looked at: your supersampling-bloom fix (needs the maintainer's eyes), F11.
 
+### Windows session, 2026-11-06, end of the night
+
+Thanks for the Linux test: flat pipelines and the race start going from 219/600 to about 595/600 are good to hear.
+
+**Crash found and fixed (patch 0002), and it can affect anyone on Windows.** `ISystemSettingsServer::StoreSettingsFile` called `std::filesystem::rename` without an error code. Windows refuses to replace a file that anything has open (here probably a sync client on a synced folder; I did not confirm what held it). The exception ended the game from the time worker's thread: `0xc0000409` about 1-4 s after launch, or later. It now retries for 200 ms and otherwise skips that save. Launch loop on this PC: 12 crashes in 160 launches before, **0 in 120** after. On Linux, `rename` replaces a file even when it is open, so this probably never shows there.
+
+**New: crash reports on Windows (`kart_mimalloc.cpp`, MSVC only).** On abort, terminate, fail-fast or an unhandled exception, the engine writes the stack as module + offset to stderr and to `crash_stack.txt` in the log folder. Symbolize with the build's `.pdb`.
+
+**Still open, not fixed: a crash when closing the game.** `0xc0000005` in `Core::HID::EmulatedController::GetHomeButtons`, called from `Service::AM::ButtonPoller`, on the poller's own thread. It looks like a shutdown-order race. Seen a few times, always while the game was closing, and not in the 120-launch run. It should only affect exiting, but I have not checked whether saves are all written by then.
+
+**A cold pipeline cache is not a stutter problem here.** With the cache deleted: 9 slow frames (over 20 ms of record time) in the race against 5, the worst race frame 57 ms in both cases with no new pipelines in that frame, and 401 ms instead of 228 ms at race load on the loading screen. The first-frame stall is about 3 s either way. Caveat: NVIDIA's driver keeps its own shader cache, so this is not a true first run on a fresh PC. A fresh cache file is 10.5 MB (31 MB under the old key).
+
+**Measured totals on this PC:**
+
+| Scripted 1P race (1440p, DLAA, frame generation on) | Original engine | Now |
+|---|---|---|
+| On-time frames | 25% (1 run) | 64%, 68%, 68% |
+| Frames over 20 ms | 55% | 7%, 6%, 7% |
+| Record time | 13.4 ms | about 8.2 ms |
+| Game-thread hook time | 5.6 ms | about 2.2 ms |
+| 4 cores, no hyper-threading: on-time / over 20 ms | 22% / 62% | 50-54% / 19-25% |
+
+**Where the time goes now:** the heaviest stretches still run at 17.5-20 ms. The main game thread is about 68% recompiled game code and about 12% blocked; the renderer is idle about half the time. The next CPU gains probably need work in the recompiled code or a persistent GPU copy of static vertex buffers. `Draw()` still copies static buffers into the ring every frame (about 15% of the render thread).

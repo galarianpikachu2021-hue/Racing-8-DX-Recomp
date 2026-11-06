@@ -988,14 +988,117 @@ new file mode 100644
 index 0000000000..e97d71429d
 --- /dev/null
 +++ b/src/suyu_cmd/kart_mimalloc.cpp
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,121 @@
 +// SPDX-FileCopyrightText: kart-recomp contributors
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +
 +// Routes operator new/delete of the engine (only) through mimalloc. Exactly one source file may include this header.
++#include <csignal>
 +#include <cstdio>
++#include <cstring>
++#include <cstdlib>
++#include <exception>
 +#include <mimalloc-new-delete.h>
 +#include <mimalloc.h>
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#endif
++
++#ifdef _WIN32
++// A crash report for the Windows engine: abort(), std::terminate and unhandled exceptions otherwise leave nothing behind, because
++// the C runtime ends the process with a fail-fast. Writes the stack as module + offset to stderr and to crash_stack.txt in the log
++// folder (Collect-Logs picks up that folder). Symbolize with the build's .pdb. Nothing here allocates.
++namespace {
++void WriteLine(HANDLE file, const char* text) {
++    std::fputs(text, stderr);
++    if (file != INVALID_HANDLE_VALUE) {
++        DWORD written = 0;
++        WriteFile(file, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
++    }
++}
++
++void ReportCrash(const char* what, const void* fault_address) {
++    static volatile LONG reported = 0;
++    if (InterlockedExchange(&reported, 1) != 0) {
++        return;
++    }
++    HANDLE file = INVALID_HANDLE_VALUE;
++    char path[MAX_PATH + 64];
++    char base[MAX_PATH];
++    if (GetEnvironmentVariableA("XDG_DATA_HOME", base, sizeof(base)) > 0) {
++        std::snprintf(path, sizeof(path), "%s\\kartrecomp\\log\\crash_stack.txt", base);
++        file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++    }
++    char line[MAX_PATH + 96];
++    std::snprintf(line, sizeof(line), "CRASH: %s, thread %lu, address %p\n", what, GetCurrentThreadId(), fault_address);
++    WriteLine(file, line);
++    void* frames[62];
++    const USHORT count = CaptureStackBackTrace(0, 62, frames, nullptr);
++    for (USHORT i = 0; i < count; ++i) {
++        HMODULE module = nullptr;
++        char name[MAX_PATH] = "?";
++        unsigned long long offset = reinterpret_cast<unsigned long long>(frames[i]);
++        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                               static_cast<const char*>(frames[i]), &module) &&
++            module) {
++            GetModuleFileNameA(module, name, sizeof(name));
++            offset -= reinterpret_cast<unsigned long long>(module);
++        }
++        const char* slash = std::strrchr(name, '\\');
++        std::snprintf(line, sizeof(line), "  %2u %s+0x%llx\n", i, slash ? slash + 1 : name, offset);
++        WriteLine(file, line);
++    }
++    std::fflush(stderr);
++    if (file != INVALID_HANDLE_VALUE) {
++        CloseHandle(file);
++    }
++}
++
++void OnAbort(int) {
++    ReportCrash("abort()", nullptr);
++}
++
++LONG WINAPI OnException(EXCEPTION_POINTERS* info) {
++    char what[64];
++    std::snprintf(what, sizeof(what), "unhandled exception 0x%08lx", info->ExceptionRecord->ExceptionCode);
++    ReportCrash(what, info->ExceptionRecord->ExceptionAddress);
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++// A fail-fast skips every handler above; these are the C runtime's ways into one. A vectored handler also sees 0xC0000409 first
++// on some paths, and first-chance access violations are left alone (the engine may handle them).
++void OnInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
++    ReportCrash("invalid parameter to a C runtime function", nullptr);
++}
++
++void OnPureCall() {
++    ReportCrash("pure virtual call", nullptr);
++}
++
++LONG WINAPI OnVectored(EXCEPTION_POINTERS* info) {
++    if (info->ExceptionRecord->ExceptionCode == 0xC0000409 || info->ExceptionRecord->ExceptionCode == 0xC0000374) {
++        char what[64];
++        std::snprintf(what, sizeof(what), "fail-fast or heap corruption 0x%08lx", info->ExceptionRecord->ExceptionCode);
++        ReportCrash(what, info->ExceptionRecord->ExceptionAddress);
++    }
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++const int kCrashReportSetup = [] {
++    _set_invalid_parameter_handler(OnInvalidParameter);
++    _set_purecall_handler(OnPureCall);
++    AddVectoredExceptionHandler(1, OnVectored);
++    std::signal(SIGABRT, OnAbort);
++    std::set_terminate([] {
++        ReportCrash("std::terminate", nullptr);
++        std::abort();
++    });
++    SetUnhandledExceptionFilter(OnException);
++    return 0;
++}();
++} // namespace
++#endif
 +
 +namespace {
 +const int kMimallocSetup = [] {

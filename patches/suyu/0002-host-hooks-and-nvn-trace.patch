@@ -4552,3 +4552,41 @@ index 9c31896bde..6e59ab40b1 100644
          const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
          if (!shader_info) {
              const u32 start_address{shader_config.offset};
+diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
+--- a/src/core/hle/service/set/system_settings_server.cpp
++++ b/src/core/hle/service/set/system_settings_server.cpp
+@@ -5,5 +5,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include <fstream>
++#include <system_error>
++#include <thread>
+ 
+ #include "common/assert.h"
+@@ -471,9 +474,22 @@
+     }
+     file.close();
+ 
+-    std::filesystem::rename(settings_tmp_file, settings_base.replace_extension("dat"));
+-
+-    return true;
++    // Replacing a file fails on Windows while anything has it open, and a sync client or virus scanner can at any moment. A throw
++    // here ended the whole game (nothing above catches it, on the time worker's thread), so retry briefly and then give up on this
++    // save: the settings stay in memory and the next change writes them again.
++    const auto settings_file = settings_base.replace_extension("dat");
++    std::error_code rename_error;
++    for (int attempt = 0; attempt < 10; ++attempt) {
++        std::filesystem::rename(settings_tmp_file, settings_file, rename_error);
++        if (!rename_error) {
++            return true;
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(20));
++    }
++    LOG_WARNING(Service_SET, "Could not replace {}: {}", settings_file.string(), rename_error.message());
++    std::error_code remove_error;
++    std::filesystem::remove(settings_tmp_file, remove_error);
++    return false;
+ }
+ 
+ Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
