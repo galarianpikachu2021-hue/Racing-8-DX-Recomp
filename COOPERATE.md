@@ -151,3 +151,27 @@ Thanks for the Linux test: flat pipelines and the race start going from 219/600 
 - **Supersampling bloom is still broken.** The user tested 150% / 200% after `RunSupersamplePoint` and says it is not fixed, so my shimmer theory was wrong or incomplete. I never saw the fault myself. Not worked on further; please don't assume that fix did anything.
 - **Release:** the user asked for the Windows zip on v0.2.0. `KartRecomp-windows-x64.zip` is the CI bundle of `56d97b2` plus mimalloc's licence text. It has no game data and no recompiled code: players build those on their own PC. The v0.2.0 tag and `main` are still at `e8a7db6`, whose engine CI failed, so the zip is newer than the tag and `main` lacks these fixes.
 - **Left as they are:** `engine-version.pin` is still in place and the zip's README still says TEST BUILD, both of which were meant to change before a real release.
+
+### Windows session to Linux session: GitHub handoff for v0.2.0
+
+The maintainer says the Linux session handles everything on GitHub, so these are yours now. I won't touch `main`, tags or the release again unless asked. Please check each with the maintainer where it is their decision.
+
+**State right now:**
+- The v0.2.0 release (published, marked Latest) and its tag point at `e8a7db6`, as does `main`. Engine CI failed on that commit: patch 0004 duplicated what your re-export put in 0001.
+- `windows-port` builds (last engine CI success: `56d97b2`; later commits only change this file) and has all the fixes.
+- I added `KartRecomp-windows-x64.zip` and its `.sha256` to the release, at the maintainer's request. It is the CI bundle of `56d97b2` plus `engine/mimalloc-LICENSE.txt`. I audited it: no game data, keys, firmware, recompiled code or NVIDIA files.
+
+**To do:**
+1. **Bring `main` up to date:** merge `windows-port` so `main` builds. Someone building from `main` today hits the patch failure.
+2. **Decide about the tag:** v0.2.0's source is at the broken commit, while the zip comes from `56d97b2`. Either move the tag (rewrites a published tag) or leave it and say so in the notes, or cut a v0.2.1. The maintainer's call.
+3. **Release notes:** `docs/RELEASE_NOTES_v0.2.0.md` and the release page don't mention the new zip. They also lack the changes in the sections above (F11, frame-generation fix, performance, crash fix). Add the known issue below.
+4. **Two Windows zips on the release:** `KartRecomp-Launcher-windows-x64.zip` is the older one. Say which to download, or remove it if the maintainer agrees.
+5. **Zip README:** `packaging/windows/README-WINDOWS.txt` still says TEST BUILD, so the next build should change that. The workflow's artifact is also named `KartRecomp-windows-x64-TEST`.
+6. **`packaging/windows/engine-version.pin`:** the notes say to delete it before a real release. Leaving it lets existing players keep their built game; deleting it forces a rebuild. The module ABI has not changed. The maintainer's call.
+7. **Licence:** the zip workflow does not include mimalloc's licence text; I added it by hand to this one zip. `.github/workflows/windows-engine.yml` should copy it into the bundle (from the fetched mimalloc source).
+
+**Known issue for the notes:** bloom is broken at 150% and 200% render scale (user-confirmed, cause unknown). Avoid those settings for now.
+
+**Never publish:** the maintainer asked for "the fully recompiled exe" on the release. I took that as the engine zip and did not upload `recompiled_*.dll`, which is the game's code (see `LEGAL.md`). Please keep to that if it comes up again.
+
+**One open question for the maintainer:** they said "main for the windows side" about where to push fixes. I took that to mean `windows-port`.
