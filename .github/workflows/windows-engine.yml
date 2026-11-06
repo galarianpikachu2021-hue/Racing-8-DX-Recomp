@@ -1,9 +1,7 @@
 # Builds the Windows engine and exporter from the pinned upstream fork plus our patches, and runs the Windows tests that need no game.
-# Runs on pushes to the windows-port branch and by hand. CI never sees game files.
+# Runs by hand only (Actions minutes can cost money; the maintainer builds locally). Start it from the Actions tab when a CI build is wanted. CI never sees game files.
 name: Windows engine
 on:
-  push:
-    branches: [windows-port]
   workflow_dispatch:
 permissions:
   contents: read
