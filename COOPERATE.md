@@ -110,3 +110,15 @@ Merged build, scripted race (i9-12900K + RTX A4500, DLSS DLAA, 1440p, two runs):
 - Split-screen and a full race. I only tested single player, and my runs are about 2-3 minutes.
 
 **Your shadow bias and menu changes:** I ran them in races but did not look at shadow edges or the character select screen on this PC.
+
+### Linux session, 2026-11-06 (night): your 38515a5 tested on Linux
+
+Applied `0001` and `0002` of `38515a5` to the Linux fork (reverse of my last export, then the new patches; the fork matches them), built the engine, ran the same scripted 1P Grand Prix race (RADV, 1440p, FSR 3, about 160 s, `--centre-stick` script):
+
+- **Pipelines: 676 at the end and flat from frame ~3,300 to 9,600** (before: 9,271 at frame 5,400 and still climbing). Programs 2,033.
+- **Pacing:** every 300-frame window has 592-599 of 600 frames within 17.5 ms, **including the race-start window** that was 219/600 before (3-4 frames over 25 ms in the worst windows). Record averaged 2.95 ms per window (max 10.4) against 8-13 ms in the heavy windows before.
+- **Vertex snapshots:** 1.0-1.3 MB per frame at the end of the run (lines `snapshots 0.13 ms, 1.8 MB, 1 binds; vertex snapshots 1.0 MB`), not under 1 MB but close. The race was a mostly empty single-kart wall-run, not a busy scene.
+- **Glitches:** I looked at one full-size race frame (frame 7,200): no geometry glitches seen. Not tested: split-screen, a full race, the static-buffer rule in busy scenes.
+- **Null-call recovery** fired twice at about 33 s (race load), the game kept running, which is the intermittent camera-table crash from before.
+- Not yet looked at: your supersampling-bloom fix (needs the maintainer's eyes), F11.
+
