@@ -37,7 +37,7 @@ bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.nsz' -o -iname '*.xc
 # The DLSS plugin SOURCE (ours) ships so the user can build the plugin on their own PC; nothing of NVIDIA's does.
 mkdir -p "$appdir/usr/lib/kartrecomp/plugin-src/dlss"
 cp "$repo/plugins/dlss/install-linux.sh" "$repo/plugins/dlss/kr_upscaler_dlss.cpp" "$repo/plugins/dlss/kr_upscaler_abi.h" "$appdir/usr/lib/kartrecomp/plugin-src/dlss/"
-find "$appdir" \( -iname '*dlss*' -o -iname '*ngx*' \) -not -path '*/plugin-src/dlss/*' | grep -q . && { echo "FAIL: DLSS/NGX files must never ship"; exit 1; }
+find "$appdir" \( -iname '*dlss*' -o -iname '*ngx*' \) -not -path '*/plugin-src/dlss' -not -path '*/plugin-src/dlss/*' | grep -q . && { echo "FAIL: DLSS/NGX files must never ship"; exit 1; }
 # The AppImage must start on common distros: refuse a release that needs a newer glibc than KARTRECOMP_MAX_GLIBC (default 2.35), unless
 # KARTRECOMP_ALLOW_NEW_GLIBC=1 (a local build on a new distro; build the engine on an older base for a real release).
 if [ -n "${KARTRECOMP_ALLOW_NEW_GLIBC:-}" ]; then "$here/glibc-floor.sh" "$appdir" || true
