@@ -9,6 +9,8 @@
 #include <QTimer>
 
 #include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QDir>
@@ -742,6 +744,13 @@ QWidget* MainWindow::buildEnhancementsTab() {
     fps_check = new QCheckBox(tr("Show an FPS counter"));
 
     form->addRow(tr("Upscaler:"), upscaler_combo);
+#ifdef Q_OS_LINUX
+    dlss_button = new QPushButton(tr("Set up NVIDIA DLSS..."));
+    dlss_button->setToolTip(tr("For NVIDIA GPUs. Downloads NVIDIA's DLSS SDK to this PC and builds a small plugin here, because NVIDIA's "
+                               "files cannot be shipped with the game. Needs a C++ compiler and the Vulkan headers."));
+    connect(dlss_button, &QPushButton::clicked, this, &MainWindow::setupDlss);
+    form->addRow(QString(), dlss_button);
+#endif
     form->addRow(tr("3D render scale:"), scale_combo);
     form->addRow(tr("Sharpening:"), sharpness_combo);
     form->addRow(jitter_check);
@@ -772,13 +781,63 @@ QWidget* MainWindow::buildEnhancementsTab() {
     return page;
 }
 
+void MainWindow::setupDlss() {
+#ifdef Q_OS_LINUX
+    const QString app = QCoreApplication::applicationDirPath();
+    QString src;
+    for (const QString& c : {app + "/../lib/kartrecomp/plugin-src/dlss", app + "/../../plugins/dlss", app + "/plugins/dlss"}) {
+        if (QFileInfo::exists(c + "/install-linux.sh") && QFileInfo::exists(c + "/kr_upscaler_dlss.cpp")) {
+            src = QDir::cleanPath(c);
+            break;
+        }
+    }
+    if (src.isEmpty()) {
+        QMessageBox::warning(this, tr("NVIDIA DLSS"), tr("The DLSS plugin source is not part of this install."));
+        return;
+    }
+    const QString dest = DataLayout::Default().pluginsDir();
+    if (QMessageBox::question(this, tr("Set up NVIDIA DLSS"),
+                              tr("This downloads NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS) to this PC, builds a small plugin with your C++ "
+                                 "compiler and installs it in:\n%1\n\nNVIDIA's files stay on this PC; they are never part of the game's download. "
+                                 "It works on NVIDIA GPUs with a current driver. Continue?").arg(dest)) != QMessageBox::Yes) {
+        return;
+    }
+    auto* dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Set up NVIDIA DLSS"));
+    dialog->resize(720, 420);
+    auto* lay = new QVBoxLayout(dialog);
+    auto* log = new QPlainTextEdit;
+    log->setReadOnly(true);
+    lay->addWidget(log, 1);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+    buttons->button(QDialogButtonBox::Close)->setEnabled(false);
+    lay->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    auto* proc = new QProcess(dialog);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(proc, &QProcess::readyRead, log, [proc, log] { log->appendPlainText(QString::fromLocal8Bit(proc->readAll()).trimmed()); });
+    connect(proc, &QProcess::finished, dialog, [this, proc, log, buttons](int code, QProcess::ExitStatus) {
+        log->appendPlainText(code == 0 ? tr("\nFinished.") : tr("\nFailed (exit code %1). Fix what is listed above and try again.").arg(code));
+        buttons->button(QDialogButtonBox::Close)->setEnabled(true);
+        if (code == 0) loadOverlay();
+    });
+    connect(proc, &QProcess::errorOccurred, dialog, [log, buttons](QProcess::ProcessError) {
+        log->appendPlainText(tr("Could not start the setup script (is bash installed?)."));
+        buttons->button(QDialogButtonBox::Close)->setEnabled(true);
+    });
+    dialog->show();
+    proc->start(QStringLiteral("bash"), {src + "/install-linux.sh", src, dest});
+#endif
+}
+
 void MainWindow::loadOverlay() {
     loading_settings = true;
     const QSignalBlocker b1(upscaler_combo), b2(scale_combo), b3(sharpness_combo), b4(framegen_combo), b5(hdr_paper_combo), b6(hdr_peak_combo),
         b7(present_combo), b8(jitter_check), b9(hdr_check), b10(fps_check);
     overlay.load(package.overlayFile());
 
-    upscaler_ids = QStringList{QStringLiteral("off"), QStringLiteral("fsr1")} + FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler"));
+    upscaler_ids = QStringList{QStringLiteral("off"), QStringLiteral("fsr1")} + FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler"), {DataLayout::Default().pluginsDir()});
     upscaler_combo->clear();
     for (const auto& id : upscaler_ids) {
         upscaler_combo->addItem(id == QLatin1String("off")    ? tr("Off")
@@ -789,8 +848,8 @@ void MainWindow::loadOverlay() {
     }
     upscaler_combo->setCurrentIndex(qMax(0, upscaler_ids.indexOf(overlay.value(QStringLiteral("upscaler"), QStringLiteral("off")))));
 
-    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin")} + FindPluginIds(package.pluginsParent(), QStringLiteral("framegen"));
-    if (!framegen_ids.contains(QStringLiteral("fsr3")) && FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler")).contains(QStringLiteral("fsr3"))) {
+    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin")} + FindPluginIds(package.pluginsParent(), QStringLiteral("framegen"), {DataLayout::Default().pluginsDir()});
+    if (!framegen_ids.contains(QStringLiteral("fsr3")) && FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler"), {DataLayout::Default().pluginsDir()}).contains(QStringLiteral("fsr3"))) {
         framegen_ids << QStringLiteral("fsr3"); // the FSR 3 library carries its frame generation
     }
     framegen_combo->clear();

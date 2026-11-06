@@ -47,4 +47,4 @@ builds on.
   unmodified, with its licence text; the Windows zip includes them with `AMD-FSR-SDK-LICENSE.txt`. We do not modify, decompile or
   disassemble them.
 - **NVIDIA DLSS / NGX.** Never redistributed by this project: no NVIDIA library, and no plugin that links one, is in a release, the zip or the
-  repository. The DLSS plugin is built by the user on their own machine (`plugins/dlss/`).
+  repository. The DLSS plugin is built by the user on their own machine (`plugins/dlss/`); on Linux the launcher's "Set up NVIDIA DLSS" button does it by downloading NVIDIA's SDK from NVIDIA's own repository to the user's PC, so only our plugin source ships.

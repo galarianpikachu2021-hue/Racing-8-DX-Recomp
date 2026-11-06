@@ -34,7 +34,10 @@ bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.nsz' -o -iname '*.xc
   -o -name 'recomp_*.c' -o -name 'recompiled_*' -o -name 'module.json' \) -o \( -name '*.o' -not -path '*/toolchain/*' \) | head -5)
 [ -z "$bad" ] || { echo "FAIL: game-derived files in the AppDir: $bad"; exit 1; }
 [ -e "$appdir/usr/bin/plugins/libkr_upscaler_fsr3.so" ] || echo "WARNING: no FSR 3 plugin in the release" >&2
-find "$appdir" -iname '*dlss*' -o -iname '*ngx*' | grep -q . && { echo "FAIL: DLSS/NGX files must never ship"; exit 1; }
+# The DLSS plugin SOURCE (ours) ships so the user can build the plugin on their own PC; nothing of NVIDIA's does.
+mkdir -p "$appdir/usr/lib/kartrecomp/plugin-src/dlss"
+cp "$repo/plugins/dlss/install-linux.sh" "$repo/plugins/dlss/kr_upscaler_dlss.cpp" "$repo/plugins/dlss/kr_upscaler_abi.h" "$appdir/usr/lib/kartrecomp/plugin-src/dlss/"
+find "$appdir" \( -iname '*dlss*' -o -iname '*ngx*' \) -not -path '*/plugin-src/dlss/*' | grep -q . && { echo "FAIL: DLSS/NGX files must never ship"; exit 1; }
 # The AppImage must start on common distros: refuse a release that needs a newer glibc than KARTRECOMP_MAX_GLIBC (default 2.35), unless
 # KARTRECOMP_ALLOW_NEW_GLIBC=1 (a local build on a new distro; build the engine on an older base for a real release).
 if [ -n "${KARTRECOMP_ALLOW_NEW_GLIBC:-}" ]; then "$here/glibc-floor.sh" "$appdir" || true

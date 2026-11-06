@@ -22,6 +22,7 @@ Downloads: **Linux** `KartRecomp-Launcher-x86_64.AppImage`, **Windows** `KartRec
 
 ### Both
 
+- **DLSS on Linux:** the launcher's Enhancements tab has **Set up NVIDIA DLSS**. It downloads NVIDIA's SDK to your PC, builds the small plugin with your own C++ compiler and installs it in your plugins folder (`~/.local/share/kartrecomp/plugins`), so nothing of NVIDIA's is part of the download. It needs `g++` and the Vulkan headers, and an NVIDIA GPU with a current driver. The Linux build has been compiled and loaded, but not yet run on an NVIDIA GPU.
 - Menus and their 3D previews (character and kart select) draw at the full output size; the render scale and upscaler only apply to the 3D scene of a race.
 - Fine diagonal hatching (shadow acne) on karts and characters is gone: shadow maps use a stronger depth offset.
 - A call through a null function pointer in the game's camera code (hovering a modded driver in character select, and rarely at race load) no longer ends the game.
@@ -30,7 +31,7 @@ Downloads: **Linux** `KartRecomp-Launcher-x86_64.AppImage`, **Windows** `KartRec
 
 - **Bloom is wrong at 150% and 200% render scale** (supersampling). Use 100% or lower for now.
 - Windows: an occasional crash when closing the game (a shutdown-order race on a controller thread); it does not touch the game while playing.
-- Windows: FSR 4 frame generation and DLSS have not been tried on real GPUs of every kind; FSR 4 models are chosen by the SDK per GPU.
+- Linux: DLSS has not been run on an NVIDIA GPU yet. Windows: FSR 4 frame generation has not been tried on real GPUs of every kind; FSR 4 models are chosen by the SDK per GPU.
 - Linux AppImage: built on a very recent distro (glibc 2.44), so it starts only on new distros for now.
 - Games built with 0.2.0 or earlier are rebuilt once by the launcher (the engine version changed).
 

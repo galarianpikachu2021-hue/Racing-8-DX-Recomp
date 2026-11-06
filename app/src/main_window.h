@@ -54,6 +54,7 @@ private:
     void refreshDlc();
     void refreshControllers();
     void loadOverlay();
+    void setupDlss();
     void saveOverlay();
     void refreshMods();
     void syncTextMerge();
@@ -104,6 +105,7 @@ private:
     OverlaySettings overlay;
     QWidget* enhancements_page = nullptr;
     QComboBox* upscaler_combo = nullptr;
+    QPushButton* dlss_button = nullptr;
     QComboBox* scale_combo = nullptr;
     QComboBox* sharpness_combo = nullptr;
     QComboBox* framegen_combo = nullptr;

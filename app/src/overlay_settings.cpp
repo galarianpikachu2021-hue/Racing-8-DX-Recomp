@@ -57,7 +57,7 @@ void OverlaySettings::setValue(const QString& key, const QString& value) {
 
 void OverlaySettings::setInt(const QString& key, int value) { setValue(key, QString::number(value)); }
 
-QStringList FindPluginIds(const QString& root, const QString& kind) {
+QStringList FindPluginIds(const QString& root, const QString& kind, const QStringList& extra_dirs) {
     QStringList ids;
 #ifdef Q_OS_WIN
     const QString prefix = QStringLiteral("kr_%1_").arg(kind);
@@ -66,10 +66,14 @@ QStringList FindPluginIds(const QString& root, const QString& kind) {
     const QString prefix = QStringLiteral("libkr_%1_").arg(kind);
     const QString ext = QStringLiteral(".so");
 #endif
-    for (const auto& name : QDir(QDir(root).filePath(QStringLiteral("plugins"))).entryList(QDir::Files, QDir::Name)) {
-        if (name.startsWith(prefix) && name.endsWith(ext)) {
-            const QString id = name.mid(prefix.size(), name.size() - prefix.size() - ext.size());
-            if (id != QLatin1String("dump") && !ids.contains(id)) ids << id;
+    QStringList dirs{QDir(root).filePath(QStringLiteral("plugins"))};
+    dirs << extra_dirs;
+    for (const QString& dir : dirs) {
+        for (const auto& name : QDir(dir).entryList(QDir::Files, QDir::Name)) {
+            if (name.startsWith(prefix) && name.endsWith(ext)) {
+                const QString id = name.mid(prefix.size(), name.size() - prefix.size() - ext.size());
+                if (id != QLatin1String("dump") && !ids.contains(id)) ids << id;
+            }
         }
     }
     return ids;

@@ -537,7 +537,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..4a88d1c5a7 100644
+index bca83ab630..62d014d296 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,6 +1,15 @@
@@ -985,7 +985,7 @@ index ea309dd691..d450f5d8cc 100644
                                     system.GetContentProvider()};
 diff --git a/src/suyu_cmd/kart_mimalloc.cpp b/src/suyu_cmd/kart_mimalloc.cpp
 new file mode 100644
-index 0000000000..e97d71429d
+index 0000000000..fd46dce571
 --- /dev/null
 +++ b/src/suyu_cmd/kart_mimalloc.cpp
 @@ -0,0 +1,121 @@
@@ -1503,14 +1503,15 @@ index 0000000000..6edacab4ef
 +}
 diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
 new file mode 100644
-index 0000000000..e7292beb46
+index 0000000000..06f5ebe6e5
 --- /dev/null
 +++ b/src/suyu_cmd/kr_platform.h
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,220 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
 +#pragma once
 +
++#include <algorithm>
 +#include <cstdlib>
 +#include <filesystem>
 +#include <string>
@@ -1541,9 +1542,39 @@ index 0000000000..e7292beb46
 +inline constexpr const char* kPluginExt = ".so";
 +#endif
 +
-+// plugins/<prefix><kind>_<name><ext>, e.g. plugins/libkr_upscaler_fsr3.so or plugins/kr_upscaler_fsr3.dll
++// Where plugins are looked for, in order: `plugins` next to the engine (what the release ships), KARTRECOMP_PLUGIN_DIR, and the
++// user's own folder (Linux: $XDG_DATA_HOME/<app>/plugins, <app> = KARTRECOMP_APP_NAME or "kartrecomp"). The last is where a plugin
++// the user builds on their own PC goes (DLSS: it contains NVIDIA's SDK, so it can never be part of a release).
++inline std::vector<std::string> PluginDirs() {
++    std::vector<std::string> dirs{"plugins"};
++    if (const char* d = std::getenv("KARTRECOMP_PLUGIN_DIR"); d && *d) {
++        dirs.emplace_back(d);
++    }
++    const char* app = std::getenv("KARTRECOMP_APP_NAME");
++    const std::string app_name = app && *app ? app : "kartrecomp";
++    const char* xdg = std::getenv("XDG_DATA_HOME");
++    if (xdg && *xdg) {
++        dirs.push_back(std::string(xdg) + "/" + app_name + "/plugins");
++    }
++#ifndef _WIN32
++    else if (const char* home = std::getenv("HOME"); home && *home) {
++        dirs.push_back(std::string(home) + "/.local/share/" + app_name + "/plugins");
++    }
++#endif
++    return dirs;
++}
++
++// <dir>/<prefix><kind>_<name><ext>, e.g. plugins/libkr_upscaler_fsr3.so or plugins/kr_upscaler_fsr3.dll: the first folder of
++// PluginDirs() that has it (the plugins folder when none does).
 +inline std::string PluginFile(const std::string& kind, const std::string& name) {
-+    return std::string("plugins/") + kPluginPrefix + kind + "_" + name + kPluginExt;
++    const std::string file = std::string(kPluginPrefix) + kind + "_" + name + kPluginExt;
++    std::error_code ec;
++    for (const std::string& dir : PluginDirs()) {
++        if (std::filesystem::exists(dir + "/" + file, ec)) {
++            return dir + "/" + file;
++        }
++    }
++    return "plugins/" + file;
 +}
 +
 +// "libkr_upscaler_fsr3.so" / "kr_upscaler_fsr3.dll" -> "fsr3" when file is a plugin of this kind for this platform, else "".
@@ -1555,6 +1586,21 @@ index 0000000000..e7292beb46
 +        return {};
 +    }
 +    return file.substr(head.size(), file.size() - head.size() - ext.size());
++}
++
++// The ids of every plugin of this kind in any of the plugin folders (each once, in folder order).
++inline std::vector<std::string> PluginIds(const std::string& kind) {
++    std::vector<std::string> ids;
++    std::error_code ec;
++    for (const std::string& dir : PluginDirs()) {
++        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
++            if (std::string id = PluginId(entry.path().filename().string(), kind);
++                !id.empty() && std::find(ids.begin(), ids.end(), id) == ids.end()) {
++                ids.push_back(std::move(id));
++            }
++        }
++    }
++    return ids;
 +}
 +
 +inline void* LibOpen(const std::string& path) {
@@ -14372,10 +14418,10 @@ index 0000000000..e8bd970ace
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/upscaler.cpp b/src/suyu_cmd/native_gpu/upscaler.cpp
 new file mode 100644
-index 0000000000..ed20f47aec
+index 0000000000..9fee54a716
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/upscaler.cpp
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,247 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/upscaler.h"
 +
@@ -14568,15 +14614,7 @@ index 0000000000..ed20f47aec
 +}
 +
 +std::vector<std::string> FrameGenHost::Discover() {
-+    std::vector<std::string> names;
-+    std::error_code ec;
-+    for (const auto& entry : std::filesystem::directory_iterator("plugins", ec)) {
-+        const std::string file = entry.path().filename().string();
-+        if (const std::string id = KrPlatform::PluginId(file, "framegen"); !id.empty()) {
-+            names.push_back(id);
-+        }
-+    }
-+    return names;
++    return KrPlatform::PluginIds("framegen");
 +}
 +
 +bool FrameGenHost::Select(const KrUpscalerDevice& device, const std::string& name) {
@@ -14844,10 +14882,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..f5a6930aba
+index 0000000000..81a3bb07ed
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7994 @@
+@@ -0,0 +1,7990 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -19609,13 +19647,9 @@ index 0000000000..f5a6930aba
 +    void InitOverlay() {
 +        std::vector<std::string> names{"Off", "FSR 1 (spatial)", "Hook test (passthrough)"};
 +        overlay_upscaler_ids = {"off", "fsr1", "passthrough"};
-+        std::error_code ec;
-+        for (const auto& entry : std::filesystem::directory_iterator("plugins", ec)) {
-+            const std::string file = entry.path().filename().string();
-+            if (const std::string id = KrPlatform::PluginId(file, "upscaler"); !id.empty()) {
-+                overlay_upscaler_ids.push_back(id);
-+                names.push_back(id);
-+            }
++        for (const std::string& id : KrPlatform::PluginIds("upscaler")) {
++            overlay_upscaler_ids.push_back(id);
++            names.push_back(id);
 +        }
 +        overlay = std::make_unique<KartOverlay::Menu>(names);
 +        fg_ids = {"off", "builtin"};

@@ -29,4 +29,5 @@ private:
 };
 
 // Plugin ids found in <root>/plugins: libkr_upscaler_<id>.so and libkr_framegen_<id>.so (Windows: .dll without the lib prefix).
-QStringList FindPluginIds(const QString& root, const QString& kind);
+// extra_dirs: more plugin folders, e.g. the user's own (plugins built on this PC, such as DLSS).
+QStringList FindPluginIds(const QString& root, const QString& kind, const QStringList& extra_dirs = {});

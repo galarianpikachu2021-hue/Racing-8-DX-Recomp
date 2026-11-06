@@ -1999,6 +1999,47 @@ index 8cb5a04b12..79f69b9401 100644
      // If any new buffers were acquired, we can present.
      if (has_acquired_buffer && !composition_stack.empty()) {
          // Sort back-to-front: lower z first, higher z last so top-most draws last (on top).
+diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
+index ae07565196..3cd1665b8a 100644
+--- a/src/core/hle/service/set/system_settings_server.cpp
++++ b/src/core/hle/service/set/system_settings_server.cpp
+@@ -4,7 +4,10 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include <fstream>
++#include <system_error>
++#include <thread>
+ 
+ #include "common/assert.h"
+ #include "common/fs/file.h"
+@@ -471,9 +474,22 @@ bool ISystemSettingsServer::StoreSettingsFile(std::filesystem::path& path, auto&
+     }
+     file.close();
+ 
+-    std::filesystem::rename(settings_tmp_file, settings_base.replace_extension("dat"));
+-
+-    return true;
++    // Replacing a file fails on Windows while anything has it open, and a sync client or virus scanner can at any moment. A throw
++    // here ended the whole game (nothing above catches it, on the time worker's thread), so retry briefly and then give up on this
++    // save: the settings stay in memory and the next change writes them again.
++    const auto settings_file = settings_base.replace_extension("dat");
++    std::error_code rename_error;
++    for (int attempt = 0; attempt < 10; ++attempt) {
++        std::filesystem::rename(settings_tmp_file, settings_file, rename_error);
++        if (!rename_error) {
++            return true;
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(20));
++    }
++    LOG_WARNING(Service_SET, "Could not replace {}: {}", settings_file.string(), rename_error.message());
++    std::error_code remove_error;
++    std::filesystem::remove(settings_tmp_file, remove_error);
++    return false;
+ }
+ 
+ Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
 index 622b67a83c..a3233e1df7 100644
 --- a/src/core/hle/service/vi/conductor.cpp
@@ -2162,7 +2203,7 @@ index 3cc84acfdf..1db5fe21de 100644
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..61c9a3ee56
+index 0000000000..e01a7acb1f
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
 @@ -0,0 +1,1271 @@
@@ -4552,41 +4593,3 @@ index 9c31896bde..6e59ab40b1 100644
          const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
          if (!shader_info) {
              const u32 start_address{shader_config.offset};
-diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
---- a/src/core/hle/service/set/system_settings_server.cpp
-+++ b/src/core/hle/service/set/system_settings_server.cpp
-@@ -5,5 +5,8 @@
- // SPDX-License-Identifier: GPL-2.0-or-later
- 
-+#include <chrono>
- #include <fstream>
-+#include <system_error>
-+#include <thread>
- 
- #include "common/assert.h"
-@@ -471,9 +474,22 @@
-     }
-     file.close();
- 
--    std::filesystem::rename(settings_tmp_file, settings_base.replace_extension("dat"));
--
--    return true;
-+    // Replacing a file fails on Windows while anything has it open, and a sync client or virus scanner can at any moment. A throw
-+    // here ended the whole game (nothing above catches it, on the time worker's thread), so retry briefly and then give up on this
-+    // save: the settings stay in memory and the next change writes them again.
-+    const auto settings_file = settings_base.replace_extension("dat");
-+    std::error_code rename_error;
-+    for (int attempt = 0; attempt < 10; ++attempt) {
-+        std::filesystem::rename(settings_tmp_file, settings_file, rename_error);
-+        if (!rename_error) {
-+            return true;
-+        }
-+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-+    }
-+    LOG_WARNING(Service_SET, "Could not replace {}: {}", settings_file.string(), rename_error.message());
-+    std::error_code remove_error;
-+    std::filesystem::remove(settings_tmp_file, remove_error);
-+    return false;
- }
- 
- Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {

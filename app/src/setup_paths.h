@@ -27,6 +27,7 @@ struct DataLayout {
     QStringList installedDlc() const;
     QString moduleDir() const { return dataRoot + "/module"; }
     QString modsDir() const { return dataRoot + "/mods"; }
+    QString pluginsDir() const { return dataRoot + "/plugins"; } // plugins built on this PC (DLSS); the engine looks here too
     QString exportDir() const { return cacheRoot + "/export"; }
     QString workDir() const { return cacheRoot + "/build-work"; }
 };
