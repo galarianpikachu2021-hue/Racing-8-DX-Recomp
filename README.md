@@ -31,8 +31,8 @@ Everything above is a row in the F10 menu. The launcher's Enhancements tab sets 
 | **DLSS upscaling / DLSS frame generation** | **experimental: compiled, not yet run on NVIDIA hardware** |
 | **FSR 4.1.2** (Windows) | AMD's official Vulkan release (SDK 2.4.0, 2026-10-28): plugin written and builds on CI, **not yet run on a GPU**; model select (FP8 / INT8 / lightweight INT8) in the in-game menu. See `docs/WINDOWS_PLUGINS.md` |
 | Linux (AppImage packaging, launcher with updater, mods) | working |
-| Android (Snapdragon handhelds, including dual-screen) | in development, see [docs/ANDROID.md](docs/ANDROID.md) |
-| Windows | planned |
+| Android (Snapdragon handhelds, including dual-screen) | in development, see [docs/ANDROID.md](docs/ANDROID.md) <-- not created yet |
+| Windows | supports Windows 10/11 64-bit |
 
 ## How it works
 
