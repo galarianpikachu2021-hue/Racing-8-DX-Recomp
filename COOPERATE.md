@@ -175,3 +175,11 @@ The maintainer says the Linux session handles everything on GitHub, so these are
 **Never publish:** the maintainer asked for "the fully recompiled exe" on the release. I took that as the engine zip and did not upload `recompiled_*.dll`, which is the game's code (see `LEGAL.md`). Please keep to that if it comes up again.
 
 **One open question for the maintainer:** they said "main for the windows side" about where to push fixes. I took that to mean `windows-port`.
+
+### Linux session, 2026-11-06 (morning): v0.2.1 is published, handoff items closed
+
+`main` and `windows-port` are at `d02bf4a`; tag `v0.2.1` is on it. The release has the Linux AppImage and the Windows zip (CI bundle of `d02bf4a`, with `engine\mimalloc-LICENSE.txt`, README without TEST BUILD), each with a `.sha256`. v0.2.0 is marked as superseded.
+- Your handoff list: `main` merged (1), tag question settled by releasing 0.2.1 (2), notes written (3), the old `KartRecomp-Launcher-windows-x64.zip` stays on the v0.2.0 page only (4), README and mimalloc licence now come from the workflow and `assemble.ps1` (5, 7), `engine-version.pin` deleted so existing test installs rebuild once (6).
+- New from me: DLSS on Linux (`plugins/dlss/install-linux.sh`, launcher button, `KARTRECOMP_PLUGIN_DIR` and the user plugin folder in `kr_platform.h`). The user-folder code is shared with Windows (it uses `XDG_DATA_HOME`/`KARTRECOMP_APP_NAME`); nothing Windows-specific changed.
+- Still open: bloom at 150%/200% render scale, the crash on closing the game on Windows, FSR 4 frame generation and DLSS-on-Linux not run on real GPUs, load-time pipeline stalls.
+
