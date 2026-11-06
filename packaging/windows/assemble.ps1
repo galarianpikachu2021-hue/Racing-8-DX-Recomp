@@ -25,5 +25,5 @@ if ($Plugins -and (Test-Path $Plugins)) { Copy-Item "$Plugins\*" "$Out\engine\pl
 Copy-Item $Toolchain "$Out\toolchain" -Recurse
 Copy-Item "$repo\data\mk8d-3.0.4\hot_blocks.txt" "$Out\data\mk8d-3.0.4\"
 foreach ($f in 'LEGAL.md', 'LICENSE') { if (Test-Path "$repo\$f") { Copy-Item "$repo\$f" $Out } }
-Copy-Item "$repo\packaging\windows\README-WINDOWS.txt", "$repo\packaging\windows\Collect-Logs.cmd" $Out
+Copy-Item "$repo\packaging\windows\README-WINDOWS.txt", "$repo\packaging\windows\Collect-Logs.cmd", "$repo\packaging\windows\Diagnose-System.ps1" $Out
 Write-Host "assembled $Out"

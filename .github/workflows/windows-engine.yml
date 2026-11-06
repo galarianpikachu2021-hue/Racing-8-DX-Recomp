@@ -209,6 +209,12 @@ jobs:
       - name: Release contents test
         shell: pwsh
         run: tests\windows\test_release_contents.ps1 KartRecomp -RequirePlugins
+      - name: System-info script runs
+        shell: pwsh
+        run: |
+          KartRecomp\Diagnose-System.ps1 -Out sysinfo.txt
+          Get-Content sysinfo.txt
+          if (-not (Select-String -Path sysinfo.txt -Pattern '^CPU:')) { throw 'no CPU line in the system info' }
       - name: Zip
         shell: pwsh
         run: |
