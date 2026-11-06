@@ -586,10 +586,25 @@ index bca83ab630..4a88d1c5a7 100644
  } // namespace
  
  #ifdef _WIN32
-@@ -885,6 +910,29 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
+@@ -885,6 +910,44 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
          return;
      }
  #endif
++    // F11: fullscreen on and off, in any menu. Held keys repeat, so only the first press counts.
++    if (key == SDL_SCANCODE_F11) {
++        static bool f11_held = false;
++        if (state == SDL_PRESSED && !f11_held) {
++            // The native renderer draws in a window of its own: act on the one that has the keyboard.
++            SDL_Window* window = SDL_GetKeyboardFocus();
++            if (window == nullptr) window = render_window;
++            const bool is_fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
++            if (!SDL_SetWindowFullscreen(window, !is_fullscreen)) {
++                LOG_ERROR(Frontend, "F11: could not change fullscreen: {}", SDL_GetError());
++            }
++        }
++        f11_held = state == SDL_PRESSED;
++        return;
++    }
 +    // In-game overlay menu: F10 opens and closes it; while it is open the keyboard drives it and
 +    // the game sees only key releases (so nothing stays stuck down).
 +    if (state == SDL_PRESSED) {
@@ -616,7 +631,7 @@ index bca83ab630..4a88d1c5a7 100644
      if (state == SDL_PRESSED) {
          input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
      } else if (state == SDL_RELEASED) {
-@@ -900,7 +948,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
+@@ -900,7 +963,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
      tas_playback = true;
  }
  
@@ -718,7 +733,7 @@ index bca83ab630..4a88d1c5a7 100644
      if (!tas_playback) {
          return;
      }
-@@ -1215,6 +1357,8 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1215,6 +1372,8 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
      if (gamepad_check_pending) {
          AutoAssignControllers();
      }
@@ -727,7 +742,7 @@ index bca83ab630..4a88d1c5a7 100644
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
-@@ -1243,7 +1387,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1243,7 +1402,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
      if (!g_export_package || !SdlConfig::auto_assign_controllers ||
@@ -736,7 +751,7 @@ index bca83ab630..4a88d1c5a7 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,19 +1412,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,19 +1427,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
@@ -757,7 +772,7 @@ index bca83ab630..4a88d1c5a7 100644
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
      if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
-@@ -1298,6 +1431,117 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1446,117 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
@@ -14729,7 +14744,7 @@ new file mode 100644
 index 0000000000..f5a6930aba
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7828 @@
+@@ -0,0 +1,7994 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -15444,9 +15459,13 @@ index 0000000000..f5a6930aba
 +                // Small vertex buffers are per-frame CPU data (particle and effect
 +                // instances): the game rewrites them before the render thread runs.
 +                const u64 bytes = c->size;
++                if (VertexBufferIsStatic(c->address, bytes)) {
++                    continue; // no snapshot: the render thread reads it from guest memory, like a large buffer
++                }
 +                const auto [at, fresh] = SnapshotOnce(snap_dedupe, c->address, bytes);
 +                if (fresh) {
 +                    Core::NvnHost::ReadGpuMemoryInSubmit(c->address, building.snapshot.data() + at, bytes);
++                    submit_vb_bytes += bytes;
 +                }
 +                copy.snap = at + 1;
 +                copy.snap_size = bytes;
@@ -15469,6 +15488,40 @@ index 0000000000..f5a6930aba
 +        ++submit_snap_count;
 +    }
 +
++    /// Most small vertex buffers are level geometry, copied at every submit for nothing: 8-12 MB a frame in a race, on the game's own
++    /// thread, and all of it through the CPU caches the game needs. A few bytes spread over the buffer are compared at each present;
++    /// one that has not changed for four seconds counts as static, one that then changes needs thirty seconds to count again. A
++    /// change is caught on the frame it is seen, so the only exposure is a rewrite between this submit and the render thread reaching
++    /// it, in a buffer quiet for seconds. KARTRECOMP_SNAPSHOT_ALL_VB=1 turns this off.
++    bool VertexBufferIsStatic(u64 address, u64 bytes) {
++        static const bool off = std::getenv("KARTRECOMP_SNAPSHOT_ALL_VB") != nullptr;
++        if (off) return false;
++        VbTrack& t = vb_track[address * 0x9E3779B97F4A7C15ULL ^ bytes];
++        if (t.seen_at == presents_seen + 1) {
++            return t.is_static; // already looked at this frame
++        }
++        t.seen_at = presents_seen + 1;
++        constexpr u64 kProbes = 8, kProbeBytes = 16;
++        u64 hash = 0xCBF29CE484222325ULL;
++        std::array<u64, kProbeBytes / 8> probe{};
++        for (u64 i = 0; i < kProbes; ++i) {
++            const u64 room = bytes > kProbeBytes ? bytes - kProbeBytes : 0;
++            probe.fill(0);
++            Core::NvnHost::ReadGpuMemoryInSubmit(address + room * i / (kProbes - 1), probe.data(), std::min(bytes, kProbeBytes));
++            for (const u64 word : probe) hash = (hash ^ word) * 0x100000001B3ULL;
++        }
++        if (hash != t.hash) {
++            const bool was_static = t.is_static;
++            t.hash = hash;
++            t.quiet_frames = 0;
++            t.is_static = false;
++            if (was_static) t.required = 1800;
++            return false;
++        }
++        if (++t.quiet_frames >= t.required) t.is_static = true;
++        return t.is_static;
++    }
++
 +    /// Offset of the snapshot copy of [address, address + bytes) within this submit; fresh when the caller must fill it.
 +    struct SnapSeen {
 +        u64 address = 0, bytes = 0;
@@ -15486,10 +15539,11 @@ index 0000000000..f5a6930aba
 +
 +    void Present(const TextureDesc& texture, u32) override {
 +        if (++presents_seen % 300 == 0) {
-+            LOG_INFO(Frontend, "nvn-host vulkan: submit per frame {:.2f} ms (snapshots {:.2f} ms, {:.1f} MB, {:.0f} binds)",
++            LOG_INFO(Frontend, "nvn-host vulkan: submit per frame {:.2f} ms (snapshots {:.2f} ms, {:.1f} MB, {:.0f} binds; vertex snapshots {:.1f} MB)",
 +                     static_cast<double>(submit_ns) / 300e6, static_cast<double>(submit_snap_ns) / 300e6,
-+                     static_cast<double>(submit_snap_bytes) / 300e6, static_cast<double>(submit_snap_count) / 300.0);
-+            submit_ns = submit_snap_ns = submit_snap_bytes = submit_snap_count = 0;
++                     static_cast<double>(submit_snap_bytes) / 300e6, static_cast<double>(submit_snap_count) / 300.0,
++                     static_cast<double>(submit_vb_bytes) / 300e6);
++            submit_ns = submit_snap_ns = submit_snap_bytes = submit_snap_count = submit_vb_bytes = 0;
 +        }
 +        building.present = texture;
 +        building.queued = std::chrono::steady_clock::now();
@@ -16254,6 +16308,9 @@ index 0000000000..f5a6930aba
 +        const ImageKey key{t.pool, t.offset, TexelClass(info->format), t.width, t.height};
 +        if (post_phase && up_alias && key == tm_key) {
 +            return up_alias; // after the upscale point the 3D composite is the upscaled image
++        }
++        if (ss_alias && key == ss_key) {
++            return ss_alias; // supersampling: after the 3D passes the scene colour is its averaged-down copy
 +        }
 +        if (const auto it = images.find(key); it != images.end()) {
 +            Image& existing = it->second;
@@ -17097,6 +17154,7 @@ index 0000000000..f5a6930aba
 +            const Command& c = *fc.cmd;
 +            switch (c.op) {
 +            case Op::SetRenderTargets:
++                if (ss_cmd && &c == ss_cmd) RunSupersamplePoint(false);
 +                if (hud_cmd && &c == hud_cmd) PrepareUpscalePoint(c);
 +                ApplyRenderTargets(st, c, false);
 +                break;
@@ -17602,6 +17660,7 @@ index 0000000000..f5a6930aba
 +        if (const auto it = pipelines.find(key); it != pipelines.end()) {
 +            return it->second;
 +        }
++        pipeline_missed = true;
 +        const VkPipeline pipeline = CreatePipeline(prog, st, topology, attrs, binds);
 +        if (!pipeline) ++pipeline_failures;
 +        pipelines.emplace(key, pipeline);
@@ -17645,11 +17704,20 @@ index 0000000000..f5a6930aba
 +        put(&topology, sizeof(topology));
 +        for (const auto& a : attrs) put(&a, sizeof(a));
 +        for (const auto& b : binds) put(&b, sizeof(b));
-+        put(&st.depth_stencil, sizeof(st.depth_stencil));
-+        put(&st.color, sizeof(st.color));
-+        put(&st.channel_mask, sizeof(st.channel_mask));
-+        put(st.blend.data(), sizeof(st.blend));
-+        put(&st.polygon, sizeof(st.polygon));
++        // Only the state CreatePipeline reads: the raw words also hold bits it ignores, and blend entries of targets that are not
++        // bound keep whatever an earlier pass left. Hashing those made identical pipelines over and over, all through a race.
++        const u64 depth_state = st.depth ? (st.depth_stencil & 0xF3) : 0;
++        put(&depth_state, sizeof(depth_state));
++        for (size_t i = 0; i < st.colors.size() && i < 8; ++i) {
++            const u32 write_mask = (st.channel_mask >> (4 * i)) & 0xF;
++            put(&write_mask, sizeof(write_mask));
++            const bool enable = ((st.color >> 8) >> i) & 1;
++            const u64 raw = st.blend[i];
++            const u64 blend_state = enable && raw != 0 ? (raw >> 24) | (u64{1} << 63) : 0;
++            put(&blend_state, sizeof(blend_state));
++        }
++        const u32 polygon_state = st.polygon & 7;
++        put(&polygon_state, sizeof(polygon_state));
 +        const bool bias = (st.polygon_offset & 4) != 0;
 +        put(&bias, sizeof(bias));
 +        put(&st.depth_clamp, sizeof(st.depth_clamp));
@@ -17701,7 +17769,7 @@ index 0000000000..f5a6930aba
 +        // with a negative-height viewport. Getting it wrong also inverts
 +        // gl_FrontFacing, which two-sided materials use to flip their normals.
 +        // Unflipped (shadow-map) passes see the opposite winding.
-+        const bool ccw = ((st.polygon >> 2) & 1) != IsShadowMapPass(st);
++        const bool ccw = (((st.polygon >> 2) & 1) != 0) != IsShadowMapPass(st);
 +        rs.frontFace = ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
 +        rs.lineWidth = 1.0f;
 +        // Polygon offset (fill): decals pull forward (units -4, slope -1), shadow
@@ -19673,6 +19741,11 @@ index 0000000000..f5a6930aba
 +        }
 +        frame_has_scene = last_depth != SIZE_MAX;
 +        if (!frame_has_scene) return;
++        if (scene_ratio > 1.0001f && last_depth + 1 < passes.size() && passes[last_depth].key) {
++            ss_cmd = passes[last_depth + 1].cmd;
++            ss_desc = passes[last_depth].cmd->colors[0];
++            ss_key = *passes[last_depth].key;
++        }
 +        std::optional<ImageKey> t;
 +        size_t t_index = 0;
 +        for (size_t i = last_depth + 1; i < passes.size(); ++i) {
@@ -19723,6 +19796,8 @@ index 0000000000..f5a6930aba
 +        frame_upscaled = false;
 +        hdr_clean_valid = false;
 +        hud_cmd = nullptr;
++        ss_cmd = nullptr;
++        ss_alias = nullptr;
 +        frame_has_scene = false;
 +        if (split_mode) FindUpscalePoint(frame);
 +        // The render scale is for the 3D scene of a race only. A race frame has a HUD pass and a game camera (found in last
@@ -19775,6 +19850,46 @@ index 0000000000..f5a6930aba
 +        return &up_image;
 +    }
 +
++    /// Supersampling (render scale above 100%): the output-size copy of the scene colour.
++    Image* EnsureSsImage(Image* low) {
++        const u32 w = ScaleDim(low->guest_width, out_scale), h = ScaleDim(low->guest_height, out_scale);
++        if (ss_image.image && (ss_image.width != w || ss_image.height != h || ss_image.info.format != low->info.format)) {
++            TextureCopyRetire(ss_image);
++            ss_image = {};
++        }
++        if (!ss_image.image) {
++            if (!CreateAuxImage(ss_image, low->info.format, w, h, false)) {
++                ss_image = {};
++                return nullptr;
++            }
++            ss_image.guest_width = low->guest_width;
++            ss_image.guest_height = low->guest_height;
++            ss_image.scalable = true;
++            ss_image.scaled = ScaleActive(out_scale);
++            ss_image.scale = out_scale;
++            ss_image.info = low->info;
++        }
++        return &ss_image;
++    }
++
++    /// Supersampling, at the first pass after the 3D passes. The game's effect chain reads the scene into fixed-size targets
++    /// (640x360 and smaller) with a few samples each, tuned for a 1080p source: from a 5120x2880 scene they skip most pixels and
++    /// bloom shimmers. So the scene is averaged down here and everything after it runs exactly as at 100%. `record` is false in the
++    /// prebuild walk, which only needs the images in their classes.
++    void RunSupersamplePoint(bool record) {
++        Image* low = GetImage(ss_desc, false);
++        if (!low || !low->scaled || low->info.depth) return;
++        Image* down = EnsureSsImage(low);
++        if (!down || low->width <= down->width) return;
++        if (record) {
++            MemoryBarrier();
++            BlitUp(low, down);
++            MemoryBarrier();
++        }
++        ss_alias = down;
++        cur_scale = out_scale;
++    }
++
 +    /// Does the upscale point need its own output image? Not when nothing upscales and the sizes already match.
 +    bool UpscalePointNeedsImage(const Image* low) const {
 +        return fsr1_selected || upscaler.Enabled() || hdr_active ||
@@ -19804,7 +19919,8 @@ index 0000000000..f5a6930aba
 +        frame_upscaled = true;
 +        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, 1);
 +        MemoryBarrier();
-+        const bool supersampled = low->width > up->width || low->height > up->height; // 150% / 200%: just average down
++        // 150% / 200%: no temporal upscaler (no jitter, no vectors). Usually the scene was averaged down already (RunSupersamplePoint).
++        const bool supersampled = ss_alias != nullptr || low->width > up->width || low->height > up->height;
 +        if (supersampled) {
 +            BlitUp(low, up);
 +        } else if (fsr1_selected && FsrUpscale(low, up)) {
@@ -21492,11 +21608,24 @@ index 0000000000..f5a6930aba
 +            MergeSpeculative();
 +            PrebuildPrograms(frame);
 +            Profile::Scope ps_pipe{prof, Profile::PrebuildPipelines};
-+            PrebuildPipelines(frame);
++            // The walk visits every draw of the frame, which costs milliseconds on the render thread, and exists to build new pipelines in
++            // parallel. Once a scene has settled nothing is new: walk only after new programs or a pipeline that Draw had to build
++            // itself, and for a moment after that. KARTRECOMP_ALWAYS_PREBUILD=1 walks every frame.
++            static const bool always_prebuild = std::getenv("KARTRECOMP_ALWAYS_PREBUILD") != nullptr;
++            if (always_prebuild || programs.size() != prebuild_programs_seen || pipeline_missed) {
++                prebuild_programs_seen = programs.size();
++                prebuild_frames_left = 30;
++            }
++            pipeline_missed = false;
++            if (prebuild_frames_left > 0) {
++                --prebuild_frames_left;
++                PrebuildPipelines(frame);
++            }
 +        }
 +        // The prebuild walked the whole frame (creating the targets in their classes): the real pass starts over.
 +        post_phase = false;
 +        up_alias = nullptr;
++        ss_alias = nullptr;
 +        cur_scale = frame_scene_scale;
 +        drawn_targets.clear();
 +        current_frame = &frame;
@@ -21603,6 +21732,9 @@ index 0000000000..f5a6930aba
 +                                    ci < c.color_layers.size() ? c.color_layers[ci] : 0,
 +                                    ci < c.color_levels.size() ? c.color_levels[ci] : 0);
 +                    }
++                }
++                if (ss_cmd && &c == ss_cmd && !ss_alias) {
++                    RunSupersamplePoint(true);
 +                }
 +                if (hud_cmd && &c == hud_cmd && !post_phase) {
 +                    RunUpscalePoint(c); // the HUD starts: upscale the 3D composite first
@@ -22043,7 +22175,7 @@ index 0000000000..f5a6930aba
 +        // Persist new pipelines now and then: runs often end without a clean shutdown.
 +        if (frames % 1800 == 900 && pipelines.size() != pipelines_saved) {
 +            pipelines_saved = pipelines.size();
-+            SavePipelineCache();
++            SavePipelineCacheInBackground();
 +        }
 +        if (++frames % 300 == 0) {
 +            const auto ms = [this](Profile::Slot sl) { return prof.ns[sl] / 300.0 / 1e6; };
@@ -22115,7 +22247,24 @@ index 0000000000..f5a6930aba
 +                 Common::FS::PathToUTF8String(PipelineCachePath()), blob.size());
 +    }
 +
++    /// During play: reading out and writing tens of MB must not stall the render thread.
++    void SavePipelineCacheInBackground() {
++        if (!pipeline_cache || cache_saving.exchange(true)) {
++            return; // the last save is still going: the next period catches up
++        }
++        if (cache_save_thread.joinable()) cache_save_thread.join();
++        cache_save_thread = std::thread([this] {
++            WritePipelineCache();
++            cache_saving = false;
++        });
++    }
++
 +    void SavePipelineCache() {
++        if (cache_save_thread.joinable()) cache_save_thread.join();
++        WritePipelineCache();
++    }
++
++    void WritePipelineCache() {
 +        if (!pipeline_cache) {
 +            return;
 +        }
@@ -22125,8 +22274,21 @@ index 0000000000..f5a6930aba
 +        if (size && vk.vkGetPipelineCacheData(device, pipeline_cache, &size, blob.data()) == VK_SUCCESS) {
 +            std::error_code ec;
 +            std::filesystem::create_directories(PipelineCachePath().parent_path(), ec);
-+            std::ofstream out{PipelineCachePath(), std::ios::binary | std::ios::trunc};
-+            out.write(blob.data(), static_cast<std::streamsize>(size));
++            // Replaced in one step, so a crash or a closed window mid-write cannot leave half a file.
++            auto temp = PipelineCachePath();
++            temp += ".tmp";
++            bool written = false;
++            {
++                std::ofstream out{temp, std::ios::binary | std::ios::trunc};
++                out.write(blob.data(), static_cast<std::streamsize>(size));
++                written = out.good();
++            }
++            if (written) {
++                std::filesystem::rename(temp, PipelineCachePath(), ec);
++            }
++            if (!written || ec) {
++                std::filesystem::remove(temp, ec);
++            }
 +        }
 +    }
 +
@@ -22134,6 +22296,7 @@ index 0000000000..f5a6930aba
 +        if (!device) {
 +            return;
 +        }
++        if (cache_save_thread.joinable()) cache_save_thread.join();
 +        FgWaitIdle();
 +        {
 +            std::scoped_lock lock{fg_mx};
@@ -22209,7 +22372,20 @@ index 0000000000..f5a6930aba
 +    bool started = false, ok = false, quit = false;
 +    std::atomic<u64> dropped{0};
 +    size_t last_snapshot_size = 0;
-+    u64 presents_seen = 0, submit_ns = 0, submit_snap_ns = 0, submit_snap_bytes = 0, submit_snap_count = 0;
++    u64 presents_seen = 0, submit_ns = 0, submit_snap_ns = 0, submit_snap_bytes = 0, submit_snap_count = 0, submit_vb_bytes = 0;
++    struct VbTrack {
++        u64 hash = 0;
++        u64 seen_at = 0;
++        u32 quiet_frames = 0;
++        u32 required = 240;
++        bool is_static = false;
++    };
++    std::unordered_map<u64, VbTrack> vb_track; ///< Submit() only
++    size_t prebuild_programs_seen = 0;
++    u32 prebuild_frames_left = 0;
++    bool pipeline_missed = false;
++    std::thread cache_save_thread;
++    std::atomic<bool> cache_saving{false};
 +    std::atomic<u32> window_w{0}, window_h{0}; ///< window pixel size (event watch)
 +    VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
 +    std::vector<std::pair<VkBuffer, VkDeviceMemory>> staging_retired, staging_retired_prev;
@@ -22355,6 +22531,11 @@ index 0000000000..f5a6930aba
 +    bool frame_has_scene = false;
 +    const Command* hud_cmd = nullptr; ///< the first pass of the HUD (the upscale point), or none
 +    ImageKey tm_key{};                ///< the 3D composite (tonemap output) the HUD draws over
++    const Command* ss_cmd = nullptr;  ///< supersampling: the first pass after the 3D passes, or none
++    TextureDesc ss_desc{};            ///< ... the scene colour those passes drew
++    ImageKey ss_key{};
++    Image ss_image;                   ///< its output-size copy
++    Image* ss_alias = nullptr;        ///< set from that pass on
 +    Image up_image;                   ///< the upscaled 3D composite
 +    Image* up_alias = nullptr;
 +    u32 scale_resizes = 0;

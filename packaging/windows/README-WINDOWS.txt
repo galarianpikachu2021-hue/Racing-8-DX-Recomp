@@ -7,4 +7,6 @@ Racing 8 DX Recomp for Windows (TEST BUILD)
 4. If anything goes wrong, run Collect-Logs.cmd: it writes kartrecomp-logs.zip in this folder (logs and settings only, no game files or keys).
    Send that file back.
 
+In the game: F11 switches fullscreen on and off. F10 (or both stick buttons) opens the settings menu.
+
 No game files, keys or firmware are included. Windows SmartScreen may warn about an unsigned program: choose "More info", then "Run anyway".

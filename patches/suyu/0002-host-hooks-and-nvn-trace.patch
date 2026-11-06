@@ -2165,7 +2165,7 @@ new file mode 100644
 index 0000000000..61c9a3ee56
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1267 @@
+@@ -0,0 +1,1271 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +
@@ -3309,7 +3309,11 @@ index 0000000000..61c9a3ee56
 +        }
 +        static bool stats_added = false;
 +        if (!stats_added) {
-+            s.backends.push_back(std::make_unique<StatsBackend>());
++            // Off when the native renderer plays the game: it looks at every command and rewrites a log file every 10 s, for nothing
++            // the player needs. KARTRECOMP_NVN_STATS=1 brings it back.
++            if (KartRe::Enabled() || !Exclusive() || std::getenv("KARTRECOMP_NVN_STATS")) {
++                s.backends.push_back(std::make_unique<StatsBackend>());
++            }
 +            stats_added = true;
 +            // Translation statistics only; the Vulkan backend translates what it draws.
 +            if (KartRe::Enabled()) {
