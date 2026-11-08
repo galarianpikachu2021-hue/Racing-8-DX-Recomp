@@ -103,6 +103,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     }
     // No game folder anywhere (an installed launcher, the AppImage, a fresh Windows folder): the data lives in the XDG folders and the
     // game is the prebuilt engine plus the modules the Setup page builds. A developer checkout keeps its game folder.
+#ifdef Q_OS_WIN
+    // Windows has no game-folder build: the download is always the engine plus the modules the Setup page builds. A folder
+    // remembered from an older launcher (or picked on the Play tab) made Play look for <folder>\mk8d.exe, which never exists,
+    // and say "Cannot start" after a successful build. Only a folder that really holds that executable keeps the old mode.
+    if (!root.isEmpty() && !QFileInfo(GamePackage(root).executable()).isFile()) root.clear();
+#endif
     if (root.isEmpty() || !qEnvironmentVariableIsEmpty("KARTRECOMP_INSTALLED")) {
         const BuilderPaths builder = BuilderPaths::Detect();
         package = GamePackage::Installed(DataLayout::Default(), DataLayout::ConfigRoot(), builder.engine, builder.engineVersion);
