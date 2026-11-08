@@ -23,8 +23,8 @@ Same steps as `.github/workflows/windows-engine.yml` (read it for the exact comm
 
 1. **Engine and exporter:** `fetch-fork.sh fork`, then configure with `-DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON -DKARTRECOMP_ENGINE_VERSION=9586f9ea01-abi6` and build `mk8d-engine` and `kartrecomp-export`. **Use exactly `9586f9ea01-abi6` as the engine version, do not recompute it.** It is the stamp inside the published v0.2.1 zip, and v0.2.2 changes no generated code or module ABI (only HLE services and the launcher), so games players already built keep working. Write the same text to `engine\ENGINE_VERSION`.
 2. **Launcher:** build `kartrecomp.exe`, `kartrecomp-setup.exe`, `kartrecomp-build.exe` from `app/` with Qt 6.7 + zlib (the `launcher` job in the workflow), then `windeployqt --release --no-translations`. They must report version **0.2.2**.
-3. **Toolchain and plugins:** reuse them from the published zip, they are unchanged and were built by CI: copy `toolchain\`, `engine\plugins\` (FSR 3, FSR 4, the three AMD DLLs and `AMD-FSR-SDK-LICENSE.txt`) and `data\` out of `release-v0.2.1-standard\KartRecomp-windows-x64.zip (the published v0.2.1 zip)` on the USB drive. (If you prefer to rebuild the plugins yourself with `plugins/fsr3|fsr4/build-windows.ps1`, say so in the notes; the FSR 3 shader blobs come from the Linux-built `ffx-prepared` data, so reusing is simpler.)
-4. **mimalloc licence:** `engine\mimalloc-LICENSE.txt` (from the fetched mimalloc source under your build's `_deps`, or from the published zip).
+3. **Toolchain and plugins:** reuse them from the published zip, they are unchanged and were built by CI: copy `toolchain\`, `engine\plugins\` (FSR 3, FSR 4, the three AMD DLLs and `AMD-FSR-SDK-LICENSE.txt`) and `data\` out of the published v0.2.1 zip (download `KartRecomp-windows-x64.zip` from the v0.2.1 release page; reading it is fine, do not change the release). (If you prefer to rebuild the plugins yourself with `plugins/fsr3|fsr4/build-windows.ps1`, say so in the notes; the FSR 3 shader blobs come from the Linux-built `ffx-prepared` data, so reusing is simpler.)
+4. **mimalloc licence:** `engine\mimalloc-LICENSE.txt` (from the fetched mimalloc source under your build's `_deps`, or from the published v0.2.1 zip).
 
 ## 3. Assemble and check
 
@@ -35,10 +35,10 @@ Same steps as `.github/workflows/windows-engine.yml` (read it for the exact comm
 
 ## 4. Hand it over on the USB drive
 
-Drive label **racing 8 testing**. Create a new folder `release-v0.2.2-local\` and put in it: the zip, its `.sha256`, and `BUILD-NOTES.txt` with:
+Drive label **racing8test** (it was reformatted to exFAT on 2026-11-07 and is empty apart from what you put there; the old v0.2.1 folders are gone). Create a new folder `release-v0.2.2-local\` and put in it: the zip, its `.sha256`, and `BUILD-NOTES.txt` with:
 - the `main` commit you built, your Visual Studio, Qt and CMake versions;
 - the SHA-256 of `kartrecomp.exe`, `engine\mk8d-engine.exe`, `tools\kartrecomp-export.exe`;
 - the list of files in your zip that differ from the published one (file names and sizes only);
 - anything that failed, was skipped, or you did not test.
 
-Do not modify `release-v0.2.1-standard\` or `release-v0.2.1-local\` (that is the published release, kept for comparison). When finished, tell the maintainer in one short message where the folder is. The maintainer then asks the Linux session to compare it with the published zip and replace the release file.
+When finished, tell the maintainer in one short message where the folder is. The maintainer then asks the Linux session to compare it with the published zip and replace the release file.
