@@ -83,7 +83,12 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
         if (cancel && cancel->load()) { stop(); return {false, QStringLiteral("Cancelled.")}; }
         if (p.waitForFinished(250)) {
             const QString err = QString::fromLocal8Bit(p.readAllStandardError()).trimmed();
-            return {false, QStringLiteral("The game stopped during its test boot: %1").arg(err.isEmpty() ? QStringLiteral("no message (exit %1)").arg(p.exitCode()) : err)};
+            // An integer division by zero at boot (Windows 0xc0000094, Linux SIGFPE = signal 8) is what firmware newer than 22.5 causes.
+            const bool fw_crash = err.contains(QLatin1String("0xc0000094"), Qt::CaseInsensitive) || err.contains(QLatin1String("SIGFPE")) ||
+                                  (p.exitStatus() == QProcess::CrashExit && p.exitCode() == 8) || p.exitCode() == 136;
+            const QString hint = fw_crash ? QStringLiteral("\n\nThis crash comes from firmware newer than 22.5: pick firmware 22.5.0 or older on the Setup tab and build again.")
+                                          : QString();
+            return {false, QStringLiteral("The game stopped during its test boot: %1%2").arg(err.isEmpty() ? QStringLiteral("no message (exit %1)").arg(p.exitCode()) : err, hint)};
         }
         const Coverage c = ReadCoverage(coveragePath);
         if (!c.present) continue;

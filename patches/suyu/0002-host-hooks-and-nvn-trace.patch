@@ -1853,7 +1853,7 @@ index 0000000000..6829fd4368
 +
 +} // namespace FileSys::KartText
 diff --git a/src/core/file_sys/patch_manager.cpp b/src/core/file_sys/patch_manager.cpp
-index 721934ebf1..036253c5a8 100644
+index 721934ebf1..25edbc4cf5 100644
 --- a/src/core/file_sys/patch_manager.cpp
 +++ b/src/core/file_sys/patch_manager.cpp
 @@ -25,6 +25,7 @@
@@ -1864,7 +1864,24 @@ index 721934ebf1..036253c5a8 100644
  #include "core/file_sys/registered_cache.h"
  #include "core/file_sys/romfs.h"
  #include "core/file_sys/vfs/vfs_cached.h"
-@@ -585,8 +586,10 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
+@@ -351,6 +352,16 @@ VirtualDir PatchManager::PatchExeFS(VirtualDir exefs) const {
+             continue;
+ 
+         auto exefs_dir = FindSubdirectoryCaseless(subdir, "exefs");
++#ifdef SUYU_NO_JIT
++        // kart-recomp: the game's code is recompiled ahead of time from the base game + update, so a mod's exefs (replaced or added
++        // NSOs, e.g. a Skyline loader, or code patches) cannot run here: loading it would only make the module set differ from the
++        // recompiled one and stop the game at boot. Its romfs (data) part still applies.
++        if (exefs_dir != nullptr && !exefs_dir->GetFiles().empty()) {
++            LOG_WARNING(Loader, "    ExeFS: ignoring the code part (exefs) of mod '{}': code mods cannot run in the recompiled build",
++                        subdir->GetName());
++        }
++        continue;
++#endif
+         if (exefs_dir != nullptr)
+             layers.push_back(std::move(exefs_dir));
+     }
+@@ -585,8 +596,10 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
          }
      }
  
@@ -1876,7 +1893,7 @@ index 721934ebf1..036253c5a8 100644
          return;
      }
  
-@@ -598,6 +601,11 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
+@@ -598,6 +611,11 @@ static void ApplyLayeredFS(VirtualFile& romfs, u64 title_id, ContentRecordType t
      layers.emplace_back(std::move(extracted));
  
      auto layered = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers));
@@ -1888,6 +1905,42 @@ index 721934ebf1..036253c5a8 100644
      auto layered_ext = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers_ext));
      if (layered == nullptr && layered_ext == nullptr) {
          return;
+diff --git a/src/core/frontend/applets/error.cpp b/src/core/frontend/applets/error.cpp
+index 6ec13ff094..cbe24685e3 100644
+--- a/src/core/frontend/applets/error.cpp
++++ b/src/core/frontend/applets/error.cpp
+@@ -16,6 +16,11 @@ void DefaultErrorApplet::Close() const {}
+ void DefaultErrorApplet::ShowError(Result error, FinishedCallback finished) const {
+     LOG_CRITICAL(Service_Fatal, "Application requested error display: {:04}-{:04} (raw={:08X})",
+                  error.GetModule(), error.GetDescription(), error.raw);
++    // kart-recomp: there is no error window in this frontend; close the applet at once so the game goes on (it waits for the applet
++    // to finish, so not calling this froze the game, e.g. on the "can't connect" error after choosing Online Play).
++    if (finished) {
++        finished();
++    }
+ }
+ 
+ void DefaultErrorApplet::ShowErrorWithTimestamp(Result error, std::chrono::seconds time,
+@@ -24,6 +29,9 @@ void DefaultErrorApplet::ShowErrorWithTimestamp(Result error, std::chrono::secon
+         Service_Fatal,
+         "Application requested error display: {:04X}-{:04X} (raw={:08X}) with timestamp={:016X}",
+         error.GetModule(), error.GetDescription(), error.raw, time.count());
++    if (finished) {
++        finished();
++    }
+ }
+ 
+ void DefaultErrorApplet::ShowCustomErrorText(Result error, std::string main_text,
+@@ -34,6 +42,9 @@ void DefaultErrorApplet::ShowCustomErrorText(Result error, std::string main_text
+                  error.GetModule(), error.GetDescription(), error.raw);
+     LOG_CRITICAL(Service_Fatal, "    Main Text: {}", main_text);
+     LOG_CRITICAL(Service_Fatal, "    Detail Text: {}", detail_text);
++    if (finished) {
++        finished();
++    }
+ }
+ 
+ } // namespace Core::Frontend
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..1b76552ee6 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp

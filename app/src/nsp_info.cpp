@@ -7,11 +7,22 @@
 
 #include "build_runner.h"
 
-NspInfo ParseNspInfo(const QByteArray& line) {
+NspInfo ParseNspInfo(const QByteArray& output) {
     NspInfo info;
-    const auto doc = QJsonDocument::fromJson(line.trimmed());
+    // The answer is one JSON line, but the exporter's libraries may print log or key-file warnings around it (newer prod.keys
+    // files have key names this version does not know): take the last line that parses as a JSON object.
+    QJsonDocument doc;
+    const QList<QByteArray> lines = output.split('\n');
+    for (auto it = lines.crbegin(); it != lines.crend(); ++it) {
+        const QByteArray l = it->trimmed();
+        if (!l.startsWith('{')) continue;
+        doc = QJsonDocument::fromJson(l);
+        if (doc.isObject()) break;
+    }
     if (!doc.isObject()) {
-        info.error = QStringLiteral("the exporter gave no answer");
+        const QString shown = QString::fromUtf8(output.trimmed()).left(200);
+        info.error = shown.isEmpty() ? QStringLiteral("the exporter gave no answer")
+                                     : QStringLiteral("the exporter gave no answer (it said: %1)").arg(shown);
         return info;
     }
     const QJsonObject o = doc.object();

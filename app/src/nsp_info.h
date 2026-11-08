@@ -15,7 +15,7 @@ struct NspInfo {
 };
 
 /// Parses the single JSON line printed by `kartrecomp-export --info`; anything else gives an error.
-NspInfo ParseNspInfo(const QByteArray& line);
+NspInfo ParseNspInfo(const QByteArray& output);
 
 /// Runs `<exporter> --info <nsp> --keys <keys>` (blocking, killed after timeoutMs).
 NspInfo ReadNspInfo(const QString& exporter, const QString& nsp, const QString& keys, int timeoutMs = 120000);

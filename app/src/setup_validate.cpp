@@ -3,6 +3,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QRegularExpression>
 
 #include "keys_check.h"
 
@@ -28,9 +29,23 @@ QString ValidateUpdate(const NspInfo& info) {
     return {};
 }
 
+QString FirmwareTooNew(const QString& path) {
+    // Firmware newer than 22.5 makes the game's test boot crash (GitHub issues #2, #8; 23.0.1 reported). Its version is not readable
+    // without the keys, but firmware folders and zips are normally named after it ("Firmware.23.0.1", "Firmware 22.5.0.zip").
+    static const QRegularExpression re(QStringLiteral("(?:^|[^0-9])([0-9]{1,2})\\.([0-9]{1,2})\\.([0-9]{1,2})(?:[^0-9]|$)"));
+    const auto m = re.match(QFileInfo(path).fileName());
+    if (!m.hasMatch()) return {};
+    const int major = m.captured(1).toInt(), minor = m.captured(2).toInt();
+    if (major > kNewestFirmwareMajor || (major == kNewestFirmwareMajor && minor > kNewestFirmwareMinor))
+        return QStringLiteral("Firmware %1 is newer than this build supports (up to %2.%3.x): the game crashes while it starts. Use firmware %2.%3.0 or older.")
+            .arg(m.captured(1) + "." + m.captured(2) + "." + m.captured(3)).arg(kNewestFirmwareMajor).arg(kNewestFirmwareMinor);
+    return {};
+}
+
 QString ValidateFirmware(const QString& path) {
     const QFileInfo fi(path);
     if (!fi.exists()) return QStringLiteral("The firmware was not found.");
+    if (const QString why = FirmwareTooNew(path); !why.isEmpty()) return why;
     if (fi.isFile()) return path.endsWith(".zip", Qt::CaseInsensitive) ? QString() : QStringLiteral("The firmware must be a folder of .nca files or a .zip.");
     if (QDir(path).entryList({"*.nca", "*.cnmt.nca"}, QDir::Files).isEmpty()) return QStringLiteral("This folder holds no firmware (.nca files).");
     return {};

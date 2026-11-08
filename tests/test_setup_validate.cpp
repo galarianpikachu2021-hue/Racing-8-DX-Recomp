@@ -41,6 +41,16 @@ private slots:
     void garbageFromTheExporterBecomesAnError() {
         QVERIFY(!ParseNspInfo("segfault").error.isEmpty());
         QVERIFY(!ParseNspInfo("").error.isEmpty());
+        QVERIFY(FirmwareTooNew("/x/Firmware.23.0.1").contains("23.0.1"));
+        QVERIFY(FirmwareTooNew("C:/dl/Firmware 22.6.0.zip").contains("22.6.0"));
+        QVERIFY(FirmwareTooNew("/x/Firmware.22.5.0").isEmpty());
+        QVERIFY(FirmwareTooNew("/x/Firmware.20.5.0.zip").isEmpty());
+        QVERIFY(FirmwareTooNew("/x/firmware").isEmpty());
+        // log or key-file warnings around the answer (newer prod.keys) must not hide it
+        const auto noisy = ParseNspInfo("[ 0.01] Crypto <Warning> unknown key 'xyz'\n{\"titleId\":\"0100152000022000\",\"version\":0,\"aarch64\":true,\"hasProgram\":true,\"error\":\"\"}\n");
+        QVERIFY(noisy.error.isEmpty());
+        QCOMPARE(noisy.titleId, 0x0100152000022000ULL);
+        QVERIFY(ParseNspInfo("only a warning\n").error.contains("only a warning"));
         QCOMPARE(ParseNspInfo(R"({"titleId":"","version":0,"aarch64":false,"hasProgram":false,"error":"not an NSP"})").error, QString("not an NSP"));
     }
     void aMissingHeaderKeyIsNamed() {
