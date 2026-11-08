@@ -7,7 +7,9 @@
 set -euo pipefail
 fork="$(realpath "$1")"; build="$(realpath -m "$2")"; out="$(realpath -m "$3")"
 here="$(cd "$(dirname "$0")/.." && pwd)"
-version="$(cat "$here"/patches/suyu/*.patch | sha256sum | cut -c1-10)-abi6"
+# KARTRECOMP_ENGINE_VERSION overrides the stamp: a release that changes no generated code or module ABI keeps the previous release's
+# stamp, so players' built games stay valid (v0.2.2 keeps v0.2.1's d201f1ec0e-abi6).
+version="${KARTRECOMP_ENGINE_VERSION:-$(cat "$here"/patches/suyu/*.patch | sha256sum | cut -c1-10)-abi6}"
 compilers=()
 [ -f "$build/CMakeCache.txt" ] || compilers=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)  # an existing tree keeps its compiler
 cmake -S "$fork" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON \
