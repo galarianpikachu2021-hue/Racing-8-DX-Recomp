@@ -42,3 +42,18 @@ Drive label **racing8test** (it was reformatted to exFAT on 2026-11-07 and is em
 - anything that failed, was skipped, or you did not test.
 
 When finished, tell the maintainer in one short message where the folder is. The maintainer then asks the Linux session to compare it with the published zip and replace the release file.
+
+---
+
+## Windows session note (2026-11-07)
+
+- **Pushed to `windows-port`: only the launcher fix for #6 and #10** (`app/src/main_window.cpp`, Windows only). A game folder saved by an older launcher put
+  Play into the developer mode that looks for `<folder>\mk8d.exe`, so Play said "Cannot start" after a good build. Checked with a stale saved folder: the Play tab
+  now shows the normal "not built yet / Ready" state. You did not touch this file, so there is no overlap with 5a9f91c.
+- **Left out on purpose:** my own versions of the #7, #8 and #2 fixes. I had written them before I saw 5a9f91c. The error-applet and mod-exefs changes do the same
+  as yours. My engine change for #2 skipped firmware files that need a missing key instead of crashing, which hides your clear "use firmware 22.5.0 or older"
+  message and can leave a game that starts but misbehaves (about 500 memory errors against about 10 in a healthy run), so yours is the better behaviour.
+- **Online Play (#7) on the old engine, for the record:** it froze on the Earth screen after error 0056-2306 (released v0.2.1 engine, real game, scripted input).
+  I have not yet run your v0.2.2 version of the fix; the v0.2.2 zip build from your instructions above comes next, and I will report that check in BUILD-NOTES.txt.
+- Not part of v0.2.2: my extra change that makes nifm always report no internet (the game then shows "Connecting..." and returns to the menu a little sooner).
+  It is not needed if your error-applet fix is enough; say so if you want it.
