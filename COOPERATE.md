@@ -1,6 +1,6 @@
-# Windows session: build the clean v0.2.1 Windows zip on this PC
+# Windows session: build the v0.2.2 Windows zip on this PC
 
-You are the Claude Code session on the maintainer's **Windows PC**. The Linux session published v0.2.1 and cannot compile the Windows programs (they need Visual Studio and Qt for Windows). Your one job now: **build the standard v0.2.1 Windows zip locally, from the `main` source, and put it on the USB drive.** The Linux session will then replace the release file with yours. The maintainer's pronouns are unknown: use "they". Be concise and report faithfully, including anything that failed or was not tested.
+You are the Claude Code session on the maintainer's **Windows PC**. The Linux session publishes the releases and cannot compile the Windows programs (they need Visual Studio and Qt for Windows). Your one job now: **build the standard v0.2.2 Windows zip locally, from the `main` source, and put it on the USB drive.** v0.2.2 fixes GitHub issues #2/#8 (firmware newer than 22.5 refused with a clear message; mod `exefs` code ignored), #7 (Online Play no longer freezes) and #9 (exporter answer parsing). The Linux session will then replace the release file with yours. The maintainer's pronouns are unknown: use "they". Be concise and report faithfully, including anything that failed or was not tested.
 
 Why locally: GitHub Actions minutes may be billed. **Do not start, re-run or trigger any GitHub Actions run.** (The Windows workflows are now manual-only.)
 
@@ -13,7 +13,7 @@ Why locally: GitHub Actions minutes may be billed. **Do not start, re-run or tri
 
 ## 1. Get the exact source
 
-`git fetch origin` and check out `origin/main` (detached is fine, in a **separate folder** from any working tree with local changes). Expected: `CMakeLists.txt` says `project(KartRecomp VERSION 0.2.1 ...)`; `main` is at `73741aa` or later with only docs and `COOPERATE.md` changed since (check with `git diff 73741aa origin/main --stat`). If engine, patch or `app/` files changed after `73741aa`, tell the Linux session in the notes before building.
+`git fetch origin` and check out `origin/main` (detached is fine, in a **separate folder** from any working tree with local changes). Expected: `CMakeLists.txt` says `project(KartRecomp VERSION 0.2.2 ...)`; `main` is at the commit that made that change or later with only docs and `COOPERATE.md` changed since. Patch `0002` and `app/` changed for v0.2.2 (that is expected).
 
 Patches: `patches/suyu/0001`, `0002`, `0003` only (there is no `0004` any more; mimalloc is inside `0001`). `packaging/windows/fetch-fork.sh <dir>` applies them to the pinned upstream. **Windows line endings:** an empty context line in a patch breaks under CRLF, and the engine-version hash changes with line endings, so use `git -c core.autocrlf=false` for this checkout.
 
@@ -21,24 +21,24 @@ Patches: `patches/suyu/0001`, `0002`, `0003` only (there is no `0004` any more; 
 
 Same steps as `.github/workflows/windows-engine.yml` (read it for the exact commands), with your own Visual Studio 2022 Build Tools, CMake, Ninja, the Vulkan SDK and Qt 6.7:
 
-1. **Engine and exporter:** `fetch-fork.sh fork`, then configure with `-DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON -DKARTRECOMP_ENGINE_VERSION=9586f9ea01-abi6` and build `mk8d-engine` and `kartrecomp-export`. **Use exactly `9586f9ea01-abi6` as the engine version, do not recompute it.** It is the stamp inside the published zip, so a game the maintainer already built keeps working (the CI machine hashed CRLF patches; a LF checkout would give `d201f1ec0e`, which would force a rebuild). Write the same text to `engine\ENGINE_VERSION`.
-2. **Launcher:** build `kartrecomp.exe`, `kartrecomp-setup.exe`, `kartrecomp-build.exe` from `app/` with Qt 6.7 + zlib (the `launcher` job in the workflow), then `windeployqt --release --no-translations`. They must report version **0.2.1**.
-3. **Toolchain and plugins:** reuse them from the published zip, they are unchanged and were built by CI: copy `toolchain\`, `engine\plugins\` (FSR 3, FSR 4, the three AMD DLLs and `AMD-FSR-SDK-LICENSE.txt`) and `data\` out of `release-v0.2.1-standard\KartRecomp-windows-x64.zip` on the USB drive. (If you prefer to rebuild the plugins yourself with `plugins/fsr3|fsr4/build-windows.ps1`, say so in the notes; the FSR 3 shader blobs come from the Linux-built `ffx-prepared` data, so reusing is simpler.)
+1. **Engine and exporter:** `fetch-fork.sh fork`, then configure with `-DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF -DSUYU_NO_JIT=ON -DKARTRECOMP_ENGINE=ON -DKARTRECOMP_ENGINE_VERSION=9586f9ea01-abi6` and build `mk8d-engine` and `kartrecomp-export`. **Use exactly `9586f9ea01-abi6` as the engine version, do not recompute it.** It is the stamp inside the published v0.2.1 zip, and v0.2.2 changes no generated code or module ABI (only HLE services and the launcher), so games players already built keep working. Write the same text to `engine\ENGINE_VERSION`.
+2. **Launcher:** build `kartrecomp.exe`, `kartrecomp-setup.exe`, `kartrecomp-build.exe` from `app/` with Qt 6.7 + zlib (the `launcher` job in the workflow), then `windeployqt --release --no-translations`. They must report version **0.2.2**.
+3. **Toolchain and plugins:** reuse them from the published zip, they are unchanged and were built by CI: copy `toolchain\`, `engine\plugins\` (FSR 3, FSR 4, the three AMD DLLs and `AMD-FSR-SDK-LICENSE.txt`) and `data\` out of `release-v0.2.1-standard\KartRecomp-windows-x64.zip (the published v0.2.1 zip)` on the USB drive. (If you prefer to rebuild the plugins yourself with `plugins/fsr3|fsr4/build-windows.ps1`, say so in the notes; the FSR 3 shader blobs come from the Linux-built `ffx-prepared` data, so reusing is simpler.)
 4. **mimalloc licence:** `engine\mimalloc-LICENSE.txt` (from the fetched mimalloc source under your build's `_deps`, or from the published zip).
 
 ## 3. Assemble and check
 
 - `packaging/windows/assemble.ps1 -Engine <engine stage> -Launcher <launcher stage> -Toolchain <toolchain> -Plugins <plugins> -Out KartRecomp` (read the script for the stage layouts; the engine stage holds `mk8d-engine.exe`, `kartrecomp-export.exe`, `ENGINE_VERSION`, `mimalloc-LICENSE.txt`).
 - `tests/windows/test_release_contents.ps1 -Dir KartRecomp -RequirePlugins` must pass. Also confirm by hand: `KartRecomp\tools\kartrecomp-export.exe` exists next to `kartrecomp.exe`'s `tools` folder; `README-WINDOWS.txt` does not say TEST BUILD; no `engine-version.pin` effect (the version is the explicit one above); no game files, no NVIDIA files.
-- Run the new `kartrecomp.exe` once: the Setup tab must find the exporter (rows say what is missing about the files, not "The exporter is missing"), and the update check must not offer an update.
+- Run the new `kartrecomp.exe` once: the Setup tab must find the exporter (rows say what is missing about the files, not "The exporter is missing"), and the update check must not offer an update (it may say 0.2.2 is newer than the latest release until that release is published; that is fine).
 - Zip it as `KartRecomp-windows-x64.zip` with the single top folder `KartRecomp\`, and write `KartRecomp-windows-x64.zip.sha256` containing exactly `<lowercase hash>  KartRecomp-windows-x64.zip` (two spaces).
 
 ## 4. Hand it over on the USB drive
 
-Drive label **racing 8 testing**. Create a new folder `release-v0.2.1-local\` and put in it: the zip, its `.sha256`, and `BUILD-NOTES.txt` with:
+Drive label **racing 8 testing**. Create a new folder `release-v0.2.2-local\` and put in it: the zip, its `.sha256`, and `BUILD-NOTES.txt` with:
 - the `main` commit you built, your Visual Studio, Qt and CMake versions;
 - the SHA-256 of `kartrecomp.exe`, `engine\mk8d-engine.exe`, `tools\kartrecomp-export.exe`;
 - the list of files in your zip that differ from the published one (file names and sizes only);
 - anything that failed, was skipped, or you did not test.
 
-Do not modify `release-v0.2.1-standard\` (that is the published release, kept for comparison). When finished, tell the maintainer in one short message where the folder is. The maintainer then asks the Linux session to compare it with the published zip and replace the release file.
+Do not modify `release-v0.2.1-standard\` or `release-v0.2.1-local\` (that is the published release, kept for comparison). When finished, tell the maintainer in one short message where the folder is. The maintainer then asks the Linux session to compare it with the published zip and replace the release file.
