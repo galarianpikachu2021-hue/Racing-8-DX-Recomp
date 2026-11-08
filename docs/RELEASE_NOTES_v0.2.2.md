@@ -10,6 +10,7 @@ Downloads: **Linux** `KartRecomp-Launcher-x86_64.AppImage`, **Windows** `KartRec
 - **"CLI explicit content rejected: normal loader selected a different executable module set"** when pressing Play (#8). A mod with an `exefs` (code) folder, e.g. CTGP's Skyline loader, changed the game's modules. Code mods cannot run in the recompiled build, so their `exefs` part is now ignored with a warning in the log; the mod's data (romfs) still applies.
 - **Build crash `0xc0000094` with firmware 23.x** (#2, #8). Firmware newer than 22.5 is not supported yet. The Setup page now refuses a firmware folder or zip whose name says it is newer than 22.5, and if the test boot crashes this way the message says to use firmware 22.5.0 or older.
 - **"Cannot read this file: the exporter gave no answer"** (#9). Warnings printed around the exporter's answer (seen with newer `prod.keys`) no longer hide it; when there really is no answer, the message shows what the exporter printed.
+- **Windows: Play said "Cannot start" and looked for `mk8d.exe`** after a successful build (#6, #10): a game folder remembered from an older launcher put Play in a developer mode. The Windows launcher now ignores such a folder.
 - The launcher reported version 0.1.0 and kept offering an update; it now knows its own version.
 
 ## Known issues
