@@ -47,7 +47,7 @@ When finished, tell the maintainer in one short message where the folder is. The
 
 ## Windows session note (2026-11-07)
 
-- **Pushed to `windows-port`: only the launcher fix for #6 and #10** (`app/src/main_window.cpp`, Windows only). A game folder saved by an older launcher put
+- **Pushed to `windows-port` and, at the maintainer's request, to `main` (same commit): only the launcher fix for #6 and #10** (`app/src/main_window.cpp`, Windows only). A game folder saved by an older launcher put
   Play into the developer mode that looks for `<folder>\mk8d.exe`, so Play said "Cannot start" after a good build. Checked with a stale saved folder: the Play tab
   now shows the normal "not built yet / Ready" state. You did not touch this file, so there is no overlap with 5a9f91c.
 - **Left out on purpose:** my own versions of the #7, #8 and #2 fixes. I had written them before I saw 5a9f91c. The error-applet and mod-exefs changes do the same
