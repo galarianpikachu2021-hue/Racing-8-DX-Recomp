@@ -42,6 +42,10 @@
 - Then: the backend interface for Metal and Android (GLES/Vulkan on ARM). The model and shader
   translation are already backend-neutral.
 
+## Online Play
+-Figure out network backend with suyu engine
+-Figure out server-side wether it's local or nextendo(ask devs)
+
 ## Open technical issues
 - NAND-installed update boot hang in suyu-cmd (see PIPELINE.md).
 - Strict static was tested in attract mode plus one human-driven race. Still to test: full cups, online
