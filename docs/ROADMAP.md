@@ -43,9 +43,15 @@
   translation are already backend-neutral.
 
 ## Online Play
--Figure out network backend with suyu engine
--Figure out server-side wether it's local or nextendo(ask devs)
+- Figure out network backend with suyu engine
+- Figure out server-side wether it's local or nextendo(ask devs)
 
+## More Updates
+- fix compilation with other update versions 4.0.0/4.0.1
+
+## Fix compiling on Older Versions of GlibC
+- add Support for 2.43(most current distros are still on this)
+- 
 ## Open technical issues
 - NAND-installed update boot hang in suyu-cmd (see PIPELINE.md).
 - Strict static was tested in attract mode plus one human-driven race. Still to test: full cups, online
