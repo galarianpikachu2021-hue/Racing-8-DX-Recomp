@@ -2089,6 +2089,137 @@ index 721934ebf1..25edbc4cf5 100644
      auto layered_ext = LayeredVfsDirectory::MakeLayeredDirectory(std::move(layers_ext));
      if (layered == nullptr && layered_ext == nullptr) {
          return;
+diff --git a/src/core/file_sys/savedata_factory.cpp b/src/core/file_sys/savedata_factory.cpp
+index ca7324ad7f..4a088ea1a7 100644
+--- a/src/core/file_sys/savedata_factory.cpp
++++ b/src/core/file_sys/savedata_factory.cpp
+@@ -9,9 +9,16 @@
+ #include "common/logging.h"
+ #include "common/uuid.h"
+ #include "core/core.h"
++#include "core/hle/service/acc/profile_manager.h"
+ #include "core/file_sys/savedata_factory.h"
+ #include "core/file_sys/vfs/vfs.h"
+ 
++#include <cstdlib>
++#include <filesystem>
++#include <system_error>
++#include "common/fs/fs.h"
++#include "common/fs/path_util.h"
++
+ namespace FileSys {
+ 
+ namespace {
+@@ -65,9 +72,59 @@ SaveDataFactory::SaveDataFactory(Core::System& system_, ProgramId program_id_,
+ 
+ SaveDataFactory::~SaveDataFactory() = default;
+ 
++VirtualDir SaveDataFactory::GameSaveDir(SaveDataSpaceId space, SaveDataType type, u64 title_id, u128 user_id,
++                                        const std::string& nand_path) const {
++    static const bool nand_saves = std::getenv("KARTRECOMP_NAND_SAVES") != nullptr;
++    if (nand_saves || space != SaveDataSpaceId::User || type != SaveDataType::Account) {
++        return nullptr;
++    }
++    if (title_id == 0) {
++        title_id = program_id;
++    }
++    if (title_id != program_id || program_id == 0) {
++        return nullptr;
++    }
++    namespace fs = std::filesystem;
++    std::error_code ec;
++    const fs::path root = Common::FS::GetSuyuPath(Common::FS::SuyuPath::SuyuDir) / "saves";
++    fs::create_directories(root, ec);
++    // The console's first profile owns saves/ itself; any other profile gets saves/user-<id>.
++    const std::string id = fmt::format("{:016X}{:016X}", user_id[1], user_id[0]);
++    std::string owner;
++    if (const auto first = system.GetProfileManager().GetUser(0)) {
++        u128 first_id{};
++        std::memcpy(first_id.data(), first->uuid.data(), sizeof(first_id));
++        owner = fmt::format("{:016X}{:016X}", first_id[1], first_id[0]);
++    }
++    const fs::path target = owner == id ? root : root / ("user-" + id);
++    fs::create_directories(target, ec);
++    // First use: copy an existing save from the NAND folder (the original stays where it was).
++    bool empty = true;
++    for (const auto& e : fs::directory_iterator(target, ec)) {
++        if (e.path().filename().string().rfind("user-", 0) != 0) {
++            empty = false;
++            break;
++        }
++    }
++    if (empty) {
++        const fs::path old_save =
++            Common::FS::GetSuyuPath(Common::FS::SuyuPath::SaveDir) / fs::path(nand_path).relative_path();
++        if (fs::is_directory(old_save, ec) && !fs::is_empty(old_save, ec)) {
++            fs::copy(old_save, target, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
++            LOG_INFO(Service_FS, "save moved to {} (copied from {}; the original is kept){}",
++                     Common::FS::PathToUTF8String(target), Common::FS::PathToUTF8String(old_save),
++                     ec ? fmt::format(", error: {}", ec.message()) : std::string{});
++        }
++    }
++    return system.GetFilesystem()->OpenDirectory(Common::FS::PathToUTF8String(target), OpenMode::ReadWrite);
++}
++
+ VirtualDir SaveDataFactory::Create(SaveDataSpaceId space, const SaveDataAttribute& meta) const {
+     const auto save_directory = GetFullPath(program_id, dir, space, meta.type, meta.program_id,
+                                             meta.user_id, meta.system_save_data_id);
++    if (auto game = GameSaveDir(space, meta.type, meta.program_id, meta.user_id, save_directory)) {
++        return game;
++    }
+ 
+     return dir->CreateDirectoryRelative(save_directory);
+ }
+@@ -77,6 +134,9 @@ VirtualDir SaveDataFactory::Open(SaveDataSpaceId space, const SaveDataAttribute&
+     const auto save_directory = GetFullPath(program_id, dir, space, meta.type, meta.program_id,
+                                             meta.user_id, meta.system_save_data_id);
+ 
++    if (auto game = GameSaveDir(space, meta.type, meta.program_id, meta.user_id, save_directory)) {
++        return game;
++    }
+     auto out = dir->GetDirectoryRelative(save_directory);
+ 
+     if (out == nullptr && (ShouldSaveDataBeAutomaticallyCreated(space, meta) && auto_create)) {
+@@ -160,7 +220,10 @@ SaveDataSize SaveDataFactory::ReadSaveDataSize(SaveDataType type, u64 title_id,
+                                                u128 user_id) const {
+     const auto path =
+         GetFullPath(program_id, dir, SaveDataSpaceId::User, type, title_id, user_id, 0);
+-    const auto relative_dir = GetOrCreateDirectoryRelative(dir, path);
++    auto relative_dir = GameSaveDir(SaveDataSpaceId::User, type, title_id, user_id, path);
++    if (relative_dir == nullptr) {
++        relative_dir = GetOrCreateDirectoryRelative(dir, path);
++    }
+ 
+     const auto size_file = relative_dir->GetFile(GetSaveDataSizeFileName());
+     if (size_file == nullptr || size_file->GetSize() < sizeof(SaveDataSize)) {
+@@ -179,7 +242,10 @@ void SaveDataFactory::WriteSaveDataSize(SaveDataType type, u64 title_id, u128 us
+                                         SaveDataSize new_value) const {
+     const auto path =
+         GetFullPath(program_id, dir, SaveDataSpaceId::User, type, title_id, user_id, 0);
+-    const auto relative_dir = GetOrCreateDirectoryRelative(dir, path);
++    auto relative_dir = GameSaveDir(SaveDataSpaceId::User, type, title_id, user_id, path);
++    if (relative_dir == nullptr) {
++        relative_dir = GetOrCreateDirectoryRelative(dir, path);
++    }
+ 
+     const auto size_file = relative_dir->CreateFile(GetSaveDataSizeFileName());
+     if (size_file == nullptr) {
+diff --git a/src/core/file_sys/savedata_factory.h b/src/core/file_sys/savedata_factory.h
+index 15dd4ec7de..e7cba305b5 100644
+--- a/src/core/file_sys/savedata_factory.h
++++ b/src/core/file_sys/savedata_factory.h
+@@ -47,6 +47,11 @@ public:
+     void SetAutoCreate(bool state);
+ 
+ private:
++    /// kart-recomp: the running game's own account save lives in <data root>/saves (saves/user-<id> for a second console
++    /// profile) instead of deep in the NAND folder. nullptr when `path` is not that save (or KARTRECOMP_NAND_SAVES=1).
++    VirtualDir GameSaveDir(SaveDataSpaceId space, SaveDataType type, u64 title_id, u128 user_id,
++                           const std::string& nand_path) const;
++
+     Core::System& system;
+     ProgramId program_id;
+     VirtualDir dir;
 diff --git a/src/core/frontend/applets/error.cpp b/src/core/frontend/applets/error.cpp
 index 6ec13ff094..cbe24685e3 100644
 --- a/src/core/frontend/applets/error.cpp
@@ -2125,6 +2256,39 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/service/mii/mii_database_manager.cpp b/src/core/hle/service/mii/mii_database_manager.cpp
+index 1dec5ab984..e8ee5a0089 100644
+--- a/src/core/hle/service/mii/mii_database_manager.cpp
++++ b/src/core/hle/service/mii/mii_database_manager.cpp
+@@ -17,6 +17,10 @@
+ #include "core/hle/service/mii/types/char_info.h"
+ #include "core/hle/service/mii/types/store_data.h"
+ 
++#include <cstdlib>
++#include <filesystem>
++#include <system_error>
++
+ namespace Service::Mii {
+ const char* DbFileName = "MiiDatabase.dat";
+ 
+@@ -29,6 +33,17 @@ Result DatabaseManager::MountSaveData() {
+         if (is_test_db) {
+             system_save_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::NANDDir) /
+                               "system/save/8000000000000031";
++        } else if (std::getenv("KARTRECOMP_NAND_SAVES") == nullptr) {
++            // kart-recomp: the Mii database lives in <data root>/miis, where the launcher's Mii editor and the player can
++            // find it. The first time, the console's database is copied over (the original stays in the NAND folder).
++            const auto nand_dir = system_save_dir;
++            system_save_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::SuyuDir) / "miis";
++            std::error_code ec;
++            std::filesystem::create_directories(system_save_dir, ec);
++            if (!std::filesystem::exists(system_save_dir / DbFileName, ec) &&
++                std::filesystem::exists(nand_dir / DbFileName, ec)) {
++                std::filesystem::copy_file(nand_dir / DbFileName, system_save_dir / DbFileName, ec);
++            }
+         }
+ 
+         // mount point should be "mii:"
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..1b76552ee6 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
