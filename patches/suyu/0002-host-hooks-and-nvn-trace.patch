@@ -184,10 +184,10 @@ index 0ae108d9c1..3867111256 100644
  
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
-index 0000000000..bb13d758a4
+index 0000000000..0345e00158
 --- /dev/null
 +++ b/src/common/kart_overlay.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,188 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: input path to the in-game overlay menu (suyu_cmd/native_gpu/overlay_menu.h).
 +// The window and controller drivers push navigation events here; while the menu is open the
@@ -308,6 +308,10 @@ index 0000000000..bb13d758a4
 +    static std::atomic<int> v{-1};
 +    return v;
 +}
++inline std::atomic<bool>& QuitRequest() { // the overlay's "Quit game": the window closes like its close button
++    static std::atomic<bool> v{false};
++    return v;
++}
 +inline std::atomic<int>& RecordRequest() { // -1 none, 0 stop, 1 start
 +    static std::atomic<int> v{-1};
 +    return v;
@@ -334,9 +338,38 @@ index 0000000000..bb13d758a4
 +    std::vector<std::string> devices;      ///< connected controllers (display names)
 +    std::array<int, 4> current{-3, -3, -3, -3};
 +    std::array<int, 4> want{-3, -3, -3, -3};
-+    uint64_t version = 0;                  ///< bumped whenever devices or current change
++    uint64_t version = 0;                  ///< bumped whenever devices, current or bindings change
 +    bool published = false;                ///< the frontend has filled this in at least once
++    // Controls page: what each player's inputs are bound to (kControlInputs order, readable text), and requests for the window
++    // thread (it owns the input library): capture the next press for one input, or a whole-player action.
++    std::array<std::vector<std::string>, 4> bindings;
++    int capture_player = -1, capture_input = -1; ///< request: rebind this input (index into kControlInputs) by the next press
++    bool capture_cancel = false;
++    int capturing_player = -1, capturing_input = -1; ///< the capture running now (-1 = none)
++    std::string capture_message;              ///< the last capture's result, shown under the list
++    std::array<int, 4> action{};              ///< request: 1 = swap A/B and X/Y, 2 = standard layout for the player's device
 +};
++
++/// The inputs the Controls page lists: Settings::NativeButton values, or 100 + Settings::NativeAnalog for the sticks.
++struct ControlInput {
++    const char* label;
++    int code;
++};
++inline constexpr ControlInput kControlInputs[] = {
++    {"A", 0},           {"B", 1},           {"X", 2},           {"Y", 3},
++    {"L", 6},           {"R", 7},           {"ZL", 8},          {"ZR", 9},
++    {"+ (Plus)", 10},   {"- (Minus)", 11},  {"D-pad up", 13},   {"D-pad down", 15},
++    {"D-pad left", 12}, {"D-pad right", 14}, {"Left stick press", 4}, {"Right stick press", 5},
++    {"Home", 18},       {"Capture", 19},    {"Left stick", 100}, {"Right stick", 101},
++};
++inline constexpr int kControlInputCount = static_cast<int>(sizeof(kControlInputs) / sizeof(kControlInputs[0]));
++
++/// True while the window thread waits for the press of a capture: controller presses then go to the input library (not to the
++/// menu), and the keyboard's next key is taken as the binding (Escape cancels).
++inline std::atomic<bool>& Capturing() {
++    static std::atomic<bool> on{false};
++    return on;
++}
 +inline PadState& Pads() {
 +    static PadState pads;
 +    return pads;

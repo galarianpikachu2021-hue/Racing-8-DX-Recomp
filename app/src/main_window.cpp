@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "main_window.h"
+#include "controller_mapper.h"
 #include "mii_editor.h"
 
 #include <QDesktopServices>
@@ -184,8 +185,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         frame_rate_page->setEnabled(!running);
         enhancements_page->setEnabled(!running);
         mii_editor->setLocked(running);
+        controller_mapper->setLocked(running);
         refreshMods();
         if (!running) {
+            refreshControllers();
             loadSettings();
             loadOverlay();
         }
@@ -427,32 +430,8 @@ QWidget* MainWindow::buildFrameRateTab() {
 }
 
 QWidget* MainWindow::buildControllersTab() {
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    auto* note = new QLabel(tr("Player 1 bindings from the game's config. Controllers connected at "
-                               "launch are mapped automatically. A capture-based remapping UI is "
-                               "planned."));
-    note->setWordWrap(true);
-    controls_table = new QTableWidget(0, 2);
-    controls_table->setHorizontalHeaderLabels({tr("Input"), tr("Binding")});
-    controls_table->horizontalHeader()->setStretchLastSection(true);
-    controls_table->verticalHeader()->hide();
-    controls_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    players_table = new QTableWidget(4, 3);
-    players_table->setHorizontalHeaderLabels({tr("Player"), tr("State"), tr("Mapped to")});
-    players_table->horizontalHeader()->setStretchLastSection(true);
-    players_table->verticalHeader()->hide();
-    players_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    players_table->setMaximumHeight(150);
-    auto* assign_note = new QLabel(tr("Players 1 to 4. Controllers are handed out automatically as they connect. To choose who plays on what "
-                                      "(a controller, the keyboard, or nobody), open the in-game menu with F10, or both stick buttons "
-                                      "on a controller, and use the Player 1 to 4 controller rows."));
-    assign_note->setWordWrap(true);
-    layout->addWidget(note);
-    layout->addWidget(assign_note);
-    layout->addWidget(players_table);
-    layout->addWidget(controls_table, 1);
-    return page;
+    controller_mapper = new ControllerMapper;
+    return controller_mapper;
 }
 
 QWidget* MainWindow::buildMiiTab() {
@@ -597,29 +576,8 @@ void MainWindow::refreshDlc() {
 }
 
 void MainWindow::refreshControllers() {
-    for (int p = 0; p < 4; ++p) {
-        const QString prefix = QStringLiteral("player_%1_").arg(p);
-        const bool connected = config.boolValue(kControls, prefix + QStringLiteral("connected"), p == 0);
-        const QString a = config.value(kControls, prefix + QStringLiteral("button_a"));
-        QString device = tr("nothing");
-        if (a.contains(QLatin1String("engine:keyboard"))) device = tr("keyboard");
-        else if (a.contains(QLatin1String("engine:sdl"))) device = tr("controller");
-        else if (a.contains(QLatin1String("engine:joycon"))) device = tr("Joy-Con");
-        players_table->setItem(p, 0, new QTableWidgetItem(tr("Player %1").arg(p + 1)));
-        players_table->setItem(p, 1, new QTableWidgetItem(connected ? tr("connected") : tr("not connected")));
-        players_table->setItem(p, 2, new QTableWidgetItem(device));
-    }
-    controls_table->setRowCount(0);
-    const auto binds = config.keysWithPrefix(kControls, QStringLiteral("player_0_"));
-    for (const auto& [key, value] : binds) {
-        if (!key.contains(QLatin1String("button_")) && !key.contains(QLatin1String("stick"))) {
-            continue;
-        }
-        const int row = controls_table->rowCount();
-        controls_table->insertRow(row);
-        controls_table->setItem(row, 0, new QTableWidgetItem(key.mid(9)));
-        controls_table->setItem(row, 1, new QTableWidgetItem(value));
-    }
+    // The engine answers `--input-capture` before it loads any game, so the plain launch environment is enough.
+    controller_mapper->setPaths(package.configFile(), package.executable(), package.workingDirectory(), package.launchEnvironment());
 }
 
 QProcessEnvironment MainWindow::launchEnvironment() const {

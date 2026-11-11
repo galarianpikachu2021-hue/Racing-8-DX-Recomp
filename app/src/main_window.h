@@ -12,6 +12,7 @@
 #include "mod_addon.h"
 #include "overlay_settings.h"
 
+class ControllerMapper;
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -137,8 +138,7 @@ private:
     bool importing = false;
     ModAddon::PackInfo mod_info;
     // Controllers / DLC
-    QTableWidget* controls_table = nullptr;
-    QTableWidget* players_table = nullptr;
+    ControllerMapper* controller_mapper = nullptr;
     QListWidget* dlc_list = nullptr;
     class MiiEditor* mii_editor = nullptr;
 };

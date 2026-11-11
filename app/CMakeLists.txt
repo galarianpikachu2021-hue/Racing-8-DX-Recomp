@@ -19,6 +19,8 @@ qt_add_executable(kartrecomp
     src/ini_file.h
     src/game_package.h
     src/main_window.cpp
+    src/controller_mapper.cpp
+    src/controller_mapper.h
     src/updater.cpp
     src/updater.h
     src/main_window.h
