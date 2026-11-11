@@ -27,7 +27,7 @@ cp "$eng/engine/ENGINE_VERSION" "$appdir/usr/bin/"
 cp "$eng"/engine/plugins/* "$appdir/usr/bin/plugins/" 2>/dev/null || true
 echo "[2/4] Adding the compiler and the hot block list"
 cp -a "$tc" "$appdir/usr/lib/kartrecomp/toolchain"
-cp "$repo/data/mk8d-3.0.4/hot_blocks.txt" "$appdir/usr/lib/kartrecomp/data/mk8d-3.0.4/"
+for d in "$repo"/data/mk8d-*/; do v="$(basename "$d")"; mkdir -p "$appdir/usr/lib/kartrecomp/data/$v"; cp "$d/hot_blocks.txt" "$appdir/usr/lib/kartrecomp/data/$v/"; done  # one list per supported update
 rm -f "$appdir/AppRun"; cp "$here/AppRun.release" "$appdir/AppRun"; chmod +x "$appdir/AppRun"
 echo "[3/4] Checking that nothing from a game is inside"
 bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.nsz' -o -iname '*.xci' -o -iname '*.xcz' -o -iname '*.nca' -o -iname '*.nso' -o -iname '*.npdm' -o -iname 'prod.keys*' -o -iname 'title.keys*' \

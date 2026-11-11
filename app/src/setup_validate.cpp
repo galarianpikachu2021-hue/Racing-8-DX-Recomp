@@ -23,10 +23,24 @@ QString ValidateUpdate(const NspInfo& info) {
     if (info.titleId != kUpdateTitleId)
         return QStringLiteral("This is not the Mario Kart 8 Deluxe update (title id %1, expected %2).").arg(Hex(info.titleId), Hex(kUpdateTitleId));
     if (!info.aarch64)
-        return QStringLiteral("This update is a 32-bit build (3.0.3 or older). Only update 3.0.4 can be recompiled.");
-    if (info.version != kSupportedUpdateVersion)
-        return QStringLiteral("This is update version %1; only update 3.0.4 (version %2) is supported.").arg(info.version).arg(kSupportedUpdateVersion);
+        return QStringLiteral("This update is a 32-bit build (3.0.3 or older; files named \"v4.0.0\" are often this one). Only updates 3.0.4 "
+                              "and 4.0.1 can be recompiled.");
+    if (UpdateName(info.version).isEmpty())
+        return QStringLiteral("This is update version %1; only updates 3.0.4 (version %2) and 4.0.1 (version %3) are supported.")
+            .arg(info.version).arg(kSupportedUpdates[0].version).arg(kSupportedUpdates[1].version);
     return {};
+}
+
+QString UpdateName(quint32 version) {
+    for (const auto& u : kSupportedUpdates)
+        if (u.version == version) return QString::fromLatin1(u.name);
+    return {};
+}
+
+QString HotListFor(const QString& list304, const QString& updateName) {
+    if (updateName.isEmpty() || updateName == QLatin1String("3.0.4")) return list304;
+    QString out = list304;
+    return out.replace(QStringLiteral("mk8d-3.0.4"), QStringLiteral("mk8d-") + updateName);
 }
 
 QString FirmwareTooNew(const QString& path) {

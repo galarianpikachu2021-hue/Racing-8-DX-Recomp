@@ -36,6 +36,10 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     report(0, QStringLiteral("Checking your files"));
     const auto reader = [&](const QString& p) { return ReadNspInfo(paths.exporter, p, in.keys); };
     if (const QString why = ValidateInputs(in, reader); !why.isEmpty()) return {false, why};
+    // Each supported update has its own hot block list (data/mk8d-<version>/hot_blocks.txt); without one every block is compiled cold.
+    const QString updateName = UpdateName(reader(in.update).version);
+    QString hotList = HotListFor(paths.hotList, updateName);
+    if (!QFileInfo::exists(hotList)) hotList.clear();
     if (Cancelled(cancel)) return {false, QStringLiteral("Cancelled.")};
     const int jobs = BuildRunner::JobsForRam(AvailableRam(), QThread::idealThreadCount());
     if (jobs == 0) return {false, QStringLiteral("Not enough free memory: close other programs (the build needs at least 3 GB free) and try again.")};
@@ -76,9 +80,9 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     plan.exportDir = layout.exportDir();
     plan.workDir = layout.workDir();
     plan.outDir = layout.moduleDir();
-    plan.hotList = paths.hotList;
+    plan.hotList = hotList;
     plan.jobs = jobs;
-    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(paths.hotList);
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName;
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QStringLiteral("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);

@@ -107,13 +107,28 @@ private slots:
         const QString why = ValidateUpdate(i);
         QVERIFY2(why.contains("32-bit"), qPrintable(why));
     }
-    void aNewerUpdateIsRefusedAsUnsupported() {
+    void update401IsAccepted() {
         NspInfo i;
         i.titleId = 0x0100152000022800ULL;
-        i.version = 23u << 16;
+        i.version = 23u << 16; // 4.0.1
         i.aarch64 = true;
         i.hasProgram = true;
-        QVERIFY(ValidateUpdate(i).contains("3.0.4"));
+        QVERIFY2(ValidateUpdate(i).isEmpty(), qPrintable(ValidateUpdate(i)));
+        QCOMPARE(UpdateName(23u << 16), QString("4.0.1"));
+        QCOMPARE(UpdateName(20u << 16), QString("3.0.4"));
+    }
+    void anUnknownUpdateIsRefusedNamingTheSupportedOnes() {
+        NspInfo i;
+        i.titleId = 0x0100152000022800ULL;
+        i.version = 24u << 16;
+        i.aarch64 = true;
+        i.hasProgram = true;
+        const QString why = ValidateUpdate(i);
+        QVERIFY2(why.contains("3.0.4") && why.contains("4.0.1"), qPrintable(why));
+    }
+    void hotListFollowsTheUpdate() {
+        QCOMPARE(HotListFor("/x/data/mk8d-3.0.4/hot_blocks.txt", "4.0.1"), QString("/x/data/mk8d-4.0.1/hot_blocks.txt"));
+        QCOMPARE(HotListFor("/x/data/mk8d-3.0.4/hot_blocks.txt", "3.0.4"), QString("/x/data/mk8d-3.0.4/hot_blocks.txt"));
     }
     void aBaseNspFromAnotherGameNamesItsTitleId() {
         NspInfo i;

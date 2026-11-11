@@ -4,7 +4,7 @@ param([Parameter(Mandatory = $true)][string]$Dir, [switch]$RequirePlugins)
 $d = (Resolve-Path $Dir).Path
 $fail = @()
 foreach ($f in 'kartrecomp.exe', 'kartrecomp-setup.exe', 'kartrecomp-build.exe', 'engine\mk8d-engine.exe', 'engine\ENGINE_VERSION', 'tools\kartrecomp-export.exe',
-               'toolchain\bin\clang.exe', 'toolchain\bin\ld.lld.exe', 'data\mk8d-3.0.4\hot_blocks.txt', 'README-WINDOWS.txt', 'Collect-Logs.cmd', 'Diagnose-System.ps1') {
+               'toolchain\bin\clang.exe', 'toolchain\bin\ld.lld.exe', 'data\mk8d-3.0.4\hot_blocks.txt', 'data\mk8d-4.0.1\hot_blocks.txt', 'README-WINDOWS.txt', 'Collect-Logs.cmd', 'Diagnose-System.ps1') {
     if (-not (Test-Path "$d\$f")) { $fail += "missing $f" }
 }
 if ($RequirePlugins) {

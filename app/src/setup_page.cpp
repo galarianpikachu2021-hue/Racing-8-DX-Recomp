@@ -36,7 +36,7 @@ SetupPage::SetupPage(QWidget* parent)
     auto* grid = new QGridLayout;
     top->addLayout(grid);
     base = addRow(grid, 0, tr("Base game"), tr("Mario Kart 8 Deluxe (.nsp)"), [this] { pick(base, false, tr("Select the base game"), tr("NSP files (*.nsp)")); });
-    update = addRow(grid, 1, tr("Update 3.0.4"), tr("The 3.0.4 update (.nsp)"), [this] { pick(update, false, tr("Select update 3.0.4"), tr("NSP files (*.nsp)")); });
+    update = addRow(grid, 1, tr("Update"), tr("The 3.0.4 or 4.0.1 update (.nsp)"), [this] { pick(update, false, tr("Select the 3.0.4 or 4.0.1 update"), tr("NSP files (*.nsp)")); });
     dlcRow = addRow(grid, 2, tr("DLC (optional)"), tr("Booster Course Pass and other add-ons (.nsp)"), [this] { pickDlc(); });
     keys = addRow(grid, 3, tr("Keys"), tr("prod.keys from your own console"), [this] { pick(keys, false, tr("Select prod.keys"), tr("Key files (*.keys)")); });
     firmware = addRow(grid, 4, tr("Firmware"), tr("Folder of firmware files, or a .zip"), [this] {
