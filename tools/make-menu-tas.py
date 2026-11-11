@@ -102,6 +102,18 @@ def main() -> int:
                 buttons += ";KEY_R"
                 x = (-24000 if n % 2 == 0 else 24000) if k >= 8 else 0
         lines.append(f"{f} {buttons} {x};0 0;0")
+    # --hz=N: the game runs at N frames per second (KARTRECOMP_VSYNC_HZ); every input frame is scaled by N/60 so the inputs land at
+    # the same moments of time (the TAS advances one step per game frame). For the true frame rate experiments.
+    hz = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--hz=")), 60)
+    if hz != 60:
+        scaled = {}
+        for line in lines:
+            f, rest = line.split(" ", 1)
+            base = int(f)
+            # Keep held inputs held: a run of consecutive frames becomes a run of N/60 times as many frames.
+            for k in range(round(base * hz / 60), round((base + 1) * hz / 60)):
+                scaled.setdefault(k, rest)
+        lines = [f"{k} {v}" for k, v in scaled.items()]
     lines.sort(key=lambda line: int(line.split()[0]))
     with open(args[0], "w") as out:
         out.write("\n".join(lines) + "\n")

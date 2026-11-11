@@ -2256,6 +2256,54 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/svc/svc_thread.cpp b/src/core/hle/kernel/svc/svc_thread.cpp
+index 79c6ac2079..c9ac4da74e 100644
+--- a/src/core/hle/kernel/svc/svc_thread.cpp
++++ b/src/core/hle/kernel/svc/svc_thread.cpp
+@@ -5,6 +5,11 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "common/scope_exit.h"
++#include <algorithm>
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <vector>
+ #include "core/core.h"
+ #include "core/core_timing.h"
+ #include "core/hle/kernel/k_hardware_timer.h"
+@@ -123,6 +128,31 @@ void SleepThread(Core::System& system, s64 ns) {
+ 
+     LOG_TRACE(Kernel_SVC, "called nanoseconds={}", ns);
+ 
++    // kart-recomp research aid (KARTRECOMP_SLEEP_TRACE=1): which code sleeps how long, by return address; logged every 2000 sleeps.
++    static const bool sleep_trace = std::getenv("KARTRECOMP_SLEEP_TRACE") != nullptr;
++    if (sleep_trace && ns > 0) {
++        static std::mutex mx;
++        static std::map<std::pair<u64, u64>, std::pair<u64, s64>> seen; // (lr, thread id) -> count, total ns
++        static u64 calls = 0;
++        Svc::ThreadContext ctx{};
++        if (auto* arm = GetCurrentProcess(kernel).GetArmInterface(kernel.CurrentPhysicalCoreIndex())) arm->GetContext(ctx);
++        std::scoped_lock lk{mx};
++        auto& e = seen[{ctx.lr, GetCurrentThread(kernel).GetThreadId()}];
++        ++e.first;
++        e.second += ns;
++        if (++calls % 2000 == 0) {
++            std::vector<std::pair<u64, std::pair<std::pair<u64, u64>, std::pair<u64, s64>>>> v;
++            for (const auto& [k, c] : seen) v.push_back({c.first, {k, c}});
++            std::sort(v.rbegin(), v.rend());
++            for (size_t i = 0; i < v.size() && i < 8; ++i) {
++                const auto& [k, c] = v[i].second;
++                LOG_INFO(Kernel_SVC, "sleep trace: lr={:#x} thread={} calls={} avg={:.3f} ms", k.first, k.second, c.first,
++                         static_cast<double>(c.second) / c.first / 1e6);
++            }
++            seen.clear();
++        }
++    }
++
+     // When the input tick is positive, sleep.
+     if (ns > 0) {
+         // Convert the timeout from nanoseconds to ticks.
 diff --git a/src/core/hle/service/mii/mii_database_manager.cpp b/src/core/hle/service/mii/mii_database_manager.cpp
 index 1dec5ab984..e8ee5a0089 100644
 --- a/src/core/hle/service/mii/mii_database_manager.cpp
@@ -2442,10 +2490,10 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
-index 622b67a83c..953767cd5e 100644
+index 622b67a83c..056ebdc5a4 100644
 --- a/src/core/hle/service/vi/conductor.cpp
 +++ b/src/core/hle/service/vi/conductor.cpp
-@@ -7,12 +7,33 @@
+@@ -7,12 +7,34 @@
  #include "common/settings.h"
  #include "core/core.h"
  #include "core/core_timing.h"
@@ -2461,11 +2509,12 @@ index 622b67a83c..953767cd5e 100644
 +
 +// The emulated display's refresh: 60 Hz like the console. KARTRECOMP_VSYNC_HZ (30-360) changes it, for the true frame rate
 +// experiments: the game makes one frame per vsync.
-+const auto FrameNs = [] {
++const int DisplayHz = [] {
 +    int hz = 60;
 +    if (const char* v = std::getenv("KARTRECOMP_VSYNC_HZ")) hz = std::clamp(std::atoi(v), 30, 360);
-+    return std::chrono::nanoseconds{1000000000 / hz};
++    return hz;
 +}();
++const auto FrameNs = std::chrono::nanoseconds{1000000000 / DisplayHz};
 +
 +namespace {
 +Service::VI::Conductor* g_pacing_conductor = nullptr;
@@ -2480,7 +2529,7 @@ index 622b67a83c..953767cd5e 100644
  
  namespace Service::VI {
  
-@@ -22,6 +43,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -22,6 +44,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
          m_vsync_managers.insert({display.GetId(), VsyncManager{}});
      });
  
@@ -2497,7 +2546,7 @@ index 622b67a83c..953767cd5e 100644
      if (system.IsMulticore()) {
          m_event = Core::Timing::CreateEvent(
              "ScreenComposition",
-@@ -47,6 +78,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -47,6 +79,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
  }
  
  Conductor::~Conductor() {
@@ -2506,7 +2555,7 @@ index 622b67a83c..953767cd5e 100644
      m_system.CoreTiming().UnscheduleEvent(m_event);
  
      if (m_system.IsMulticore()) {
-@@ -67,7 +100,39 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
+@@ -67,7 +101,39 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
      }
  }
  
@@ -2546,6 +2595,15 @@ index 622b67a83c..953767cd5e 100644
      for (auto& [display_id, manager] : m_vsync_managers) {
          m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
          manager.SignalVsync(m_system.Kernel());
+@@ -110,7 +176,7 @@ s64 Conductor::GetNextTicks() const {
+         speed_scale = 1.f;
+     }
+ 
+-    const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);
++    const f32 effective_fps = static_cast<f32>(DisplayHz) / static_cast<f32>(m_swap_interval);
+     return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));
+ }
+ 
 diff --git a/src/core/hle/service/vi/conductor.h b/src/core/hle/service/vi/conductor.h
 index cf43a50363..decb91b0f7 100644
 --- a/src/core/hle/service/vi/conductor.h
