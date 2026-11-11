@@ -71,8 +71,11 @@ def main() -> int:
     # only opens once the race has started: + (pause), L, + (resume) after "GO",
     # with the accelerator released (A would pick "Continue"). "GO" is around frame 2325 on a normal
     # load; the presses are 375 frames later (menu open at 2700, L held 10 frames at 2800, resume at 2920 so the toggle always registers first) so a slower load still lands them after the countdown.
-    pause_window = range(2690, 2960) if centre_stick else range(0)
-    pause_toggle = {2700: "KEY_PLUS", 2800: "KEY_L", 2920: "KEY_PLUS"}
+    # 2026-11-11: loads got faster ("GO" at frame 2220 with the v0.2.3 engine) and the game's own Auto-accelerate is on, so the
+    # kart drives off at GO by itself and reached the first wall (about 2600) before the old 2700 toggle. Pause at 2300 instead,
+    # still on the opening straight; 80 frames of margin if a load is slower. While paused the kart does not move.
+    pause_window = range(2290, 2480) if centre_stick else range(0)
+    pause_toggle = {2300: "KEY_PLUS", 2370: "KEY_L", 2450: "KEY_PLUS"}
     # Race: accelerate, weave gently (8 s period), use an item every 5 s.
     for f in range(race_start, 12000):
         if f in pause_window:
