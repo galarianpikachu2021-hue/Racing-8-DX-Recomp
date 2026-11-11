@@ -41,7 +41,7 @@ Not done: HDR-linear input for FSR 4
 
 ## Build
 
-CI (`.github/workflows/windows-engine.yml`): `ffx-prepared` (Linux: the SDK with our edits plus the shader blobs), then `plugins` (Windows/MSVC:
+CI (`.github/workflows/windows-engine.yml`, runs by hand only; releases reuse the plugins of the previous zip or build them locally): `ffx-prepared` (Linux: the SDK with our edits plus the shader blobs), then `plugins` (Windows/MSVC:
 `plugins\fsr3\build-windows.ps1`, `plugins\fsr4\build-windows.ps1`, `tests\windows\test_plugins.ps1`), then `bundle`. DLSS: the `dlss-local` job
 (runs only when a pushed commit message contains `[dlss]`; 1-day artifact) or `plugins\dlss\build-windows.ps1` on a machine with Visual Studio Build Tools and the Vulkan SDK.
 

@@ -1,58 +1,49 @@
 # Roadmap
 
-## v0.1: launcher skeleton (now)
-- Qt6 app with Play / Display / Frame rate / Controllers / Miis / DLC / Setup tabs.
-- Reads and writes the game's `user/config/sdl2-config.ini`. Starts the static binary with the explicit
-  content arguments and any DLC.
+Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is known.
 
-## v0.2: settings that matter
-- **Resolution:** `resolution_setup` (enum `Res1_4X`…`Res8X`, where `Res1X` = 3), plus aspect ratio,
-  scaling filter, AA, anisotropy and vsync.
-- **Controllers:** list SDL devices and capture button and axis bindings into `player_N_*` keys. Support
-  multiple players and docked/handheld.
-- **Frame rate:** speed limit / unlocked (`use_speed_limit`, `speed_limit`). True custom frame rates above
-  60 need game-side changes, because MK8D's simulation is tied to 60 Hz. Options: (a) a runtime patch layer
-  applied at load (suyu supports IPS/cheats under `load/`), or (b) patches applied to the generated C before
-  compiling. Every patch must be generated from the user's own game, never shipped as game bytes.
-- **Miis:** manual Mii entry. Mii data lives in the system save `8000000000000030` (`MiiDatabase.dat`) in
-  the package's NAND. Build an editor for the CharInfo fields (name, face, hair, colors) that writes valid
-  records with correct CRCs.
+## Done
 
-## v0.3: one-click build
-- Setup wizard: pick the dump, keys and firmware, and verify versions (3.0.4 check) and key presence.
-- Drive the pipeline in docs/PIPELINE.md from the app: build suyu, export, registry, compile, package.
-  Show progress, cap memory, make it resumable.
-
-## v0.4: Windows
-- MSVC/clang-cl build of the launcher and of suyu-cmd-static. The upstream Windows "Build" export already
-  writes the registry.
-- Replace `systemd-run` memory caps with Job Objects. Use the `%APPDATA%` and portable-data paths.
-  Package with `windeployqt`.
-
-## Native GPU (in progress, see NATIVE_GPU.md)
-- Done: NVN → Vulkan for full race frames with the emulated GPU off (`KARTRECOMP_NATIVE_GPU=native`, or
-  Renderer: Native Vulkan in the launcher), about 60 fps.
-- Next:
-  - ASTC textures (UI icons).
-  - Compute dispatches.
-  - Parallel pipeline builds for course-start hitches.
-  - Persistent vertex/index buffers (cuts about 20–30 MB/frame of uploads).
-  - Resolution scaling and FSR for the native path.
-  - A menu and HUD pass with real input.
-- Then: the backend interface for Metal and Android (GLES/Vulkan on ARM). The model and shader
-  translation are already backend-neutral.
+- **Launcher** (Qt 6): Setup (build the game from your own NSPs, keys, firmware), Play, Display, Frame rate, Enhancements, Controllers,
+  Miis, DLC and Mods tabs; console language; updater; `--nolauncher` to start the game directly.
+- **One-click build**: version and key checks on every file, a resumable tiered build (about 5 minutes on 8 threads), a test boot that
+  proves every instruction runs recompiled (no JIT, ever).
+- **Native renderer** (NVN to Vulkan, no emulated GPU), 720p to 4K output, render scale 33-200%, DLAA, FSR 1, FSR 3.1, FSR 3 frame
+  generation, built-in frame interpolation, HDR10, motion vectors, 1-4 player split-screen, in-game menu (F10 / L3+R3).
+- **Windows** (v0.2.1): portable zip, FSR 3/FSR 4 plugins, DLSS built by the user, mimalloc.
+- **DLSS on Linux** (v0.2.1): the launcher builds the plugin on the user's PC; nothing of NVIDIA's ships.
+- **Older Linux distros** (v0.2.3): the AppImage is built on Ubuntu 22.04 and needs glibc 2.35 at most, which covers distros on 2.43
+  (Fedora 44 and similar) and SteamOS (`packaging/linux/build-release-ubuntu2204.sh`).
+- **Shader pipelines** (v0.2.1): pipeline count stays flat during a race (was 9,000-17,000 duplicates); static vertex buffers are not
+  re-copied each frame.
 
 ## Online Play
-- Figure out network backend with suyu engine
-- Figure out server-side wether it's local or nextendo(ask devs)
+- Figure out the network backend with the suyu engine (today the game's online menu fails to connect and returns to the main menu).
+- Figure out the server side: local (LAN / self-hosted) or a public service; ask the devs of the existing community servers before
+  building anything.
 
-## More Updates
-- fix compilation with other update versions 4.0.0/4.0.1
+## More updates
+- Support the game's newer updates (4.0.0 / 4.0.1) besides 3.0.4. Each version is a new recompile, and every game-specific piece (the
+  explicit module pair, the camera/table addresses the renderer and the crash guards use, the CTGP hooks, `data/mk8d-3.0.4/hot_blocks.txt`)
+  has to be found again for it. Needs the user's own update NSPs.
 
-## Fix compiling on Older Versions of GlibC
-- add Support for 2.43(most current distros are still on this)
-- 
+## Firmware
+- Firmware newer than 22.5 (23.x) crashes the game's start (integer division by zero); the launcher refuses such firmware by its name.
+  Find the cause so newer firmware works.
+
+## Performance
+- Windows: frame pacing on some PCs (#14, #20): shader-compile stalls at load, CPU time in the recompiled code.
+- Split-screen with 2+ players drops to about 30 fps on some PCs.
+- Load-time pipeline stalls (about 3 s at startup, 220-400 ms at race load).
+
+## Later
+- Custom frame rates above 60 (the simulation is tied to 60 Hz; needs game-side patches generated from the user's own game).
+- Mii editor (CharInfo records with correct CRCs in the system save).
+- More CTGP DX features (cup-screen rows, speedometer; the pack's own code is 32-bit and cannot run in this build).
+- Android (Snapdragon handhelds, dual-screen): the renderer and shader translation are backend-neutral.
+- Bloom at 150%/200% render scale.
+
 ## Open technical issues
-- NAND-installed update boot hang in suyu-cmd (see PIPELINE.md).
-- Strict static was tested in attract mode plus one human-driven race. Still to test: full cups, online
-  (expected unavailable), every DLC course, and save round-trips.
+- Windows: divide-by-zero crash at start on some PCs (#8, `mk8d-engine.exe+0x2e00eb`).
+- An intermittent camera-table null call at race load (recovered since v0.2.1, cause unknown).
+- NAND-installed update boot hang in suyu-cmd (see PIPELINE.md); the launcher always passes the explicit base + update pair instead.

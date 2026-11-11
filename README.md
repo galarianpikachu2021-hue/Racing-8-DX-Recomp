@@ -28,11 +28,12 @@ Everything above is a row in the F10 menu. The launcher's Enhancements tab sets 
 | FSR 3.1 upscaling plugin, FSR 3 frame generation plugin | working on AMD (RDNA 4) / Vulkan; the SDK is fetched, never committed |
 | Built-in frame interpolator | working |
 | HDR10 output | working (needs the display in HDR mode) |
-| **DLSS upscaling / DLSS frame generation** | **experimental: compiled, not yet run on NVIDIA hardware** |
-| **FSR 4.1.2** (Windows) | AMD's official Vulkan release (SDK 2.4.0, 2026-10-28): plugin written and builds on CI, **not yet run on a GPU**; model select (FP8 / INT8 / lightweight INT8) in the in-game menu. See `docs/WINDOWS_PLUGINS.md` |
-| Linux (AppImage packaging, launcher with updater, mods) | working |
-| Android (Snapdragon handhelds, including dual-screen) | in development, see [docs/ANDROID.md](docs/ANDROID.md) <-- not created yet |
-| Windows | supports Windows 10/11 64-bit |
+| **DLSS upscaling / DLSS frame generation** | Windows: tested by the maintainer on an NVIDIA PC (you build the plugin yourself). Linux: the launcher's **Set up NVIDIA DLSS** button builds it on your PC; **not yet run on an NVIDIA GPU on Linux** |
+| **FSR 4.1.2** (Windows) | AMD's official Vulkan release (SDK 2.4.0, 2026-10-28): plugin in the Windows zip (AMD's signed DLLs, unmodified, with their licence), **not yet run on an RX 9000**; model select (FP8 / INT8 / lightweight INT8) in the in-game menu. See `docs/WINDOWS_PLUGINS.md` |
+| Linux (AppImage, launcher with updater, mods) | working; built on Ubuntu 22.04, so it needs glibc 2.35+ (Ubuntu 22.04+, Fedora, SteamOS, Debian 12+) |
+| Android (Snapdragon handhelds, including dual-screen) | in development (no document yet) |
+| Windows | supports Windows 10/11 64-bit (portable zip, built locally with MSVC) |
+
 
 ## How it works
 
@@ -61,6 +62,10 @@ The full recipe, including memory and time costs, is in [docs/PIPELINE.md](docs/
 | Controller auto-mapping (SDL3), 1 to 4 players | working (Steam Controller goes through SDL3 too, not yet tried on real hardware) |
 | Saves, config and logs in a portable `user/` folder (or the XDG folders in the AppImage) | working |
 | Updater: checks this repository's releases (a source checkout pulls and rebuilds, an AppImage replaces itself) | working |
+| Console language (launcher, Play tab) | working |
+| Start without the launcher (`--nolauncher`, for TV / Steam) | working |
+| Online play | not supported (the game shows its "can't connect" error and returns to the menu); see the [roadmap](docs/ROADMAP.md) |
+| Game versions | only the **3.0.4** update; firmware **22.5.0 or older** |
 | Custom frame rates above 60 | planned (needs game-side patches, see the [roadmap](docs/ROADMAP.md)) |
 
 ## Building the launcher
@@ -71,6 +76,9 @@ cmake -S . -B build -G Ninja && cmake --build build
 ```
 
 You need Qt 6 (Widgets, Network) and CMake 3.22 or newer.
+
+Release builds: Linux `packaging/linux/build-release-ubuntu2204.sh` (podman, Ubuntu 22.04: engine, exporter, launcher and the AppImage);
+Windows: built locally with Visual Studio 2022 and Qt 6.7 (steps in `COOPERATE.md` and `docs/HANDOFF-WINDOWS.md`). GitHub Actions only run by hand.
 
 ## Credits
 

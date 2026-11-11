@@ -740,3 +740,27 @@ deef0: mov x22,x19 ; ldr x20,[x22,#0x30]! ; mov x0,x20 ; ldrsh x21,[x22,#0x854] 
 def08: ldr x8,[x20,#0x38] ; ldr x8,[x8,x21,lsl#3] ; ldr x0,[x8] ; ldr x8,[x0] ; ldr x8,[x8,#0x78] ; ldrsh w1,[x22,#0x856] ; blr x8
 ```
 The signed 16-bit index at object+0x884 is -1 ("none"), the array lookup at index -1 yields a null object, the virtual call jumps to 0. The gate before (deed4) tests a state value against bit mask 0x2085a00c2. One direct writer found: `strh` at block main+0x71dc10 (`[x21+0x884]`); stores through other bases / wider stores not searched yet. Hypothesis: load timing (worse with many mods, slower code): the reader runs before the writer on our scheduling. **Root cause (#########): a character mod, not the recompiler.** The index is a driver-skeleton BONE index: the writer (main+0xd5fac..0xd6054) calls the bone lookup main+0x69c6a0 with names from rodata (`Hair1`, `Hair`, `HairL`/`HairR`, `Crown1`, `Flag`, ...) and stores -1 when the model has none of them; the reader assumes the bone exists for that character's hair/accessory type. With the user's mods (character model swaps) the replay crashed 2 of 8 runs (the CPU opponents are random, so only races with the swapped character crash); with `KARTRECOMP_NO_MODS=1` 0 of 6. Not fixed (a guard at main+0xdeef0 would have to supply a valid matrix: main+0xdef24 reads [x0+0x30]); tests run without mods.
+
+## Renderer and engine changes in v0.2.1-v0.2.3
+
+- **Pipeline key** (Windows session, v0.2.1): the key is built from exactly the state `CreatePipeline` reads. A race used to reach
+  9,000-17,000 pipelines for about 2,000 programs; now it stays under about 800 (Linux: 676, flat from frame ~3,300).
+- **Static vertex buffers** are no longer snapshotted every frame (a buffer whose sampled bytes stay unchanged for 240 frames stops being
+  copied; `KARTRECOMP_SNAPSHOT_ALL_VB=1` turns this off), and `PrebuildPipelines` only walks a frame when something can be new
+  (`KARTRECOMP_ALWAYS_PREBUILD=1`). Most of the Windows frame-pacing gain came from the snapshots.
+- **Menus at the output size:** the render scale and the upscaler apply only to race frames (a HUD pass plus a game camera found the frame
+  before); character/kart select and other menus draw at the output size. `KARTRECOMP_MENU_SCALE=1` restores the old rule. Log lines:
+  `render scale on (race)` / `off (menu)`.
+- **Shadow-map bias x4:** depth-only passes (shadow maps) use 4x the game's polygon offset, which removes the diagonal self-shadow acne on
+  karts and characters; colour passes (decals) keep the game's values. `KARTRECOMP_BIAS_MUL=<n>` overrides (1 = the game's value).
+- **Null-call recovery** (`arm_recomp.cpp`): a guest call to address 0 returns to the caller instead of ending the thread (the camera code
+  at main+0xDEF08 indexes a table with -1 at some race loads and on some modded drivers in character select).
+  `KARTRECOMP_NO_NULLCALL_RECOVERY=1` turns it off.
+- **Supersampling:** the scene is averaged down right after the 3D passes (`RunSupersamplePoint`); bloom at 150%/200% is still reported wrong.
+- **Screenshots:** `KARTRECOMP_NATIVE_SHOT_MAX=2560x1440` writes `shot_` files at full size.
+- **Plugins** are also looked for in the user's folder (`$XDG_DATA_HOME/kartrecomp/plugins`, or `KARTRECOMP_PLUGIN_DIR`), where the
+  launcher installs the DLSS plugin it builds on the user's PC.
+- **Error applet:** closes at once (no error window in this frontend), so the game returns from its error screens (Online Play).
+- **Mod exefs** folders are ignored in the no-JIT build (code mods cannot run on recompiled code); their romfs still applies.
+- Windows only: mimalloc for `operator new/delete`, P-core pinning on hybrid Intel CPUs, F11 fullscreen toggle, crash stacks in
+  `crash_stack.txt`.

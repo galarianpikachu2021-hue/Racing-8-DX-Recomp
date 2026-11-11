@@ -70,7 +70,8 @@ Runtime layout (AppRun sets `KARTRECOMP_APP_NAME=kartrecomp`, which switches the
 - `~/.config/kartrecomp/`: `sdl2-config.ini`, `kartrecomp_overlay.ini`, optional `launch.env` (VAR=value lines, e.g.
   `KARTRECOMP_NATIVE_HEIGHT=1440`, `KARTRECOMP_PIN=2,3,4,5`).
 - `~/.cache/kartrecomp/`: shader/pipeline caches.
-Built on Arch (current glibc): runs on distros with the same or newer glibc; an older-base build is needed for others.
+Release builds come from an Ubuntu 22.04 container (`packaging/linux/build-release-ubuntu2204.sh`), so they need glibc 2.35 at most; a build made
+straight on a newer distro only runs on that glibc or newer (`make-release-appimage.sh` refuses it unless `KARTRECOMP_ALLOW_NEW_GLIBC=1`).
 
 ## Fast compile of the generated code (2026-10-23)
 - The recompiler now writes 5000-block units (was 20000; `kBlocksPerUnit` in `arm64_to_c.h`) and the generated CMake assumes
@@ -114,7 +115,7 @@ Generator finding: the top-level `project(<game name>_recompiled C)` is unquoted
 CMake; the exporter now passes `mk8d` as the name.
 
 ## From your files to the game: the builder (Linux, 2026-11-04)
-The release AppImage (`Racing_8_DX_Recomp-x86_64.AppImage`, about 260 MB; it was `KartRecomp-Launcher-x86_64.AppImage` up to 0.2.2; built in an Ubuntu 22.04 container so it needs glibc 2.35 at most) is the whole pipeline: launcher (Setup page), `kartrecomp-setup`
+The release AppImage (`Racing_8_DX_Recomp-x86_64.AppImage`, about 200 MB; it was `KartRecomp-Launcher-x86_64.AppImage` up to 0.2.2; built in an Ubuntu 22.04 container so it needs glibc 2.35 at most) is the whole pipeline: launcher (Setup page), `kartrecomp-setup`
 (the same pipeline from a shell: `AppRun setup --base .. --update .. --keys .. --firmware ..`), `kartrecomp-build` (units to modules),
 `kartrecomp-export` (NSP to C), `mk8d-engine` (the prebuilt runtime, no game code) and the toolchain (LLVM 20.1.8 clang + lld, compiler-rt
 builtins, a glibc 2.31 sysroot, so the modules need glibc 2.14 at most). `packaging/make-release-appimage.sh` assembles it and refuses to
@@ -129,5 +130,11 @@ if anything game-derived is inside.
   samples 38-39 k vs 40-41 k (no slower).
 - Tests: `ctest` (unit split, build runner, validators, install, verification, game package, pipeline), `tests/test_module_guard.sh`,
   `tests/test_toolchain.sh`, `tools/spike/export-smoke.sh`, `tests/acceptance-linux.sh`.
-- Not done yet: the Windows build of the same pipeline (docs/superpowers/plans/2026-11-04-nsp-to-game-windows.md), a glibc-old base for the
-  engine itself (built on this PC's glibc 2.44), trimming the toolchain (485 MB unpacked, 128 MB compressed).
+- Windows: the same pipeline ships in the portable zip (llvm-mingw toolchain, `kartrecomp-export.exe`, `mk8d-engine.exe`), built locally
+  with MSVC (see `docs/HANDOFF-WINDOWS.md`).
+- Release AppImage, step by step: `packaging/windows/fetch-fork.sh <fork>` (pinned upstream + `patches/suyu`), then
+  `packaging/linux/build-release-ubuntu2204.sh <fork> <out>` (podman container `kr235`: g++-12, the engine's dependencies built by the fork's
+  CPM with SDL3/OpenSSL/FFmpeg from source, Qt 6.7.3 from aqtinstall, `ctest`, then `make-release-appimage.sh` with the glibc floor on).
+  Keep `KARTRECOMP_ENGINE_VERSION` at the previous release's stamp when generated code and the module ABI did not change (v0.2.2/v0.2.3:
+  `d201f1ec0e-abi6`), so players' built games stay valid.
+- Not done yet: trimming the toolchain (485 MB unpacked, 128 MB compressed).

@@ -16,7 +16,7 @@ The game binary carries no third-party SDK code: backends are shared libraries l
 | Camera jitter (`KARTRECOMP_JITTER=1`, overlay row) | works (render-pixel offsets) |
 | Motion vectors | **missing**: the hook passes an RG16F image of zeros |
 | FSR 3.1 plugin (AMD FidelityFX SDK v1.1.4, last release with a Vulkan backend) | done, `plugins/fsr3/` (see below) |
-| FSR 4.1.2 (SDK 2.4.0 added official Vulkan, Windows DLLs) | plugin `plugins/fsr4/`, builds on CI; untested on a GPU; see `docs/WINDOWS_PLUGINS.md` |
+| FSR 4.1.2 (SDK 2.4.0 added official Vulkan, Windows DLLs) | plugin `plugins/fsr4/` (in the Windows zip since v0.2.1); not yet run on an RX 9000; see `docs/WINDOWS_PLUGINS.md` |
 | DLSS (NVIDIA) | plugin `plugins/dlss/`; never redistributed. Windows: `build-windows.ps1`. Linux: the launcher's **Set up NVIDIA DLSS** button (Enhancements tab) runs `plugins/dlss/install-linux.sh`, which downloads NVIDIA's SDK to the user's PC, builds the plugin with the PC's own g++ and installs it in `~/.local/share/kartrecomp/plugins` (the engine searches that folder after `plugins/`; `KARTRECOMP_PLUGIN_DIR` adds another). Linux build checked for compiling and loading only, not on an NVIDIA GPU |
 | Model select (overlay row under Upscaler) | FSR 4 providers (FP8 / INT8 / lightweight INT8 / FSR 3.1), DLSS presets; optional plugin exports `kr_upscaler_set_model`, `kr_upscaler_models`, `kr_upscaler_active_model` |
 | XeSS | slot only |
