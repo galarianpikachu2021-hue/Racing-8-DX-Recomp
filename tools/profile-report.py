@@ -66,9 +66,9 @@ def main():
             _, i, tid, *name = line.split()
             threads[int(i)] = " ".join(name)
         elif line.startswith("M "):
-            f = line.split()
+            f = line.rstrip("\n").split(None, 6)  # the path may contain spaces
             lo, hi = (int(x, 16) for x in f[1].split("-"))
-            maps.append((lo, hi, int(f[3], 16), f[-1] if len(f) > 6 else "[anon]"))
+            maps.append((lo, hi, int(f[3], 16), f[6] if len(f) > 6 else "[anon]"))
         elif line.startswith("S "):
             f = line.split()
             samples[int(f[1])].append([int(x, 16) for x in f[2:]])
