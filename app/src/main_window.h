@@ -140,4 +140,5 @@ private:
     QTableWidget* controls_table = nullptr;
     QTableWidget* players_table = nullptr;
     QListWidget* dlc_list = nullptr;
+    class MiiEditor* mii_editor = nullptr;
 };

@@ -28,6 +28,17 @@ QString GamePackage::overlayFile() const {
 
 QString GamePackage::modsRoot() const { return root_dir; }
 
+QString GamePackage::miisDir() const {
+    return installed ? QDir(root_dir).filePath(QStringLiteral("miis")) : QDir(root_dir).filePath(QStringLiteral("user/miis"));
+}
+QString GamePackage::savesDir() const {
+    return installed ? QDir(root_dir).filePath(QStringLiteral("saves")) : QDir(root_dir).filePath(QStringLiteral("user/saves"));
+}
+QString GamePackage::nandMiiDatabase() const {
+    return QDir(root_dir).filePath(installed ? QStringLiteral("nand/system/save/8000000000000030/MiiDatabase.dat")
+                                             : QStringLiteral("user/nand/system/save/8000000000000030/MiiDatabase.dat"));
+}
+
 QString GamePackage::pluginsParent() const { return installed ? QFileInfo(engine_path).absolutePath() : root_dir; }
 
 QString GamePackage::workingDirectory() const { return installed ? QFileInfo(engine_path).absolutePath() : root_dir; }

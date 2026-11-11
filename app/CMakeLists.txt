@@ -27,6 +27,8 @@ qt_add_executable(kartrecomp
     src/ctgp_convert.cpp
     src/ctgp_convert.h
     src/mod_addon.cpp
+    src/mii_editor.cpp
+    src/mii_editor.h
     src/text_merge.cpp
     src/text_merge.h
     src/mod_addon.h

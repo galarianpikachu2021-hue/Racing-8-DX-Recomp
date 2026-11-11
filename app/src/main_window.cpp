@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "main_window.h"
+#include "mii_editor.h"
 
 #include "ctgp_convert.h"
 #include "setup_page.h"
@@ -118,7 +119,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(scrolled(buildFrameRateTab()), tr("Frame rate"));
     tabs->addTab(scrolled(buildEnhancementsTab()), tr("Enhancements"));
     tabs->addTab(scrolled(buildControllersTab()), tr("Controllers"));
-    tabs->addTab(scrolled(buildMiiTab()), tr("Miis"));
+    tabs->addTab(buildMiiTab(), tr("Miis"));
     tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
     tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
     setCentralWidget(tabs);
@@ -176,6 +177,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         display_page->setEnabled(!running);
         frame_rate_page->setEnabled(!running);
         enhancements_page->setEnabled(!running);
+        mii_editor->setLocked(running);
         refreshMods();
         if (!running) {
             loadSettings();
@@ -439,17 +441,8 @@ QWidget* MainWindow::buildControllersTab() {
 }
 
 QWidget* MainWindow::buildMiiTab() {
-    auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
-    auto* note = new QLabel(
-        tr("Manual Mii entry is planned. Miis are stored in the system save 8000000000000030 "
-           "(MiiDatabase.dat) inside the game's user/nand folder. The editor will write valid "
-           "records (name, face, hair, colours) there, so they show up in the game's Mii racer "
-           "list."));
-    note->setWordWrap(true);
-    layout->addWidget(note);
-    layout->addStretch();
-    return page;
+    mii_editor = new MiiEditor;
+    return mii_editor;
 }
 
 QWidget* MainWindow::buildDlcTab() {
@@ -507,6 +500,7 @@ void MainWindow::reloadPackage() {
     refreshControllers();
     loadOverlay();
     refreshMods();
+    mii_editor->setPaths(package.miisDir(), package.nandMiiDatabase());
 }
 
 void MainWindow::loadSettings() {

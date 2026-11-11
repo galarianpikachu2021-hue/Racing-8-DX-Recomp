@@ -38,6 +38,11 @@ public:
     QString baseNsp() const;
     QString updateNsp() const;
     QString dlcDir() const;
+    /// The engine's data root folders for the Mii database and the game's save (<data root>/miis, <data root>/saves).
+    QString miisDir() const;
+    QString savesDir() const;
+    /// Where the console kept the Mii database before (copied to miisDir() by the engine on first start).
+    QString nandMiiDatabase() const;
     QStringList dlcFiles() const;
     QString configFile() const;
     QString coverageReport() const;
