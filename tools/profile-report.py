@@ -45,6 +45,8 @@ def category(n):
 
 def load_symbols(binary):
     out = subprocess.run(["nm", "-C", "--defined-only", "-n", binary], capture_output=True, text=True).stdout
+    if not out.strip():  # stripped (system libraries): the exported symbols
+        out = subprocess.run(["nm", "-C", "-D", "--defined-only", "-n", binary], capture_output=True, text=True).stdout
     addrs, names = [], []
     for line in out.splitlines():
         parts = line.split(" ", 2)
@@ -97,8 +99,12 @@ def main():
             tables[path] = (load_symbols(src), segments(src)) if os.path.exists(src) else (([], []), [])
         return tables[path]
 
+    sym_libs = "--libs" in sys.argv  # also name functions in system libraries (libc memcpy, the Vulkan driver)
+
     def symbolized(path):
         b = os.path.basename(path)
+        if sym_libs and ".so" in b and path.startswith("/"):
+            return True
         return b == os.path.basename(main_bin) or b.endswith("mk8d") or (b.startswith("recompiled_") and b.endswith(".so"))
 
     def name(a):
