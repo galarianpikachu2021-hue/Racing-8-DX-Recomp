@@ -14884,10 +14884,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..2e2c9aec81
+index 0000000000..593095ceba
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8039 @@
+@@ -0,0 +1,8061 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -16475,7 +16475,22 @@ index 0000000000..2e2c9aec81
 +        vk.vkGetSwapchainImagesKHR(device, swapchain, &n, nullptr);
 +        swap_images.resize(n);
 +        vk.vkGetSwapchainImagesKHR(device, swapchain, &n, swap_images.data());
++        MakeRenderedSemaphores();
 +        return true;
++    }
++
++    /// One "rendered" semaphore per swapchain image, indexed by the acquired image. One shared semaphore was signalled again for
++    /// the next frame while the presentation engine could still be waiting on it for the previous image (the validation layer's
++    /// VUID-vkQueueSubmit-pSignalSemaphores-00067); drivers that do not tolerate that showed half-finished frames (issue #12).
++    /// Callers have idled the device before (re)creating the swapchain, so nothing is waiting on the old ones.
++    void MakeRenderedSemaphores() {
++        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        rendered_sems.assign(swap_images.size(), VK_NULL_HANDLE);
++        rendered2_sems.assign(swap_images.size(), VK_NULL_HANDLE);
++        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
++        for (VkSemaphore& s : rendered_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
++        for (VkSemaphore& s : rendered2_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
 +    }
 +
 +    // ------------------------------------------------------------ resources
@@ -21136,6 +21151,10 @@ index 0000000000..2e2c9aec81
 +        // Black bars.
 +        VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
 +        vk.vkCmdClearColorImage(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &color_range);
++        // The picture is written into the same image next (blit or draw), so the clear has to be finished first: two writes need an
++        // explicit dependency even in the same layout. Without it AMD GPUs, which run clears as compute work that can overlap the
++        // next command, blacked out blocks of the picture (GitHub issue #12); NVIDIA happens to run them in order.
++        MemoryBarrier();
 +        // Fit the Display tab's aspect ratio into the window (black bars), as
 +        // suyu's presenter does; "Stretch to window" fills it.
 +        float aspect = 16.0f / 9.0f;
@@ -21364,7 +21383,7 @@ index 0000000000..2e2c9aec81
 +        si.commandBufferCount = 1;
 +        si.pCommandBuffers = &cmd2;
 +        si.signalSemaphoreCount = 1;
-+        si.pSignalSemaphores = &rendered2;
++        si.pSignalSemaphores = &rendered2_sems[index2];
 +        {
 +            std::scoped_lock lock{queue_mutex};
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence2);
@@ -21399,7 +21418,7 @@ index 0000000000..2e2c9aec81
 +                lock_ms = std::chrono::duration<double, std::milli>(locked - woke).count();
 +                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +                pi.waitSemaphoreCount = 1;
-+                pi.pWaitSemaphores = &rendered2;
++                pi.pWaitSemaphores = &rendered2_sems[index2];
 +                pi.swapchainCount = 1;
 +                pi.pSwapchains = &swapchain;
 +                pi.pImageIndices = &index2;
@@ -22231,7 +22250,7 @@ index 0000000000..2e2c9aec81
 +        si.commandBufferCount = 1;
 +        si.pCommandBuffers = &cmd;
 +        si.signalSemaphoreCount = 1;
-+        si.pSignalSemaphores = &rendered;
++        si.pSignalSemaphores = &rendered_sems[index];
 +        // The previous frame's real image must be on screen before this frame's generated one.
 +        FgWaitIdle();
 +        VkResult pres;
@@ -22240,7 +22259,7 @@ index 0000000000..2e2c9aec81
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence);
 +            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +            pi.waitSemaphoreCount = 1;
-+            pi.pWaitSemaphores = &rendered;
++            pi.pWaitSemaphores = &rendered_sems[index];
 +            pi.swapchainCount = 1;
 +            pi.pSwapchains = &swapchain;
 +            pi.pImageIndices = &index;
@@ -22540,6 +22559,8 @@ index 0000000000..2e2c9aec81
 +        vk.vkFreeMemory(device, ring_memory, nullptr);
 +        vk.vkDestroySemaphore(device, acquired, nullptr);
 +        vk.vkDestroySemaphore(device, rendered, nullptr);
++        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        vk.vkDestroyFence(device, fence, nullptr);
 +        vk.vkDestroyCommandPool(device, pool, nullptr);
 +        vk.vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -22783,6 +22804,7 @@ index 0000000000..2e2c9aec81
 +    VkFormat swap_format = VK_FORMAT_UNDEFINED;
 +    bool have_colorspace_ext = false;
 +    std::map<VkImage, VkImageView> swap_views;
++    std::vector<VkSemaphore> rendered_sems, rendered2_sems; // per swapchain image (MakeRenderedSemaphores)
 +    double overlay_fps = 0, overlay_ms = 0;
 +    std::chrono::steady_clock::time_point fps_time{};
 +    u64 fps_frames = 0;
@@ -23231,7 +23253,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..8504b7762b 100644
+index 03f738eb63..0101fd8de8 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,7 @@
@@ -23785,16 +23807,29 @@ index 03f738eb63..8504b7762b 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1783,7 +1853,7 @@ int main(int argc, char** argv) {
+@@ -1783,7 +1853,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
 -                                              explicit_content_dump)) {
 +                                              explicit_content_dump, explicit_content_dlc)) {
++#ifdef _WIN32
++            // kart-recomp (Windows builds): say why, as the launcher shows stderr when a test boot or a start stops (GitHub issue #8:
++            // before, a game file that needed a key missing from prod.keys ended the process with 0xc0000094; now it just fails to open).
++            if (const s32 gen = FileSys::MissingKeyAreaGeneration(); gen >= 0) {
++                std::fprintf(stderr,
++                             "Your prod.keys is missing master_key_%02x, which one of the game files (base game, update or DLC) needs.\n"
++                             "Use prod.keys dumped from the same Switch as your game files, or newer, and build the game again.\n",
++                             static_cast<unsigned>(gen));
++            } else {
++                std::fprintf(stderr, "The game files could not be read: see the log for the reason.\n");
++            }
++            std::fflush(stderr);
++#endif
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +1867,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +1880,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -23823,7 +23858,7 @@ index 03f738eb63..8504b7762b 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +1917,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +1930,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -23850,7 +23885,7 @@ index 03f738eb63..8504b7762b 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,6 +1969,19 @@ int main(int argc, char** argv) {
+@@ -1857,6 +1982,19 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -23870,7 +23905,7 @@ index 03f738eb63..8504b7762b 100644
      system.GetUserChannel().clear();
  
      if (static_cast<u32>(load_parameters.applet_id)) {
-@@ -1925,6 +2050,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2063,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -23880,7 +23915,7 @@ index 03f738eb63..8504b7762b 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2275,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2288,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -23888,7 +23923,7 @@ index 03f738eb63..8504b7762b 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2188,6 +2317,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2330,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -23906,7 +23941,7 @@ index 03f738eb63..8504b7762b 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2348,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2361,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -23917,7 +23952,7 @@ index 03f738eb63..8504b7762b 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2376,7 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2389,7 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -23925,7 +23960,7 @@ index 03f738eb63..8504b7762b 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2384,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2397,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
