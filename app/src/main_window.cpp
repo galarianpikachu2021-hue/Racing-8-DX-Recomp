@@ -137,6 +137,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // and say "Cannot start" after a successful build. Only a folder that really holds that executable keeps the old mode.
     if (!root.isEmpty() && !QFileInfo(GamePackage(root).executable()).isFile()) root.clear();
 #endif
+    // The AppImage is always the installed game: a game folder remembered by a developer launcher (same settings file) made it
+    // start that folder's old binary instead of the user's built game.
+    if (!qEnvironmentVariableIsEmpty("APPIMAGE")) root.clear();
     if (root.isEmpty() || !qEnvironmentVariableIsEmpty("KARTRECOMP_INSTALLED")) {
         const BuilderPaths builder = BuilderPaths::Detect();
         package = GamePackage::Installed(DataLayout::Default(), DataLayout::ConfigRoot(), builder.engine, builder.engineVersion);
