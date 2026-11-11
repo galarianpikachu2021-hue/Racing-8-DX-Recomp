@@ -65,7 +65,7 @@ The full recipe, including memory and time costs, is in [docs/PIPELINE.md](docs/
 | Console language (launcher, Play tab) | working |
 | Start without the launcher (`--nolauncher`, for TV / Steam) | working |
 | Online play | not supported (the game shows its "can't connect" error and returns to the menu); see the [roadmap](docs/ROADMAP.md) |
-| Game versions | only the **3.0.4** update; firmware **22.5.0 or older** |
+| Game versions | the **3.0.4** or **4.0.1** update; firmware **22.5.0 or older** |
 | Custom frame rates above 60 | planned (needs game-side patches, see the [roadmap](docs/ROADMAP.md)) |
 
 ## Building the launcher

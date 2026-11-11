@@ -23,9 +23,9 @@ Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is
   building anything.
 
 ## More updates
-- Support the game's newer updates (4.0.0 / 4.0.1) besides 3.0.4. Each version is a new recompile, and every game-specific piece (the
-  explicit module pair, the camera/table addresses the renderer and the crash guards use, the CTGP hooks, `data/mk8d-3.0.4/hot_blocks.txt`)
-  has to be found again for it. Needs the user's own update NSPs.
+- Done in v0.2.3: **4.0.1** (`tools/recomp/map_hot_list.py` carries the hot list over; it exports, builds and boots fully static).
+- Files named "4.0.0" are the 32-bit 3.0.3 update: it needs an AArch32 recompiler (large), not planned yet.
+- 3.0.4-only so far: the CTGP DX extra-cup hooks (hooked build) use 3.0.4 addresses.
 
 ## Firmware
 - Firmware newer than 22.5 (23.x) crashes the game's start (integer division by zero); the launcher refuses such firmware by its name.
