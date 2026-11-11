@@ -18,7 +18,7 @@ work="${XDG_CACHE_HOME:-$HOME/.cache}/kartrecomp-tools/work-release"
 appdir="$work/AppDir"
 rm -rf "$appdir"; mkdir -p "$appdir/usr/bin/plugins" "$appdir/usr/lib/kartrecomp/data/mk8d-3.0.4"
 export NO_STRIP=1 QMAKE="${QMAKE:-$(command -v qmake6 || command -v qmake)}" LD_LIBRARY_PATH="$tools:${LD_LIBRARY_PATH:-}" APPIMAGE_EXTRACT_AND_RUN=1
-export PATH="$tools:$PATH" EXTRA_PLATFORM_PLUGINS="libqwayland.so" EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration"
+export PATH="$tools:$PATH" EXTRA_PLATFORM_PLUGINS="$(qtplug="$("$QMAKE" -query QT_INSTALL_PLUGINS 2>/dev/null)/platforms"; [ -e "$qtplug/libqwayland.so" ] && echo libqwayland.so || echo "libqwayland-egl.so;libqwayland-generic.so")" EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration"
 echo "[1/4] Bundling the programs and their libraries"
 "$tools/linuxdeploy-x86_64.AppImage" --appdir "$appdir" -e "$b/app/kartrecomp" -e "$b/app/kartrecomp-setup" -e "$b/app/kartrecomp-build" \
   -e "$eng/engine/mk8d-engine" -e "$exporter" -d "$here/kartrecomp-launcher.desktop" -i "$here/kartrecomp.png" --plugin qt \
@@ -43,6 +43,6 @@ find "$appdir" \( -iname '*dlss*' -o -iname '*ngx*' \) -not -path '*/plugin-src/
 if [ -n "${KARTRECOMP_ALLOW_NEW_GLIBC:-}" ]; then "$here/glibc-floor.sh" "$appdir" || true
 else "$here/glibc-floor.sh" "$appdir" "${KARTRECOMP_MAX_GLIBC:-2.35}" || { echo "FAIL: the release needs a newer glibc than common distros ship: build the engine on an older base"; exit 1; }; fi
 echo "[4/4] Compressing the AppImage"
-ARCH=x86_64 "$tools/appimagetool-x86_64.AppImage" --comp zstd "$appdir" "$out/KartRecomp-Launcher-x86_64.AppImage" >"$work/appimagetool.log" 2>&1 \
+ARCH=x86_64 "$tools/appimagetool-x86_64.AppImage" --comp zstd "$appdir" "$out/Racing_8_DX_Recomp-x86_64.AppImage" >"$work/appimagetool.log" 2>&1 \
   || { tail -20 "$work/appimagetool.log"; exit 1; }
-ls -l "$out/KartRecomp-Launcher-x86_64.AppImage"
+ls -l "$out/Racing_8_DX_Recomp-x86_64.AppImage"

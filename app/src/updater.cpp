@@ -22,7 +22,10 @@
 #include <QWidget>
 
 namespace {
-constexpr char kLauncherAsset[] = "KartRecomp-Launcher-x86_64.AppImage";
+// The AppImage's release asset. 0.2.3 renamed it to match the application's name (AppImage catalog); older releases used
+// the old name, which is still accepted.
+constexpr char kLauncherAsset[] = "Racing_8_DX_Recomp-x86_64.AppImage";
+constexpr char kOldLauncherAsset[] = "KartRecomp-Launcher-x86_64.AppImage";
 
 QNetworkRequest Request(const QUrl& url) {
     QNetworkRequest req(url);
@@ -67,7 +70,8 @@ void Updater::check(bool quiet) {
         }
         QString asset;
         for (const auto& a : json.value(QStringLiteral("assets")).toArray()) {
-            if (a.toObject().value(QStringLiteral("name")).toString() == QLatin1String(kLauncherAsset)) {
+            const QString name = a.toObject().value(QStringLiteral("name")).toString();
+            if (name == QLatin1String(kLauncherAsset) || (asset.isEmpty() && name == QLatin1String(kOldLauncherAsset))) {
                 asset = a.toObject().value(QStringLiteral("browser_download_url")).toString();
             }
         }

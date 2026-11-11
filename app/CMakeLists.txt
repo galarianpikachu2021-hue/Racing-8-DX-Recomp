@@ -1,4 +1,9 @@
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+# Qt6::Gui links OpenGL (libOpenGL + libGLX) into every program that uses it, though the launcher never calls OpenGL: drop it, so the
+# AppImage starts on systems without libopengl0 (Qt itself loads OpenGL at run time when it needs it).
+if(UNIX AND NOT APPLE AND TARGET WrapOpenGL::WrapOpenGL)
+    set_target_properties(WrapOpenGL::WrapOpenGL PROPERTIES INTERFACE_LINK_LIBRARIES "")
+endif()
 find_package(ZLIB REQUIRED)
 qt_standard_project_setup()
 

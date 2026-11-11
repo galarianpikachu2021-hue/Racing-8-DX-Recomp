@@ -8,6 +8,7 @@
 #include <QThread>
 #include <QTimer>
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -53,6 +54,32 @@ const QStringList kAntiAliasing{"None", "FXAA", "SMAA"};
 const QStringList kVSync{"Off (immediate)", "Mailbox", "FIFO (vsync)", "FIFO relaxed"};
 const QStringList kFullscreenModes{"Borderless window", "Exclusive"};
 const QStringList kConsoleModes{"Low (handheld, 720p)", "High (docked, 1080p)"};
+
+// Emulated console language. Index order is the suyu SDL `Language` enum, one-to-one with
+// suyu's `available_language_codes` (the LanguageCode the console reports to the game at boot).
+// The default (index 1, English US) matches suyu's own default when no config exists yet.
+const QStringList kConsoleLanguages{
+    "Japanese",
+    "English (US)",
+    "French",
+    "German",
+    "Italian",
+    "Spanish (Spain)",
+    "Chinese",
+    "Korean",
+    "Dutch",
+    "Portuguese",
+    "Russian",
+    "Chinese (Taiwan, traditional)",
+    "English (UK)",
+    "French (Canada)",
+    "Spanish (Latin America)",
+    "Chinese (simplified)",
+    "Chinese (traditional)",
+    "Portuguese (Brazil)",
+    "Polish",
+    "Thai",
+};
 
 constexpr int kFsrFilterIndex = 6; // ScalingFilter::Fsr
 
@@ -214,6 +241,14 @@ QWidget* MainWindow::buildPlayTab() {
     };
     form->addRow(tr("Game folder:"), pathRow(root_edit, tr("Select your built game folder")));
     form->addRow(tr("Keys + firmware:"), pathRow(home_edit, tr("Select the suyu data folder with your keys")));
+
+    language_combo = makeCombo(kConsoleLanguages);
+    language_combo->setToolTip(
+        tr("The language the emulated console runs the game in, chosen before you start. Saved in the "
+           "game's config and used every launch until you pick another here (or in game, where it can also "
+           "be changed and overrides this). Not every course or text string is translated, so a non-English "
+           "language can still fall back to English in places."));
+    form->addRow(tr("Console language:"), language_combo);
 
     renderer_combo = makeCombo({tr("Emulated GPU (default)"), tr("Native Vulkan (experimental)")});
     renderer_combo->setToolTip(
@@ -486,6 +521,8 @@ void MainWindow::loadSettings() {
     fullscreen_mode_combo->setCurrentIndex(
         config.intValue(kRenderer, QStringLiteral("fullscreen_mode"), 0));
     docked_combo->setCurrentIndex(config.intValue(kSystem, QStringLiteral("use_docked_mode"), 1));
+    // Index order is suyu's `Language` enum / `available_language_codes`; default 1 = English (US), suyu's own default.
+    language_combo->setCurrentIndex(config.intValue(kSystem, QStringLiteral("language_index"), 1));
     limit_check->setChecked(config.boolValue(kCore, QStringLiteral("use_speed_limit"), true));
     limit_spin->setValue(config.intValue(kCore, QStringLiteral("speed_limit"), 100));
     limit_spin->setEnabled(limit_check->isChecked());
@@ -506,6 +543,8 @@ bool MainWindow::saveSettings() {
     config.setInt(kRenderer, QStringLiteral("use_vsync"), vsync_combo->currentIndex());
     config.setInt(kRenderer, QStringLiteral("fullscreen_mode"), fullscreen_mode_combo->currentIndex());
     config.setInt(kSystem, QStringLiteral("use_docked_mode"), docked_combo->currentIndex());
+    // Read by the engine at every boot (ISettingsServer::GetLanguageCode): the console language until changed here or in game.
+    config.setInt(kSystem, QStringLiteral("language_index"), language_combo->currentIndex());
     config.setBool(kCore, QStringLiteral("use_speed_limit"), limit_check->isChecked());
     config.setInt(kCore, QStringLiteral("speed_limit"), limit_spin->value());
     config.setInt(kRenderer, QStringLiteral("fsr_sharpening_slider"), fsr_sharpness_spin->value());
@@ -532,7 +571,7 @@ void MainWindow::applySettingsNow() {
 
 void MainWindow::connectAutoSave() {
     for (auto* combo : {resolution_combo, aspect_combo, filter_combo, aa_combo, vsync_combo,
-                        fullscreen_mode_combo, docked_combo}) {
+                        fullscreen_mode_combo, docked_combo, language_combo}) {
         connect(combo, &QComboBox::currentIndexChanged, this, &MainWindow::applySettingsNow);
     }
     connect(limit_check, &QCheckBox::toggled, this, &MainWindow::applySettingsNow);
@@ -607,6 +646,20 @@ QProcessEnvironment MainWindow::launchEnvironment() const {
         env.insert(QStringLiteral("KARTRECOMP_NVN_CAPTURE"), QStringLiteral("every=1800,frames=2"));
     }
     return env;
+}
+
+bool MainWindow::launchWithoutWindow() {
+    const QString problems = package.problems();
+    if (!problems.isEmpty()) {
+        QMessageBox::warning(nullptr, tr("Cannot start"), problems + QStringLiteral("\n\n") + tr("Open the launcher without --nolauncher to fix this."));
+        return false;
+    }
+    connect(&game, &QProcess::finished, qApp, [](int code, QProcess::ExitStatus) { QCoreApplication::exit(code); });
+    connect(&game, &QProcess::errorOccurred, qApp, [](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart) QCoreApplication::exit(1);
+    });
+    launch();
+    return game.state() != QProcess::NotRunning; // start() is asynchronous: Starting counts
 }
 
 void MainWindow::launch() {

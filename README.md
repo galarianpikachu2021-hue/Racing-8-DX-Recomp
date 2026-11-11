@@ -46,6 +46,10 @@ Everything above is a row in the F10 menu. The launcher's Enhancements tab sets 
 3. Nothing from the game is ever shipped: the translated code and your files stay in your own folders
    (`~/.local/share/kartrecomp`, `~/.config/kartrecomp`, `~/.cache/kartrecomp`).
 
+4. **Play without the launcher** (TV, controller, Steam): start it with `--nolauncher`, e.g. `Racing_8_DX_Recomp-x86_64.AppImage --nolauncher`
+   or `kartrecomp.exe --nolauncher` (add that as a non-Steam game). The game starts with your saved settings; the in-game menu (F10, or
+   L3+R3 on a controller) has the graphics settings. The console language (the game's language) is on the launcher's Play tab.
+
 The full recipe, including memory and time costs, is in [docs/PIPELINE.md](docs/PIPELINE.md).
 
 ## More features

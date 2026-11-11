@@ -27,6 +27,9 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    /// Starts the game with the saved settings without showing this window; the app quits with the game's exit code. False
+    /// (after telling the user why) when the game cannot start.
+    bool launchWithoutWindow();
     ~MainWindow() override;
 
 signals:
@@ -79,6 +82,7 @@ private:
     QComboBox* renderer_combo = nullptr;
     QComboBox* native_res_combo = nullptr;
     QComboBox* pin_combo = nullptr;
+    QComboBox* language_combo = nullptr;
     QPushButton* play_button = nullptr;
     QPushButton* stop_button = nullptr;
     QPushButton* appimage_button = nullptr;

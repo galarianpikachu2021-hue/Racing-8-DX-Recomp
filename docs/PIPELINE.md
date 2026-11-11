@@ -114,7 +114,7 @@ Generator finding: the top-level `project(<game name>_recompiled C)` is unquoted
 CMake; the exporter now passes `mk8d` as the name.
 
 ## From your files to the game: the builder (Linux, 2026-11-04)
-The release AppImage (`KartRecomp-Launcher-x86_64.AppImage`, about 260 MB) is the whole pipeline: launcher (Setup page), `kartrecomp-setup`
+The release AppImage (`Racing_8_DX_Recomp-x86_64.AppImage`, about 260 MB; it was `KartRecomp-Launcher-x86_64.AppImage` up to 0.2.2; built in an Ubuntu 22.04 container so it needs glibc 2.35 at most) is the whole pipeline: launcher (Setup page), `kartrecomp-setup`
 (the same pipeline from a shell: `AppRun setup --base .. --update .. --keys .. --firmware ..`), `kartrecomp-build` (units to modules),
 `kartrecomp-export` (NSP to C), `mk8d-engine` (the prebuilt runtime, no game code) and the toolchain (LLVM 20.1.8 clang + lld, compiler-rt
 builtins, a glibc 2.31 sysroot, so the modules need glibc 2.14 at most). `packaging/make-release-appimage.sh` assembles it and refuses to
