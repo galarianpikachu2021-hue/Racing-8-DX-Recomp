@@ -126,24 +126,6 @@ const KeyName kKeys[] = {
     {Qt::Key_Shift, 225, "Shift"}, {Qt::Key_Alt, 226, "Alt"}, {Qt::Key_Meta, 227, "Super"}, {Qt::Key_AltGr, 230, "Right Alt"},
 };
 
-/// Waits for one key press (Escape cancels). Returns the Qt key code, or 0.
-int AskForKey(QWidget* parent, const QString& what) {
-    class KeyDialog : public QDialog {
-    public:
-        explicit KeyDialog(QWidget* p) : QDialog(p) {}
-        int key = 0;
-        void keyPressEvent(QKeyEvent* e) override {
-            if (e->key() != Qt::Key_Escape) key = e->key();
-            accept();
-        }
-    };
-    KeyDialog d(parent);
-    d.setWindowTitle(QObject::tr("Press a key"));
-    auto* l = new QVBoxLayout(&d);
-    l->addWidget(new QLabel(QObject::tr("Press the key for Switch %1 (Escape cancels).").arg(what)));
-    d.exec();
-    return d.key;
-}
 } // namespace
 
 int ControllerMapper::SdlScancode(int qt) {
@@ -186,7 +168,7 @@ ControllerMapper::ControllerMapper(QWidget* parent) : QWidget(parent) {
     auto* outer = new QVBoxLayout(this);
     auto* note = new QLabel(tr("Choose a player and what it plays on. Each controller keeps its own layout: whichever player gets it "
                                "gets its buttons. To change one, press Change and then the button you want for it. Swap A/B and "
-                               "X/Y suits Xbox and PlayStation controllers (the button labelled A then acts as Switch A). Close "
+                               "X/Y suits Xbox and PlayStation controllers (the button labelled A then acts as in-game A). Close "
                                "the game before changing anything."));
     note->setWordWrap(true);
     outer->addWidget(note);
@@ -225,7 +207,7 @@ ControllerMapper::ControllerMapper(QWidget* parent) : QWidget(parent) {
         auto* binding = new QLabel;
         binding->setFont(bold);
         binding->setMinimumWidth(130);
-        auto* as = new QLabel(tr("→ Switch %1").arg(tr(in.label)));
+        auto* as = new QLabel(tr("→ In-game %1").arg(tr(in.label)));
         as->setMinimumWidth(150);
         auto* change = new QPushButton(tr("Change"));
         auto* clear = new QPushButton(tr("Clear"));
@@ -271,6 +253,7 @@ ControllerMapper::ControllerMapper(QWidget* parent) : QWidget(parent) {
         if (locked || !ini.load(config_path)) return;
         ini.setBool(kSection, QStringLiteral("auto_assign_controllers"), on);
         ini.save();
+        autoAssign();
     });
     connect(swap, &QPushButton::clicked, this, [this] {
         const int p = player->currentIndex();
@@ -308,17 +291,13 @@ ControllerMapper::ControllerMapper(QWidget* parent) : QWidget(parent) {
             defaults[key] = d;
             apply();
         });
-        setBusy(question != nullptr, tr("Reading the standard layout..."));
+        setBusy(question, tr("Reading the standard layout..."));
     });
     setLocked(false);
 }
 
 ControllerMapper::~ControllerMapper() {
-    if (question) {
-        question->disconnect();
-        question->kill();
-        question->waitForFinished(1000);
-    }
+    stopHelper();
 }
 
 void ControllerMapper::setPaths(const QString& config, const QString& engine, const QString& work_dir, const QProcessEnvironment& env) {
@@ -505,45 +484,103 @@ void ControllerMapper::loadNames(const QString& dev, std::function<void()> then)
     });
 }
 
-void ControllerMapper::ask(const QStringList& args, int timeout_ms, std::function<void(const QString&)> done) {
-    if (question) return;
+bool ControllerMapper::startHelper() {
+    if (helper) return true;
     if (engine_path.isEmpty() || !QFileInfo::exists(engine_path)) {
         status->setText(tr("The game engine isn't set up yet (Setup page)."));
-        return;
+        return false;
     }
-    question = new QProcess(this);
-    question_done = std::move(done);
-    question->setProcessEnvironment(engine_env);
-    question->setWorkingDirectory(engine_dir);
-    connect(question, &QProcess::finished, this, [this] {
-        QProcess* q = question;
-        const QString out = QString::fromUtf8(q->readAllStandardOutput()).trimmed();
-        q->deleteLater();
-        question = nullptr;
-        question_timer->stop();
-        auto done_now = std::move(question_done);
-        question_done = nullptr;
-        setBusy(false);
-        if (done_now) done_now(out);
+    helper = new QProcess(this);
+    helper_ready = false;
+    helper_buffer.clear();
+    helper->setProcessEnvironment(engine_env);
+    helper->setWorkingDirectory(engine_dir);
+    connect(helper, &QProcess::readyReadStandardOutput, this, [this] { helperOutput(); });
+    connect(helper, &QProcess::finished, this, [this] {
+        // Gone (killed, or crashed): a question that was out gets an empty answer.
+        helper->deleteLater();
+        helper = nullptr;
+        helper_ready = false;
+        pending_line.clear();
+        if (question) {
+            question = false;
+            question_timer->stop();
+            auto done = std::move(question_done);
+            question_done = nullptr;
+            setBusy(false);
+            if (done) done(QString());
+        }
     });
-    connect(question, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
-        if (e != QProcess::FailedToStart || !question) return;
-        question->deleteLater();
-        question = nullptr;
-        question_done = nullptr;
-        question_timer->stop();
-        setBusy(false);
+    helper->start(engine_path, {QStringLiteral("--input-capture"), QStringLiteral("serve")});
+    if (!helper->waitForStarted(5000)) {
+        helper->deleteLater();
+        helper = nullptr;
         status->setText(tr("Could not start the game engine to ask about controllers."));
-    });
+        return false;
+    }
+    return true;
+}
+
+void ControllerMapper::stopHelper() {
+    if (!helper) return;
+    question_done = nullptr;
+    helper->disconnect();
+    helper->closeWriteChannel();
+    if (!helper->waitForFinished(500)) {
+        helper->kill();
+        helper->waitForFinished(1000);
+    }
+    delete helper;
+    helper = nullptr;
+    helper_ready = false;
+    question = false;
+    pending_line.clear();
+}
+
+void ControllerMapper::helperOutput() {
+    helper_buffer += helper->readAllStandardOutput();
+    for (;;) {
+        // An answer ends with a line ".".
+        const int end = helper_buffer.startsWith(".\n") ? 0 : helper_buffer.indexOf("\n.\n");
+        if (end < 0) return;
+        const QString answer = QString::fromUtf8(helper_buffer.left(end)).trimmed();
+        helper_buffer.remove(0, end == 0 ? 2 : end + 3);
+        if (!helper_ready) { // the first answer is the helper's "ready"
+            helper_ready = true;
+            if (!pending_line.isEmpty()) helper->write(pending_line.toUtf8());
+            pending_line.clear();
+            continue;
+        }
+        if (!question) continue; // the end of a cancelled question
+        question = false;
+        question_timer->stop();
+        auto done = std::move(question_done);
+        question_done = nullptr;
+        setBusy(false);
+        if (done) done(answer);
+    }
+}
+
+void ControllerMapper::ask(QStringList args, int timeout_ms, std::function<void(const QString&)> done) {
+    if (question || locked) return;
+    if (!args.isEmpty() && args.first() == QLatin1String("--input-capture")) args.removeFirst();
+    if (!startHelper()) return;
+    question = true;
+    question_done = std::move(done);
+    const QString line = args.join(QLatin1Char(' ')) + QLatin1Char('\n');
+    if (helper_ready) helper->write(line.toUtf8());
+    else pending_line = line;
     question_timer->start(timeout_ms);
-    question->start(engine_path, args);
 }
 
 void ControllerMapper::cancelQuestion() {
     if (!question) return;
     question_done = nullptr; // the answer is dropped
-    question->kill();
-    status->setText(tr("Cancelled."));
+    question = false;
+    question_timer->stop();
+    if (helper && helper_ready) helper->write("cancel\n");
+    else pending_line.clear();
+    setBusy(false);
 }
 
 void ControllerMapper::setBusy(bool b, const QString& text) {
@@ -579,8 +616,10 @@ void ControllerMapper::refreshDevices() {
         devices_loaded = true;
         status->setText(devices.isEmpty() ? tr("No controller found (is it connected and switched on?).")
                                           : tr("%n controller(s) found.", nullptr, static_cast<int>(devices.size())));
+        autoAssign();
+        showPlayer();
     });
-    setBusy(question != nullptr, tr("Looking for controllers..."));
+    setBusy(question, tr("Looking for controllers..."));
 }
 
 void ControllerMapper::chooseDevice(int index) {
@@ -610,16 +649,8 @@ void ControllerMapper::chooseDevice(int index) {
         Bindings layout;
         for (const char* s : kButtons) layout.insert(QString::fromLatin1(s), BindToDevice(source.value(QString::fromLatin1(s)), chosen.param));
         for (const char* s : kSticks) layout.insert(QString::fromLatin1(s), BindToDevice(source.value(QString::fromLatin1(s)), chosen.param));
-        // Chosen by hand: the game must not hand the controllers out differently at start.
-        IniFile ini;
-        if (ini.load(config_path)) {
-            ini.setBool(kSection, QStringLiteral("auto_assign_controllers"), false);
-            ini.save();
-        }
         applyLayout(layout, false);
-        status->setText(tr("Player %1 plays on %2%3. Automatic assignment is off now (tick it to let the game hand controllers out).")
-                            .arg(p + 1)
-                            .arg(chosen.label, saved ? tr(" with its saved layout") : QString()));
+        status->setText(tr("Player %1 plays on %2%3.").arg(p + 1).arg(chosen.label, saved ? tr(" with its saved layout") : QString()));
     };
     if (LoadProfiles(profilesPath()).contains(key) || defaults.contains(key)) {
         give();
@@ -634,8 +665,48 @@ void ControllerMapper::chooseDevice(int index) {
         defaults[key] = d;
         give();
     });
-    setBusy(question != nullptr, tr("Reading the controller's layout..."));
+    setBusy(question, tr("Reading the controller's layout..."));
 }
+
+namespace {
+/// "Press the button for In-game X": closes on the first press (a key is caught here; a controller press arrives from the engine
+/// helper and calls accept()), or on Cancel / Escape.
+class PressDialog : public QDialog {
+public:
+    PressDialog(QWidget* parent, const QString& text, bool keys) : QDialog(parent), want_keys(keys) {
+        setWindowTitle(tr("Change button"));
+        auto* l = new QVBoxLayout(this);
+        auto* label = new QLabel(text);
+        QFont f = label->font();
+        f.setPointSizeF(f.pointSizeF() * 1.3);
+        label->setFont(f);
+        label->setAlignment(Qt::AlignCenter);
+        label->setMinimumWidth(380);
+        l->addWidget(label);
+        auto* cancel = new QPushButton(tr("Cancel"));
+        cancel->setAutoDefault(false);
+        cancel->setFocusPolicy(Qt::NoFocus); // Space/Enter are keys to bind, not a click
+        l->addWidget(cancel, 0, Qt::AlignCenter);
+        connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    }
+    int key = 0;
+
+protected:
+    void keyPressEvent(QKeyEvent* e) override {
+        if (e->key() == Qt::Key_Escape) {
+            reject();
+            return;
+        }
+        if (want_keys && !e->isAutoRepeat()) {
+            key = e->key();
+            accept();
+        }
+    }
+
+private:
+    bool want_keys;
+};
+} // namespace
 
 void ControllerMapper::capture(const QString& setting) {
     const Input* in = nullptr;
@@ -650,40 +721,85 @@ void ControllerMapper::capture(const QString& setting) {
             status->setText(tr("A stick on the keyboard is four keys; Standard layout gives W/A/S/D and the arrow keys."));
             return;
         }
-        const int k = AskForKey(this, label);
-        if (!k) return;
-        const int code = SdlScancode(k);
+        PressDialog dialog(this, tr("Press the key for in-game %1").arg(label), true);
+        if (dialog.exec() != QDialog::Accepted || !dialog.key) return;
+        const int code = SdlScancode(dialog.key);
         if (!code) {
             status->setText(tr("That key can't be used (F10 and F11 are the game's menu and fullscreen keys)."));
             return;
         }
         if (writePlayer(p, {{setting, QStringLiteral("engine:keyboard,code:%1,toggle:0").arg(code)}})) {
             rememberProfile(p);
-            status->setText(tr("%1 now acts as Switch %2.").arg(SdlKeyName(code), label));
+            status->setText(tr("%1 now does in-game %2.").arg(SdlKeyName(code), label));
         }
         return;
     }
-    ask({QStringLiteral("--input-capture"), in->stick ? QStringLiteral("stick") : QStringLiteral("button"), QStringLiteral("8"), dev}, 12000,
-        [this, p, setting, label](const QString& out) {
-            const int tab = out.indexOf(QLatin1Char('\t'));
-            const QString binding = tab > 0 ? out.left(tab) : out;
-            if (binding.isEmpty()) {
-                status->setText(tr("Nothing pressed: Switch %1 is unchanged.").arg(label));
-                return;
-            }
-            if (writePlayer(p, {{setting, binding}})) {
-                rememberProfile(p);
-                status->setText(tr("%1 now acts as Switch %2.").arg(tab > 0 ? out.mid(tab + 1).trimmed() : binding, label));
-            }
+    PressDialog dialog(this, in->stick ? tr("Move the stick for in-game %1 on the controller").arg(label)
+                                       : tr("Press the button for in-game %1 on the controller").arg(label),
+                       false);
+    QString answer;
+    bool answered = false;
+    ask({in->stick ? QStringLiteral("stick") : QStringLiteral("button"), QStringLiteral("3600"), dev},
+        3600 * 1000, [&](const QString& out) {
+            answer = out;
+            answered = true;
+            dialog.accept();
         });
-    if (question)
-        setBusy(true, in->stick ? tr("Move the stick you want for Switch %1 (8 s)...").arg(label)
-                                : tr("Press the button you want for Switch %1 on the controller (8 s)...").arg(label));
+    if (!question) return; // the helper could not start (status says why)
+    if (dialog.exec() != QDialog::Accepted || !answered) {
+        cancelQuestion(); // also drops the callback, which refers to this stack frame
+        return;
+    }
+    const int tab = answer.indexOf(QLatin1Char('\t'));
+    const QString binding = tab > 0 ? answer.left(tab) : answer;
+    if (binding.isEmpty()) {
+        status->setText(tr("The controller didn't answer: in-game %1 is unchanged.").arg(label));
+        return;
+    }
+    if (writePlayer(p, {{setting, binding}})) {
+        rememberProfile(p);
+        status->setText(tr("%1 now does in-game %2.").arg(tab > 0 ? answer.mid(tab + 1).trimmed() : binding, label));
+    }
+}
+
+void ControllerMapper::autoAssign() {
+    if (locked || !auto_assign->isChecked()) return;
+    for (const Device& d : devices) {
+        bool held = false;
+        int target = -1;
+        for (int q = 0; q < 4; ++q) {
+            const QString dq = deviceOf(q);
+            if (SameDevice(dq, d.param)) held = true;
+            if (target < 0 && Engine(dq) == QLatin1String("keyboard")) target = q;
+        }
+        if (held || target < 0) continue;
+        const QString key = profileKey(d.param);
+        const auto profiles = LoadProfiles(profilesPath());
+        if (!profiles.contains(key) && !defaults.contains(key)) {
+            // Needs the controller's standard layout first; then look again.
+            ask({QStringLiteral("defaults"), d.param}, 10000, [this, key](const QString& out) {
+                const Bindings layout = ParseLayout(out);
+                if (layout.isEmpty()) return;
+                defaults[key] = layout;
+                QTimer::singleShot(0, this, [this] { autoAssign(); });
+            });
+            return;
+        }
+        const auto source = profiles.contains(key) ? profiles.value(key) : defaults.value(key);
+        Bindings layout;
+        for (const char* s : kButtons) layout.insert(QString::fromLatin1(s), BindToDevice(source.value(QString::fromLatin1(s)), d.param));
+        for (const char* s : kSticks) layout.insert(QString::fromLatin1(s), BindToDevice(source.value(QString::fromLatin1(s)), d.param));
+        writePlayer(target, layout, QStringLiteral("true"));
+        status->setText(tr("Player %1 plays on %2.").arg(target + 1).arg(d.label));
+    }
 }
 
 void ControllerMapper::setLocked(bool l) {
     locked = l;
-    if (l) cancelQuestion();
-    setBusy(question != nullptr);
+    if (l) {
+        cancelQuestion();
+        stopHelper(); // the game gets the controllers to itself
+    }
+    setBusy(question);
     if (l) status->setText(tr("The game is running: controls can be changed after it closes."));
 }

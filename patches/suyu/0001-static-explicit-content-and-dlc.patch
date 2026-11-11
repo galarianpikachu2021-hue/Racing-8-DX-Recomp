@@ -878,7 +878,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..793cef498b 100644
+index bca83ab630..6e1001125a 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,6 +1,15 @@
@@ -1268,7 +1268,7 @@ index bca83ab630..793cef498b 100644
 +            capture = SuyuCmd::Profiles::Capture{};
 +            capture.stick = stick;
 +            KartOverlay::Capturing().store(true);
-+            message = stick ? "Move the stick (8 s, Esc cancels)" : "Press the new button (8 s, Esc cancels)";
++            message = stick ? "Move the stick (Esc cancels)" : "Press the new button (Esc cancels)";
 +        }
 +        publish = true;
 +    }
@@ -1284,13 +1284,13 @@ index bca83ab630..793cef498b 100644
 +        } else {
 +            std::tie(got, got_name) = capture.Poll(*input_subsystem, Common::ParamPackage{player.buttons[Settings::NativeButton::A]});
 +        }
-+        const bool timed_out = SDL_GetTicks() > capture_started + 8000;
++        const bool timed_out = SDL_GetTicks() > capture_started + 30000;
 +        if (!got.empty() || cancel || timed_out) {
 +            KartOverlay::Capturing().store(false);
 +            const std::string label = kControlInputs[cap_input].label;
 +            if (!got.empty()) {
 +                BindingOf(player, cap_input) = got;
-+                message = got_name + " now does Switch " + label;
++                message = got_name + " now does in-game " + label;
 +                LOG_INFO(Frontend, "Overlay: Player {} {} -> {}", cap_player + 1, label, got);
 +                changed = true;
 +                remember[static_cast<std::size_t>(cap_player)] = true;
@@ -13928,7 +13928,7 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..52f22b6028
+index 0000000000..6b5c910cdb
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 @@ -0,0 +1,661 @@
@@ -14401,7 +14401,7 @@ index 0000000000..52f22b6028
 +                                       ? who.options[static_cast<size_t>(std::clamp(who.value, 0, static_cast<int>(who.options.size()) - 1))]
 +                                       : std::string{};
 +        const bool waiting = capturing_player >= 0 && capturing_input >= 0 && capturing_input < kControlInputCount;
-+        title = waiting ? std::string{"Controls - press the new "} + kControlInputs[capturing_input].label + " (8 s, Esc cancels)"
++        title = waiting ? std::string{"Press the button for in-game "} + kControlInputs[capturing_input].label + " on the controller (Esc cancels)"
 +                        : "Controls - Player " + std::to_string(controls_player + 1) + (device.empty() ? "" : " (" + device + ")");
 +        help = "Up/Down select   A: press a new button for this   Left/Right player   B back";
 +        list.push_back({"Player", "< Player " + std::to_string(controls_player + 1) + " >", true, controls_selected == 0, device, 12});
@@ -14411,7 +14411,7 @@ index 0000000000..52f22b6028
 +            const bool sel = controls_selected == i + 1;
 +            std::string input = static_cast<size_t>(i) < b.size() ? b[static_cast<size_t>(i)] : "...";
 +            if (waiting && capturing_player == controls_player && capturing_input == i) input = "[ press now ]";
-+            list.push_back({input, std::string{"Switch "} + kControlInputs[i].label, true, sel, "", 24});
++            list.push_back({input, std::string{"In-game "} + kControlInputs[i].label, true, sel, "", 24});
 +        }
 +        list.push_back({"Swap A/B and X/Y (Xbox / PlayStation layout)", "", true, controls_selected == kControlInputCount + 1, "", 0});
 +        list.push_back({"Standard layout for this controller", "", true, controls_selected == kControlInputCount + 2, "", 0});
@@ -24328,7 +24328,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..220cd4dfee 100644
+index 03f738eb63..adfad1d52f 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -24367,7 +24367,7 @@ index 03f738eb63..220cd4dfee 100644
  #include "core/file_sys/nca_metadata.h"
  #include "core/file_sys/registered_cache.h"
  #include "core/file_sys/card_image.h"
-@@ -54,16 +65,26 @@
+@@ -54,16 +65,28 @@
  #include "core/hle/service/am/applet_manager.h"
  #include "core/hle/service/am/service/library_applet_creator.h"
  #include "core/hle/service/filesystem/filesystem.h"
@@ -24379,6 +24379,8 @@ index 03f738eb63..220cd4dfee 100644
  #include "core/recompiler/arm64_to_c.h"
  #include "core/loader/loader.h"
  #include "frontend_common/config.h"
++#include <condition_variable>
++#include <deque>
 +#include "common/param_package.h"
 +#include "suyu_cmd/controller_profiles.h"
  #include "input_common/main.h"
@@ -24394,7 +24396,7 @@ index 03f738eb63..220cd4dfee 100644
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2_gl.h"
  #ifdef __APPLE__
-@@ -173,56 +194,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
+@@ -173,56 +196,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
  } // namespace
  #endif
  
@@ -24451,7 +24453,7 @@ index 03f738eb63..220cd4dfee 100644
  
  static void PrintHelp(const char* argv0) {
      std::cout << "Usage: " << argv0
-@@ -233,6 +204,7 @@ static void PrintHelp(const char* argv0) {
+@@ -233,6 +206,7 @@ static void PrintHelp(const char* argv0) {
                   "--app-name            Display name when the loader has no title metadata\n"
                   "--content-base        Read-only base XCI/NSP for an explicit update pair\n"
                   "--content-update      Read-only matching update NSP (both flags required)\n"
@@ -24459,7 +24461,7 @@ index 03f738eb63..220cd4dfee 100644
                   "--content-probe       Verify that pair and exit without a window or game\n"
                   "--content-dump        New directory for resolved data (requires --content-probe)\n"
                   "-h, --help            Display this help and exit\n"
-@@ -366,9 +338,43 @@ bool g_native_export_mode = false;
+@@ -366,9 +340,43 @@ bool g_native_export_mode = false;
  bool g_export_package = false;
  SdlConfig* g_sdl_config = nullptr;
  
@@ -24503,7 +24505,7 @@ index 03f738eb63..220cd4dfee 100644
      }
  }
  
-@@ -917,7 +923,171 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +925,233 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -24589,15 +24591,16 @@ index 03f738eb63..220cd4dfee 100644
 +} // namespace
 +
 +// kart-recomp: the launcher's controller mapping asks the engine (which has the controller library) about controllers, without
-+// starting a game. Answers on stdout, then exit:
-+//   --input-capture devices                           every connected controller, one ParamPackage per line ("display:..." names it)
-+//   --input-capture button|stick <seconds> <device>   the next button / stick of that controller, "binding<TAB>name" (empty if none)
-+//   --input-capture names <device>                    each button and trigger of the controller, "binding<TAB>name"
-+//   --input-capture defaults <device>                 the standard layout, "<setting>=<binding>" (device "engine:keyboard": the keys)
-+static int RunInputCapture(int argc, char** argv) {
-+    const std::string mode = argc > 0 ? argv[0] : "";
-+    InputCommon::InputSubsystem input;
-+    input.Initialize();
++// starting a game. Questions:
++//   devices                            every connected controller, one ParamPackage per line ("display:..." names it)
++//   button|stick <seconds> <device>    the next button / stick of that controller, "binding<TAB>name" (nothing if none in time)
++//   names <device>                     each button and trigger of the controller, "binding<TAB>name"
++//   defaults <device>                  the standard layout, "<setting>=<binding>" (device "engine:keyboard": the keys)
++// One-shot: `--input-capture <question...>` answers on stdout and exits. `--input-capture serve` stays running (the launcher
++// keeps it open while its Controllers tab is used, so a press is caught at once): one question per stdin line, each answer
++// ends with a line "."; the line "cancel" stops a running button/stick wait.
++namespace {
++void WaitForControllers(InputCommon::InputSubsystem& input) {
 +    // Controllers are found asynchronously: wait until SDL has listed them (at most 1.5 s).
 +    for (int i = 0; i < 30; ++i) {
 +        int count = 0;
@@ -24607,27 +24610,31 @@ index 03f738eb63..220cd4dfee 100644
 +        if (i >= 4 && listed >= count) break;
 +        std::this_thread::sleep_for(std::chrono::milliseconds{50});
 +    }
++}
++
++bool AnswerInputQuestion(InputCommon::InputSubsystem& input, const std::vector<std::string>& q, const std::atomic<bool>& cancel) {
++    const std::string mode = q.empty() ? "" : q[0];
 +    if (mode == "devices") {
 +        for (const auto& d : input.GetInputDevices()) std::printf("%s\n", d.Serialize().c_str());
-+    } else if ((mode == "button" || mode == "stick") && argc > 2) {
-+        const int seconds = std::max(1, std::atoi(argv[1]));
-+        const Common::ParamPackage device{argv[2]};
++    } else if ((mode == "button" || mode == "stick") && q.size() > 2) {
++        const int seconds = std::max(1, std::atoi(q[1].c_str()));
++        const Common::ParamPackage device{q[2]};
 +        SuyuCmd::Profiles::Capture capture;
 +        capture.stick = mode == "stick";
 +        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{seconds};
-+        while (std::chrono::steady_clock::now() < deadline) {
++        while (std::chrono::steady_clock::now() < deadline && !cancel.load()) {
 +            const auto [binding, name] = capture.Poll(input, device);
 +            if (!binding.empty()) {
 +                std::printf("%s\t%s\n", binding.c_str(), name.c_str());
 +                break;
 +            }
-+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
++            std::this_thread::sleep_for(std::chrono::milliseconds{5});
 +        }
-+    } else if (mode == "names" && argc > 1) {
-+        for (const auto& [binding, name] : input.GetGamepadControls(Common::ParamPackage{argv[1]}))
++    } else if (mode == "names" && q.size() > 1) {
++        for (const auto& [binding, name] : input.GetGamepadControls(Common::ParamPackage{q[1]}))
 +            std::printf("%s\t%s\n", binding.c_str(), name.c_str());
-+    } else if (mode == "defaults" && argc > 1) {
-+        const Common::ParamPackage device{argv[1]};
++    } else if (mode == "defaults" && q.size() > 1) {
++        const Common::ParamPackage device{q[1]};
 +        if (device.Get("engine", "") == "keyboard") {
 +            for (int i = 0; i < Settings::NativeButton::NumButtons; ++i)
 +                std::printf("%s=%s\n", Settings::NativeButton::mapping[i], InputCommon::GenerateKeyboardParam(SdlConfig::default_buttons[i]).c_str());
@@ -24643,7 +24650,64 @@ index 03f738eb63..220cd4dfee 100644
 +                std::printf("%s=%s\n", Settings::NativeAnalog::mapping[analog], param.Serialize().c_str());
 +        }
 +    } else {
-+        std::fprintf(stderr, "usage: --input-capture devices | button|stick <s> <device> | names <device> | defaults <device>\n");
++        return false;
++    }
++    return true;
++}
++} // namespace
++
++static int RunInputCapture(int argc, char** argv) {
++    InputCommon::InputSubsystem input;
++    input.Initialize();
++    WaitForControllers(input);
++    static std::atomic<bool> cancel{false};
++    if (argc > 0 && std::string{argv[0]} == "serve") {
++        std::mutex lock;
++        std::condition_variable wake;
++        std::deque<std::string> lines;
++        bool closed = false;
++        std::thread reader([&] {
++            for (std::string line; std::getline(std::cin, line);) {
++                if (!line.empty() && line.back() == '\r') line.pop_back();
++                if (line == "cancel") {
++                    cancel.store(true);
++                    continue;
++                }
++                std::scoped_lock l{lock};
++                lines.push_back(line);
++                wake.notify_one();
++            }
++            std::scoped_lock l{lock};
++            closed = true;
++            wake.notify_one();
++        });
++        std::printf("ready\n.\n");
++        std::fflush(stdout);
++        for (;;) {
++            std::string line;
++            {
++                std::unique_lock l{lock};
++                wake.wait(l, [&] { return closed || !lines.empty(); });
++                if (lines.empty()) break;
++                line = std::move(lines.front());
++                lines.pop_front();
++            }
++            cancel.store(false);
++            // "<question> [seconds] <device>": the device (last) has no spaces in what the launcher sends
++            std::vector<std::string> q;
++            std::istringstream words(line);
++            for (std::string w; words >> w;) q.push_back(w);
++            AnswerInputQuestion(input, q, cancel);
++            std::printf(".\n");
++            std::fflush(stdout);
++        }
++        reader.join();
++        input.Shutdown();
++        return 0;
++    }
++    std::vector<std::string> q(argv, argv + argc);
++    if (!AnswerInputQuestion(input, q, cancel)) {
++        std::fprintf(stderr, "usage: --input-capture serve | devices | button|stick <s> <device> | names <device> | defaults <device>\n");
 +        input.Shutdown();
 +        return 2;
 +    }
@@ -24675,7 +24739,7 @@ index 03f738eb63..220cd4dfee 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1148,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1212,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -24693,7 +24757,7 @@ index 03f738eb63..220cd4dfee 100644
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1183,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1247,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -24709,7 +24773,7 @@ index 03f738eb63..220cd4dfee 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1207,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1271,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -24727,7 +24791,7 @@ index 03f738eb63..220cd4dfee 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1039,8 +1224,8 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1288,8 @@ int main(int argc, char** argv) {
                  installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
                  installed_config = installed_root / "config";
  #else
@@ -24738,7 +24802,7 @@ index 03f738eb63..220cd4dfee 100644
  #endif
              }
              // Coverage gaps are pooled in the installed suyu's user folder, which
-@@ -1091,6 +1276,7 @@ int main(int argc, char** argv) {
+@@ -1091,6 +1340,7 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -24746,7 +24810,7 @@ index 03f738eb63..220cd4dfee 100644
      bool explicit_content_probe = false;
      std::string explicit_content_dump;
      std::string program_args;
-@@ -1126,12 +1312,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1376,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -24761,7 +24825,7 @@ index 03f738eb63..220cd4dfee 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1345,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1409,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -24771,7 +24835,7 @@ index 03f738eb63..220cd4dfee 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1279,7 +1469,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1533,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -24781,7 +24845,7 @@ index 03f738eb63..220cd4dfee 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1482,34 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1546,34 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -24817,7 +24881,7 @@ index 03f738eb63..220cd4dfee 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1595,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1659,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -24834,7 +24898,7 @@ index 03f738eb63..220cd4dfee 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1649,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1713,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -24929,7 +24993,7 @@ index 03f738eb63..220cd4dfee 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1816,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1880,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -24937,7 +25001,7 @@ index 03f738eb63..220cd4dfee 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1850,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1914,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -24955,7 +25019,7 @@ index 03f738eb63..220cd4dfee 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1783,7 +1925,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +1989,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -24977,7 +25041,7 @@ index 03f738eb63..220cd4dfee 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +1952,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2016,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -25006,7 +25070,7 @@ index 03f738eb63..220cd4dfee 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2002,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2066,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25033,7 +25097,7 @@ index 03f738eb63..220cd4dfee 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,6 +2054,19 @@ int main(int argc, char** argv) {
+@@ -1857,6 +2118,19 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25053,7 +25117,7 @@ index 03f738eb63..220cd4dfee 100644
      system.GetUserChannel().clear();
  
      if (static_cast<u32>(load_parameters.applet_id)) {
-@@ -1925,6 +2135,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2199,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25063,7 +25127,7 @@ index 03f738eb63..220cd4dfee 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2360,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2424,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25071,7 +25135,7 @@ index 03f738eb63..220cd4dfee 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2385,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2449,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25102,7 +25166,7 @@ index 03f738eb63..220cd4dfee 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2426,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2490,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25120,7 +25184,7 @@ index 03f738eb63..220cd4dfee 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2457,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2521,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -25131,7 +25195,7 @@ index 03f738eb63..220cd4dfee 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2485,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2549,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25143,7 +25207,7 @@ index 03f738eb63..220cd4dfee 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2497,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2561,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());

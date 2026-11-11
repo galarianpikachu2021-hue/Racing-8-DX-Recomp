@@ -52,9 +52,14 @@ private:
     };
     using Bindings = QMap<QString, QString>; ///< setting -> binding
 
-    // The engine, asynchronously: one question at a time; `done` gets stdout.
-    void ask(const QStringList& args, int timeout_ms, std::function<void(const QString&)> done);
+    // The engine, asynchronously: a helper (`mk8d-engine --input-capture serve`) kept running while the tab is used, so a press is
+    // caught the moment it happens. One question at a time; `done` gets the answer.
+    void ask(QStringList args, int timeout_ms, std::function<void(const QString&)> done);
     void cancelQuestion();
+    bool startHelper();
+    void stopHelper();
+    void helperOutput();
+    void autoAssign(); ///< with automatic assignment on: controllers nobody has go to players on the keyboard, as the game does
 
     void refreshDevices();
     void showPlayer();
@@ -74,7 +79,11 @@ private:
     QString config_path, engine_path, engine_dir;
     QProcessEnvironment engine_env;
     bool locked = false, busy = false, devices_loaded = false;
-    QProcess* question = nullptr;
+    QProcess* helper = nullptr;
+    bool helper_ready = false;
+    QByteArray helper_buffer;
+    QString pending_line;                     ///< question waiting for the helper to say "ready"
+    bool question = false;                    ///< a question is out
     QTimer* question_timer = nullptr;
     std::function<void(const QString&)> question_done;
 
