@@ -1,6 +1,6 @@
 # Windows session: build the v0.2.3 Windows zip on this PC
 
-You are the Claude Code session on the maintainer's **Windows PC**. The Linux session publishes the releases and cannot compile the Windows programs. Your one job now: **build the standard v0.2.3 Windows zip and put it on the USB drive.** v0.2.3 changes **only the launcher** (console language choice on the Play tab #11, `--nolauncher`/`--play` to start the game without the launcher #17, an updater asset-name change); the engine, exporter, toolchain, plugins and data are unchanged from v0.2.2.
+You are the Claude Code session on the maintainer's **Windows PC**. The Linux session publishes the releases and cannot compile the Windows programs. Your one job now: **build the standard v0.2.3 Windows zip and put it on the USB drive.** v0.2.3 changes **only the launcher and the data folder** (console language choice on the Play tab #11, `--nolauncher`/`--play` to start the game without the launcher #17, the **4.0.1 update** is accepted besides 3.0.4, an updater asset-name change; new file `data\mk8d-4.0.1\hot_blocks.txt`); the engine, exporter, toolchain, plugins and data are unchanged from v0.2.2.
 
 Why locally: GitHub Actions minutes may be billed. **Do not start, re-run or trigger any GitHub Actions run.**
 
@@ -13,9 +13,9 @@ Why locally: GitHub Actions minutes may be billed. **Do not start, re-run or tri
 
 ## Steps
 
-1. `git fetch origin`; check out `origin/main` (detached, separate folder, `core.autocrlf=false`). `CMakeLists.txt` must say `project(KartRecomp VERSION 0.2.3 ...)`.
+1. `git fetch origin`; check out `origin/main` (detached, separate folder, `core.autocrlf=false`). `CMakeLists.txt` must say `project(KartRecomp VERSION 0.2.3 ...)` and `main` must be at `9e19471` or later (4.0.1 support).
 2. **Launcher only:** build `kartrecomp.exe`, `kartrecomp-setup.exe`, `kartrecomp-build.exe` from `app/` with Qt 6.7 + zlib as before, then `windeployqt --release --no-translations`. They must report **0.2.3**.
-3. **Everything else from the published v0.2.2 zip** (download `KartRecomp-windows-x64.zip` from the v0.2.2 release; reading it is fine): `engine\` (incl. `mk8d-engine.exe`, `ENGINE_VERSION` = `9586f9ea01-abi6`, `mimalloc-LICENSE.txt`, `plugins\`), `tools\kartrecomp-export.exe`, `toolchain\`, `data\`, and the text/script files. Replace only the launcher programs and their Qt files.
+3. **Everything else from the published v0.2.2 zip** (download `KartRecomp-windows-x64.zip` from the v0.2.2 release; reading it is fine): `engine\` (incl. `mk8d-engine.exe`, `ENGINE_VERSION` = `9586f9ea01-abi6`, `mimalloc-LICENSE.txt`, `plugins\`), `tools\kartrecomp-export.exe`, `toolchain\`, `data\`, and the text/script files. Replace the launcher programs and their Qt files, and add `data\mk8d-4.0.1\hot_blocks.txt` from the repo (`packaging\windows\assemble.ps1` copies every `data\mk8d-*` folder).
 4. Checks: `tests\windows\test_release_contents.ps1 -Dir KartRecomp -RequirePlugins` passes; the new launcher finds the exporter; the Play tab shows "Console language"; `kartrecomp.exe --nolauncher` starts the game directly (with an already-built game) or shows why it cannot; the update check does not offer an update.
 5. Zip as `KartRecomp-windows-x64.zip` (single top folder `KartRecomp\`) + `KartRecomp-windows-x64.zip.sha256` (`<lowercase hash>  KartRecomp-windows-x64.zip`).
 6. USB drive **racing8test**: new folder `release-v0.2.3-local\` with the zip, its `.sha256` and `BUILD-NOTES.txt` (main commit, tool versions, SHA-256 of `kartrecomp.exe`, list of files that differ from the v0.2.2 zip, anything failed or untested). Then tell the maintainer.
