@@ -23265,18 +23265,22 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..0101fd8de8 100644
+index 03f738eb63..1ec9aeb186 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,11 @@
  // SPDX-FileCopyrightText: 2014 Citra Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
++#ifdef __linux__
++#include <dlfcn.h>
++#include <malloc.h>
++#endif
 +#include "suyu_cmd/kr_platform.h"
  #include <algorithm>
  #include <atomic>
  #include <array>
-@@ -24,10 +25,13 @@
+@@ -24,10 +29,13 @@
  #include <stb_image_write.h>
  #include <SDL3/SDL_messagebox.h>
  #include <SDL3/SDL_misc.h>
@@ -23290,7 +23294,7 @@ index 03f738eb63..0101fd8de8 100644
  #include "common/logging/log.h"
  #include "common/microprofile.h"
  #include "common/fs/path_util.h"
-@@ -45,6 +49,9 @@
+@@ -45,6 +53,9 @@
  #include "core/cpu_manager.h"
  #include "core/crypto/key_manager.h"
  #include "core/file_sys/content_archive.h"
@@ -23300,7 +23304,7 @@ index 03f738eb63..0101fd8de8 100644
  #include "core/file_sys/nca_metadata.h"
  #include "core/file_sys/registered_cache.h"
  #include "core/file_sys/card_image.h"
-@@ -54,6 +61,8 @@
+@@ -54,6 +65,8 @@
  #include "core/hle/service/am/applet_manager.h"
  #include "core/hle/service/am/service/library_applet_creator.h"
  #include "core/hle/service/filesystem/filesystem.h"
@@ -23309,7 +23313,7 @@ index 03f738eb63..0101fd8de8 100644
  #include <map>
  #include "common/lz4_compression.h"
  #include "core/loader/nso.h"
-@@ -62,8 +71,14 @@
+@@ -62,8 +75,14 @@
  #include "frontend_common/config.h"
  #include "input_common/main.h"
  #include "network/network.h"
@@ -23324,7 +23328,7 @@ index 03f738eb63..0101fd8de8 100644
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2_gl.h"
  #ifdef __APPLE__
-@@ -173,56 +188,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
+@@ -173,56 +192,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
  } // namespace
  #endif
  
@@ -23381,7 +23385,7 @@ index 03f738eb63..0101fd8de8 100644
  
  static void PrintHelp(const char* argv0) {
      std::cout << "Usage: " << argv0
-@@ -233,6 +198,7 @@ static void PrintHelp(const char* argv0) {
+@@ -233,6 +202,7 @@ static void PrintHelp(const char* argv0) {
                   "--app-name            Display name when the loader has no title metadata\n"
                   "--content-base        Read-only base XCI/NSP for an explicit update pair\n"
                   "--content-update      Read-only matching update NSP (both flags required)\n"
@@ -23389,7 +23393,7 @@ index 03f738eb63..0101fd8de8 100644
                   "--content-probe       Verify that pair and exit without a window or game\n"
                   "--content-dump        New directory for resolved data (requires --content-probe)\n"
                   "-h, --help            Display this help and exit\n"
-@@ -366,9 +332,43 @@ bool g_native_export_mode = false;
+@@ -366,9 +336,43 @@ bool g_native_export_mode = false;
  bool g_export_package = false;
  SdlConfig* g_sdl_config = nullptr;
  
@@ -23433,7 +23437,7 @@ index 03f738eb63..0101fd8de8 100644
      }
  }
  
-@@ -917,7 +917,105 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +921,105 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -23539,7 +23543,7 @@ index 03f738eb63..0101fd8de8 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1076,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1080,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -23557,7 +23561,7 @@ index 03f738eb63..0101fd8de8 100644
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1111,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1115,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -23573,7 +23577,7 @@ index 03f738eb63..0101fd8de8 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1135,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1139,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -23591,7 +23595,7 @@ index 03f738eb63..0101fd8de8 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1039,8 +1152,8 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1156,8 @@ int main(int argc, char** argv) {
                  installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
                  installed_config = installed_root / "config";
  #else
@@ -23602,7 +23606,7 @@ index 03f738eb63..0101fd8de8 100644
  #endif
              }
              // Coverage gaps are pooled in the installed suyu's user folder, which
-@@ -1091,6 +1204,7 @@ int main(int argc, char** argv) {
+@@ -1091,6 +1208,7 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -23610,7 +23614,7 @@ index 03f738eb63..0101fd8de8 100644
      bool explicit_content_probe = false;
      std::string explicit_content_dump;
      std::string program_args;
-@@ -1126,12 +1240,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1244,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -23625,7 +23629,7 @@ index 03f738eb63..0101fd8de8 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1273,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1277,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -23635,7 +23639,7 @@ index 03f738eb63..0101fd8de8 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1279,7 +1397,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1401,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -23645,7 +23649,7 @@ index 03f738eb63..0101fd8de8 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1410,34 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1414,34 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -23681,7 +23685,7 @@ index 03f738eb63..0101fd8de8 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1523,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1527,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -23698,7 +23702,7 @@ index 03f738eb63..0101fd8de8 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1577,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1581,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -23793,7 +23797,7 @@ index 03f738eb63..0101fd8de8 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1744,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1748,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -23801,7 +23805,7 @@ index 03f738eb63..0101fd8de8 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1778,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1782,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -23819,7 +23823,7 @@ index 03f738eb63..0101fd8de8 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1783,7 +1853,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +1857,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -23841,7 +23845,7 @@ index 03f738eb63..0101fd8de8 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +1880,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +1884,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -23870,7 +23874,7 @@ index 03f738eb63..0101fd8de8 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +1930,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +1934,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -23897,7 +23901,7 @@ index 03f738eb63..0101fd8de8 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,6 +1982,19 @@ int main(int argc, char** argv) {
+@@ -1857,6 +1986,19 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -23917,7 +23921,7 @@ index 03f738eb63..0101fd8de8 100644
      system.GetUserChannel().clear();
  
      if (static_cast<u32>(load_parameters.applet_id)) {
-@@ -1925,6 +2063,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2067,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -23927,7 +23931,7 @@ index 03f738eb63..0101fd8de8 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2288,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2292,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -23935,7 +23939,38 @@ index 03f738eb63..0101fd8de8 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2188,6 +2330,17 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2317,30 @@ int main(int argc, char** argv) {
+                  "PERF sampling off: the window status refresh owns the perf counters");
+     }
+ 
++    // kart-recomp: give the allocator's free memory back now and then. Loading peaks (shader translation, archive reads) leave
++    // several hundred MB free inside malloc; releasing it continuously (tcmalloc aggressive decommit) cost 6% CPU, every 30 s
++    // costs nothing measurable. tcmalloc when it is loaded (play.sh / the launcher preload it), else glibc's malloc_trim.
++    std::atomic<bool> trim_run{std::getenv("KARTRECOMP_NO_MEMORY_TRIM") == nullptr};
++    std::thread trimmer;
++#ifdef __linux__
++    if (trim_run.load()) {
++        trimmer = std::thread([&trim_run] {
++            using ReleaseFn = void (*)();
++            const auto tc_release = reinterpret_cast<ReleaseFn>(dlsym(RTLD_DEFAULT, "MallocExtension_ReleaseFreeMemory"));
++            int ticks = 0;
++            while (trim_run.load(std::memory_order_relaxed)) {
++                std::this_thread::sleep_for(std::chrono::milliseconds{250});
++                if (++ticks % 120 != 0) continue; // every 30 s
++                if (tc_release) {
++                    tc_release();
++                } else {
++                    malloc_trim(0);
++                }
++            }
++        });
++    }
++#endif
++
+     const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
+     const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
+     if (!capture_dir.empty()) {
+@@ -2188,6 +2358,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -23953,7 +23988,7 @@ index 03f738eb63..0101fd8de8 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2361,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2389,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -23964,15 +23999,19 @@ index 03f738eb63..0101fd8de8 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2389,7 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2417,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
 +    emu_window->StopRecordingAndSave();
++    trim_run.store(false, std::memory_order_relaxed);
++    if (trimmer.joinable()) {
++        trimmer.join();
++    }
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2397,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2429,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
