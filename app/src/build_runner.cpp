@@ -35,7 +35,9 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
 #ifndef Q_OS_WIN
     a << "-fPIC"; // Windows DLLs are position-dependent by design (and the mingw driver rejects the flag)
 #endif
-    if (!hot) a << "-O0"; // after -O2: the cold pieces are compiled cheaply
+    // Hot pieces at -O3: measured 2% less game-thread CPU than -O2 (4.0.1, 4 races each), same compile time and size. Cold pieces
+    // are compiled cheaply.
+    a << (hot ? "-O3" : "-O0");
     return a;
 }
 } // namespace

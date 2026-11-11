@@ -82,7 +82,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     plan.outDir = layout.moduleDir();
     plan.hotList = hotList;
     plan.jobs = jobs;
-    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName;
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + "|hot-O3";
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QStringLiteral("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);

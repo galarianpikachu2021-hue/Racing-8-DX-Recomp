@@ -1731,10 +1731,10 @@ index 0000000000..06f5ebe6e5
 +} // namespace KrPlatform
 diff --git a/src/suyu_cmd/mem_scan.h b/src/suyu_cmd/mem_scan.h
 new file mode 100644
-index 0000000000..25c60e1a3a
+index 0000000000..7dbaf328c9
 --- /dev/null
 +++ b/src/suyu_cmd/mem_scan.h
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,183 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: debugging aid for mod work. When a file named `memscan.req` appears in the working directory the running game's memory is
 +// searched and the answers are written to `memscan.out` (the request is deleted). One command per line:
@@ -1743,6 +1743,7 @@ index 0000000000..25c60e1a3a
 +//   strided <width> <max stride> <n> <n> ...   the integers spaced by any common stride (width 1/2/4/8, stride a multiple of the width)
 +//   dump <addr> <len>               hex dump of guest memory
 +//   read64 <addr> [count]           64-bit words
++//   write32 <addr> <value>          writes one 32-bit word
 +#pragma once
 +
 +#include <cstdio>
@@ -1791,6 +1792,20 @@ index 0000000000..25c60e1a3a
 +        std::string cmd;
 +        in >> cmd;
 +        out << "> " << line << "\n";
++        if (cmd == "write32") { // write32 <addr> <value>: one little-endian word (experiments on a running game)
++            std::string a, v;
++            in >> a >> v;
++            const u64 addr = std::strtoull(a.c_str(), nullptr, 0);
++            const u32 value = static_cast<u32>(std::strtoull(v.c_str(), nullptr, 0));
++            if (!mem.IsValidVirtualAddressRange(addr, 4)) {
++                out << "  unmapped\n";
++                continue;
++            }
++            const u32 old_value = mem.Read32(addr);
++            mem.Write32(addr, value);
++            out << "  " << std::hex << addr << ": " << old_value << " -> " << value << std::dec << "\n";
++            continue;
++        }
 +        if (cmd == "dump" || cmd == "read64") {
 +            std::string a, n;
 +            in >> a >> n;
