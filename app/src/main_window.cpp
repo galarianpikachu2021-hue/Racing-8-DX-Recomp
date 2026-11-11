@@ -243,6 +243,7 @@ QWidget* MainWindow::buildPlayTab() {
     form->addRow(tr("Keys + firmware:"), pathRow(home_edit, tr("Select the suyu data folder with your keys")));
 
     language_combo = makeCombo(kConsoleLanguages);
+    language_combo->setCurrentIndex(1); // English (US) until the config says otherwise: a save before loadSettings must not write Japanese
     language_combo->setToolTip(
         tr("The language the emulated console runs the game in, chosen before you start. Saved in the "
            "game's config and used every launch until you pick another here (or in game, where it can also "
