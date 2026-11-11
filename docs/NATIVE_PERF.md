@@ -131,3 +131,22 @@ The bigger lever for laptops is the GPU side (Intel iGPUs) and the frame-rate ca
 - So for laptops, in order: (1) shader capabilities from the device (done, np2), (2) a laptop preset in the launcher (render
   scale 67% + FSR 1 at 1080p output, frame generation off), (3) a real Intel test by the user with `KARTRECOMP_PROFILE` and the
   GPU-time log line, (4) further CPU savings.
+
+## Memory (2026-11-11): 5.2 GB -> 2.7 GB in a race
+
+Measured with `local/exp/memrun.sh` (smaps snapshots grouped per mapping at 30/60/100/130 s; `zeroscan.py` counts all-zero pages in
+the guest-memory memfd; gperftools' heap profiler + `heaprep.py` for the host heap). Effects race, no mods, release engine:
+
+| step | game RSS | what |
+|---|---|---|
+| baseline | 5.2 GB | guest memory 3,178 MB resident, host heap 1,444 MB |
+| mem1: hole punching | 3.65 GB | 74% of the resident guest memory was all-zero: the emulated kernel memsets every page it hands out (`HostMemory::ClearBackingRegion`). On Linux a zero fill of whole pages now punches a hole in the memfd (`fallocate(PUNCH_HOLE)`): freed, reads back as zero. Guest memory 3,178 -> 1,687 MB. |
+| mem2: lazy fiber stacks | 3.23 GB | every emulated thread had two zero-initialized 2 MiB stack arrays (thread fibers too, which never run on them): ~415 MB, 200 of it for the emulated OS's service threads. Now `VirtualBuffer` (mmap/VirtualAlloc, backed when touched) with MADV_NOHUGEPAGE, only for fibers that run code. |
+| mem3: `TCMALLOC_AGGRESSIVE_DECOMMIT=true` | 2.7 GB | tcmalloc kept ~580 MB of freed memory from the loading peak; this returns it. fps unchanged; CPU cost not yet A/B-tested, not yet a default. |
+
+All three: fully static, 60 fps, same log errors (10-11) as before.
+Still open: 874 MB of the guest memory is still all-zero (the game zeroing its own buffers: an SDK-level `memset` replacement that
+punches holes for whole zero pages would catch it; that is the native-SDK direction), the host-side copy of suyu's emulated GPU
+(`Tegra::GPU`, memory manager, macro engine: ~40 MB, unused with the native renderer), and the speculative shader builder (~160 MB
+with the driver's compiler). Windows: hole punching is Linux-only (Windows keeps memset; `DiscardVirtualMemory`/`VirtualAlloc(MEM_RESET)`
+would be the equivalent), the fiber-stack change applies to both.

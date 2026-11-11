@@ -45,6 +45,48 @@ index 920dee36eb..f75fba5367 100644
  }
  
  s64 WallClock::GetGPUTick() const {
+diff --git a/src/common/fiber.cpp b/src/common/fiber.cpp
+index b9be4a257f..de8c6efa46 100644
+--- a/src/common/fiber.cpp
++++ b/src/common/fiber.cpp
+@@ -13,6 +13,10 @@
+ 
+ #include <boost/context/detail/fcontext.hpp>
+ 
++#ifdef __linux__
++#include <sys/mman.h>
++#endif
++
+ namespace Common {
+ 
+ #ifdef __OPENORBIS__
+@@ -26,8 +30,10 @@ struct Fiber::FiberImpl {
+     FiberImpl() {}
+ 
+     u32 canary_1 = CANARY_VALUE;
+-    std::array<u8, DEFAULT_STACK_SIZE> stack{};
+-    std::array<u8, DEFAULT_STACK_SIZE> rewind_stack{};
++    // kart-recomp: reserved virtual memory, backed only where a stack is actually used. These were two zero-initialized
++    // 2 MiB arrays per fiber (also for thread fibers, which never run on them): about 415 MiB resident in a race.
++    VirtualBuffer<u8> stack;
++    VirtualBuffer<u8> rewind_stack;
+     u32 canary_2 = CANARY_VALUE;
+ 
+     boost::context::detail::fcontext_t context{};
+@@ -50,6 +56,13 @@ void Fiber::SetRewindPoint(std::function<void()>&& rewind_func) {
+ 
+ Fiber::Fiber(std::function<void()>&& entry_point_func) : impl{std::make_unique<FiberImpl>()} {
+     impl->entry_point = std::move(entry_point_func);
++    impl->stack.resize(DEFAULT_STACK_SIZE);
++    impl->rewind_stack.resize(DEFAULT_STACK_SIZE);
++#ifdef __linux__
++    // With transparent huge pages set to "always", the first touch of a 2 MiB-aligned stack would map a whole huge page.
++    madvise(impl->stack.data(), DEFAULT_STACK_SIZE, MADV_NOHUGEPAGE);
++    madvise(impl->rewind_stack.data(), DEFAULT_STACK_SIZE, MADV_NOHUGEPAGE);
++#endif
+     impl->stack_limit = impl->stack.data();
+     impl->rewind_stack_limit = impl->rewind_stack.data();
+     u8* stack_base = impl->stack_limit + DEFAULT_STACK_SIZE;
 diff --git a/src/common/fs/path_util.cpp b/src/common/fs/path_util.cpp
 index 88bf023008..7044ca660e 100644
 --- a/src/common/fs/path_util.cpp
@@ -71,7 +113,7 @@ index 88bf023008..7044ca660e 100644
              eden_path_cache = eden_path / CACHE_DIR;
              eden_path_config = eden_path / CONFIG_DIR;
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index 0ae108d9c1..3fd53ae603 100644
+index 0ae108d9c1..3867111256 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -50,6 +50,7 @@
@@ -82,7 +124,25 @@ index 0ae108d9c1..3fd53ae603 100644
  #include <mutex>
  #include <random>
  
-@@ -573,6 +574,19 @@ public:
+@@ -516,6 +517,17 @@ static int shm_open_anon(int flags, mode_t mode) {
+ 
+ class HostMemory::Impl {
+ public:
++#if defined(__linux__)
++    /// kart-recomp: frees whole pages of the memfd backing (they read back as zeros, like a fresh mapping) instead of writing
++    /// zeros into them, which made every cleared page resident. Returns false when the backing is not a memfd.
++    bool PunchHole(size_t offset, size_t length) {
++        if (fd <= 0 || length == 0) {
++            return false;
++        }
++        return fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(offset),
++                         static_cast<off_t>(length)) == 0;
++    }
++#endif
+     explicit Impl(size_t backing_size_, size_t virtual_size_)
+         : backing_size{backing_size_}
+         , virtual_size{virtual_size_}
+@@ -573,6 +585,19 @@ public:
              LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
              return false;
          }
@@ -102,6 +162,26 @@ index 0ae108d9c1..3fd53ae603 100644
  
          // Virtual memory initialization
          virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
+@@ -784,6 +809,19 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
+ }
+ 
+ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
++#if defined(__linux__)
++    // kart-recomp: a zero fill of whole pages frees them instead (74% of the game's resident guest memory was pages the
++    // kernel had zero-filled and the game never wrote). Unaligned edges are still written.
++    if (fill_value == 0 && impl && length >= PageAlignment) {
++        const size_t begin = Common::AlignUp(physical_offset, PageAlignment);
++        const size_t end = Common::AlignDown(physical_offset + length, PageAlignment);
++        if (end > begin && impl->PunchHole(begin, end - begin)) {
++            std::memset(backing_base + physical_offset, 0, begin - physical_offset);
++            std::memset(backing_base + end, 0, physical_offset + length - end);
++            return;
++        }
++    }
++#endif
+     std::memset(backing_base + physical_offset, fill_value, length);
+ }
+ 
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
 index 0000000000..bb13d758a4
