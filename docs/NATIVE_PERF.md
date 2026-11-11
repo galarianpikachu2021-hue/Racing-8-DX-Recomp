@@ -9,7 +9,8 @@ Strict rule unchanged: no JIT anywhere.
 - Scenario: `tools/make-menu-tas.py --effects` race, `KARTRECOMP_NO_MODS=1`, native renderer without scaling, profile from 60 s for
   60 s (CPU mode). `local/exp/ab.sh <label> <module dir>` runs one race with the release engine (`local/game/mk8d-engine`, v0.2.3,
   stamp `d201f1ec0e-abi6`) and a module folder, restores the configs, and prints fps (PERF lines 45-135) and the core-0 split.
-- Single runs vary about 2% in core-0 samples; compare two runs each, alternating.
+- Run-to-run noise is larger than first thought: nc1 alone gave 30.2, 30.2, 30.7 and 32.5 k core-0 samples (computer karts and items
+  differ per race). Whole-run totals only resolve changes above about 3%; the per-category shares are steadier. Use 3+ runs each.
 - Caveat: the `--effects` TAS wedges the player's kart on the wall after the first turns in every build (shots at frames 5400-8100),
   so the profile is 11 computer karts plus a stuck player. Valid for A/B, but fix the TAS before quoting absolute numbers.
 - `tools/profile-report.py` fixes (2026-11-11): symbols of `recompiled_*.so` are now read; file offsets are translated through the ELF
@@ -65,12 +66,20 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
 4. Intel integrated GPUs: needs its own measurement (GPU time per pass at 720p/1080p, render scale defaults, FSR 1 for upscaling,
    shader/pipeline cache warm-up); no Intel hardware here, so build a test path that logs per-pass GPU time and ask the user to run it.
 
+| ci1: on top of nc1, a 4-byte compact copy of the block index (20 MB instead of 40) | **no gain** (30.6 / 30.5 k). Dropped. |
+| np1 (engine, fork `arm_recomp.cpp`): the per-dispatch shared atomic `early_dispatches` add (2.4% of core 0, `lock xadd` bouncing between three threads) now stops counting after 64; the per-dispatch FP-mode read (`stmxcsr`, ~1.9%) only after entry, a serviced SVC or a host hook | engine share of core 0 9.4% -> 7.7% in all three runs; totals 30.7 / 30.7 / 30.6 k vs nc1 30.7 / 32.5 k in the same session. Kept (fork working tree, not yet in patches/suyu). |
+
+Huge pages for guest memory are active in the engine build (log: `MADV_HUGEPAGE on the 4096 MB backing mapping: ok`).
+
 ## Conclusions so far (2026-11-11)
 
 - The game's main thread is bound by cache misses on the game's own data (about 20% of core 0 sits on those loads) and on the
   dispatcher's block index. Removing instructions around them (inline helpers, a 1:1 mapping, conditional chaining) moves the stall
   instead of removing it.
-- What does help is not touching cold data at all: native calls (nc1) skip the dispatcher and its index read on every RET, -4.5%.
+- What does help is not touching cold data at all: native calls (nc1) skip the dispatcher and its index read on every RET
+  (dispatch 12% -> 6.4% of core 0; 2-4% net, within the noise of single runs), and the engine fixes (np1) drop 1.7 points.
+- The emulated OS layer is cheap per frame here: HLE kernel/services under 1% of core 0, the engine's own code 8-10% (NVN hooks,
+  the dispatch loop). Stripping it is worth doing for simplicity and start-up, but it will not give a large frame-time gain on its own.
   Next in the same spirit: BLR/BR through a per-site cache of the last target (no shared lines), and a compact block index
   (4-byte entries, or an index of block starts only) so the remaining dispatches touch less memory.
 - nc1 goes into the generator (`ChainTo` for BL in `core/recompiler/arm64_to_c.h`) behind an exporter switch, default off until it
