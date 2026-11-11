@@ -28,8 +28,8 @@ Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is
 - 3.0.4-only so far: the CTGP DX extra-cup hooks (hooked build) use 3.0.4 addresses.
 
 ## Firmware
-- Firmware newer than 22.5 (23.x) crashes the game's start (integer division by zero); the launcher refuses such firmware by its name.
-  Find the cause so newer firmware works.
+- Done in v0.2.3: the start-up crash was keys older than the firmware (a missing key-area key crashed the AES layer); the engine now stops
+  with a clear message instead, and firmware 23.0.0 with matching keys runs.
 
 ## Performance
 - Windows: frame pacing on some PCs (#14, #20): shader-compile stalls at load, CPU time in the recompiled code.

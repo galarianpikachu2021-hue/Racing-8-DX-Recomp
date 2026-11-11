@@ -1707,6 +1707,69 @@ index 315b273ae8..e4feebcffc 100644
  #ifdef __ANDROID__
      // Aimed specifically for Snapdragon 8 Elite devices
      // This kills performance on desktop, but boosts perf for UMA devices
+diff --git a/src/core/file_sys/fssystem/fssystem_crypto_configuration.cpp b/src/core/file_sys/fssystem/fssystem_crypto_configuration.cpp
+index f494a3e4a3..48eecc13d3 100644
+--- a/src/core/file_sys/fssystem/fssystem_crypto_configuration.cpp
++++ b/src/core/file_sys/fssystem/fssystem_crypto_configuration.cpp
+@@ -4,6 +4,8 @@
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <atomic>
++
+ #include "core/crypto/aes_util.h"
+ #include "core/crypto/key_manager.h"
+ #include "core/file_sys/fssystem/fssystem_crypto_configuration.h"
+@@ -12,6 +14,8 @@ namespace FileSys {
+ 
+ namespace {
+ 
++std::atomic<s32> g_missing_key_generation{-1};
++
+ void GenerateKey(void* dst_key, size_t dst_key_size, const void* src_key, size_t src_key_size,
+                  s32 key_type) {
+     if (key_type == static_cast<s32>(KeyType::ZeroKey)) {
+@@ -40,6 +44,17 @@ void GenerateKey(void* dst_key, size_t dst_key_size, const void* src_key, size_t
+         (std::max)(key_type / NcaCryptoConfiguration::KeyAreaEncryptionKeyIndexCount, 1) - 1;
+     const s32 key_index = key_type % NcaCryptoConfiguration::KeyAreaEncryptionKeyIndexCount;
+ 
++    // kart-recomp: a content file (usually firmware) encrypted with a key generation the user's prod.keys does not have, i.e. keys older
++    // than the firmware. Decrypting with the missing key crashed (integer division by zero inside the AES layer, GitHub #2/#8); now the
++    // file just fails to open and the newest missing generation is recorded so the program can say what is wrong.
++    if (!instance.HasKey(Core::Crypto::S128KeyType::KeyArea, key_generation, key_index)) {
++        s32 seen = g_missing_key_generation.load();
++        while (key_generation > seen && !g_missing_key_generation.compare_exchange_weak(seen, key_generation)) {
++        }
++        std::memset(dst_key, 0xFF, dst_key_size);
++        return;
++    }
++
+     Core::Crypto::AESCipher<Core::Crypto::Key128> cipher(
+         instance.GetKey(Core::Crypto::S128KeyType::KeyArea, key_generation, key_index),
+         Core::Crypto::Mode::ECB);
+@@ -49,6 +64,10 @@ void GenerateKey(void* dst_key, size_t dst_key_size, const void* src_key, size_t
+ 
+ } // namespace
+ 
++s32 MissingKeyAreaGeneration() {
++    return g_missing_key_generation.load();
++}
++
+ const NcaCryptoConfiguration& GetCryptoConfiguration() {
+     static const NcaCryptoConfiguration configuration = {
+         .header_1_sign_key_moduli{},
+diff --git a/src/core/file_sys/fssystem/fssystem_crypto_configuration.h b/src/core/file_sys/fssystem/fssystem_crypto_configuration.h
+index 7fd9c5a8de..4601336123 100644
+--- a/src/core/file_sys/fssystem/fssystem_crypto_configuration.h
++++ b/src/core/file_sys/fssystem/fssystem_crypto_configuration.h
+@@ -9,4 +9,7 @@ namespace FileSys {
+ 
+ const NcaCryptoConfiguration& GetCryptoConfiguration();
+ 
++/// kart-recomp: the newest key generation a content file needed that prod.keys lacks (keys older than the firmware), or -1.
++s32 MissingKeyAreaGeneration();
++
+ }
 diff --git a/src/core/file_sys/kart_text_patch.cpp b/src/core/file_sys/kart_text_patch.cpp
 new file mode 100644
 index 0000000000..5c5550a499

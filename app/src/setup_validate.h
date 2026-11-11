@@ -28,10 +28,6 @@ struct SetupInputs {
 
 QString ValidateBase(const NspInfo& info);
 QString ValidateUpdate(const NspInfo& info);
-// Newest firmware known to work (22.5.x). Newer firmware (23.0.1 reported) crashes the game's test boot.
-inline constexpr int kNewestFirmwareMajor = 22;
-inline constexpr int kNewestFirmwareMinor = 5;
-QString FirmwareTooNew(const QString& path);   // a reason when the folder or zip name says a newer firmware, else empty
 QString ValidateFirmware(const QString& path); // a folder with .nca files, or a .zip
 QString ValidateDlc(const QStringList& files);
 /// All of it, in the order the user fills the page in; `reader` answers questions about an NSP (ReadNspInfo in the app, a fake in tests).

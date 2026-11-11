@@ -36,8 +36,8 @@ In-game overlay (settings): F10 or L3+R3. Plugins: `engine\plugins\kr_{upscaler,
 ## OPEN PROBLEMS (as of v0.2.3)
 Fixed since the first handoff: frame generation above 1080p (`7791dd1`, the generated frame's window crop), the slowdowns (pipeline key,
 static vertex buffers, mimalloc: on-time frames about 25% -> 65% on the test PC), the settings-save crash, Play looking for `mk8d.exe` (#6, #10).
-1. **#8: divide-by-zero crash at start** (`0xc0000094` at `mk8d-engine.exe+0x2e00eb`, called from `+0x2dff06`) on some PCs, at the test boot
-   or at Play, even with firmware 20.0.1-22.5. Symbolize with the build's `.pdb` first.
+1. **#8 (fixed in v0.2.3, needs the v0.2.3 engine):** the divide-by-zero at start (`0xc0000094`) was keys older than the firmware (a missing
+   key-area key crashed the AES layer, reproduced on Linux with firmware 23.0.0 + 20.5 keys). The engine now stops with exit code 6 and a message.
 2. **#12: black areas over the picture** on an RX 7800 XT (Windows 11, v0.2.2), worse in fullscreen.
 3. **#14, #20: poor frame pacing** on some Intel + NVIDIA PCs (shader stutter, long loads).
 4. A crash when closing the game (shutdown-order race in `Core::HID::EmulatedController::GetHomeButtons` from `Service::AM::ButtonPoller`).

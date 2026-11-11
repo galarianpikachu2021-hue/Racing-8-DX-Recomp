@@ -41,11 +41,6 @@ private slots:
     void garbageFromTheExporterBecomesAnError() {
         QVERIFY(!ParseNspInfo("segfault").error.isEmpty());
         QVERIFY(!ParseNspInfo("").error.isEmpty());
-        QVERIFY(FirmwareTooNew("/x/Firmware.23.0.1").contains("23.0.1"));
-        QVERIFY(FirmwareTooNew("C:/dl/Firmware 22.6.0.zip").contains("22.6.0"));
-        QVERIFY(FirmwareTooNew("/x/Firmware.22.5.0").isEmpty());
-        QVERIFY(FirmwareTooNew("/x/Firmware.20.5.0.zip").isEmpty());
-        QVERIFY(FirmwareTooNew("/x/firmware").isEmpty());
         // log or key-file warnings around the answer (newer prod.keys) must not hide it
         const auto noisy = ParseNspInfo("[ 0.01] Crypto <Warning> unknown key 'xyz'\n{\"titleId\":\"0100152000022000\",\"version\":0,\"aarch64\":true,\"hasProgram\":true,\"error\":\"\"}\n");
         QVERIFY(noisy.error.isEmpty());

@@ -6,6 +6,7 @@ Downloads: **Linux** `Racing_8_DX_Recomp-x86_64.AppImage` (renamed from `KartRec
 
 ## New
 
+- **Newer firmware works; the start-up crash is fixed** (#2, #8): the crash (`0xc0000094`, a division by zero) came from keys older than the firmware, not from the firmware itself. Firmware 23.0.0 with matching 23.x keys runs. With keys older than the firmware the game now stops with a clear message instead of crashing (use `prod.keys` from the same firmware version or newer). The 0.2.2 rule that refused firmware newer than 22.5 is removed.
 - **Update 4.0.1 is supported** besides 3.0.4 (#3, #5, #19): pick either on the Setup page. 4.0.1 gets its own list of hot code (carried over from 3.0.4's), so it builds as fast as 3.0.4. Files named "v4.0.0" are usually the old 32-bit 3.0.3 update, which cannot be recompiled; the Setup page says so. Mods that replace the game's menu archives (`UI/cmn/*.sarc`) were made for older updates and stop 4.0.1 at its first loading screen: Play offers to turn them off. Merged mod texts are kept per update.
 - **The AppImage runs on older and non-rolling distros** (#13, #15): everything in it is now built on Ubuntu 22.04, so it needs glibc 2.35 at most (Ubuntu 22.04+, Fedora, SteamOS, Debian 12 and newer). Before, it needed glibc 2.44, so the exporter could not start on Fedora 44 or SteamOS ("the exporter gave no answer").
 - **Console language** (#11): the launcher's Play tab has a "Console language" choice; the game starts in that language.
@@ -15,10 +16,8 @@ Downloads: **Linux** `Racing_8_DX_Recomp-x86_64.AppImage` (renamed from `KartRec
 ## Known issues
 
 - Updates other than 3.0.4 and 4.0.1 are not supported. The CTGP DX extra cups (an experimental hooked build) are 3.0.4 only.
-- Firmware newer than 22.5 (23.x) crashes the game's start: use 22.5.0 or older.
-- Windows: a divide-by-zero crash at start on some PCs (#8), being investigated.
 - Bloom is wrong at 150% and 200% render scale. DLSS on Linux has not been run on an NVIDIA GPU yet.
 
 ## Requirements
 
-A CPU with AVX2/BMI2/FMA (Intel Haswell / AMD Zen or newer). Windows 10/11 64-bit, or Linux with glibc 2.35+ and Vulkan. Your own base game, the 3.0.4 update, `prod.keys` and firmware 22.5.0 or older. Mods stay data-only.
+A CPU with AVX2/BMI2/FMA (Intel Haswell / AMD Zen or newer). Windows 10/11 64-bit, or Linux with glibc 2.35+ and Vulkan. Your own base game, the 3.0.4 or 4.0.1 update, firmware, and `prod.keys` from that firmware version or newer. Mods stay data-only.
