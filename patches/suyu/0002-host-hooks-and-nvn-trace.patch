@@ -2442,10 +2442,10 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
-index 622b67a83c..a3233e1df7 100644
+index 622b67a83c..953767cd5e 100644
 --- a/src/core/hle/service/vi/conductor.cpp
 +++ b/src/core/hle/service/vi/conductor.cpp
-@@ -7,6 +7,7 @@
+@@ -7,12 +7,33 @@
  #include "common/settings.h"
  #include "core/core.h"
  #include "core/core_timing.h"
@@ -2453,10 +2453,20 @@ index 622b67a83c..a3233e1df7 100644
  #include "core/hle/service/vi/conductor.h"
  #include "core/hle/service/vi/container.h"
  #include "core/hle/service/vi/display_list.h"
-@@ -14,6 +15,17 @@
+ #include "core/hle/service/vi/vsync_manager.h"
  
- constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
- 
+-constexpr auto FrameNs = std::chrono::nanoseconds{1000000000 / 60};
++#include <algorithm>
++#include <cstdlib>
++
++// The emulated display's refresh: 60 Hz like the console. KARTRECOMP_VSYNC_HZ (30-360) changes it, for the true frame rate
++// experiments: the game makes one frame per vsync.
++const auto FrameNs = [] {
++    int hz = 60;
++    if (const char* v = std::getenv("KARTRECOMP_VSYNC_HZ")) hz = std::clamp(std::atoi(v), 30, 360);
++    return std::chrono::nanoseconds{1000000000 / hz};
++}();
++
 +namespace {
 +Service::VI::Conductor* g_pacing_conductor = nullptr;
 +void PacingHook() {
@@ -2467,11 +2477,10 @@ index 622b67a83c..a3233e1df7 100644
 +               std::chrono::steady_clock::now().time_since_epoch()).count();
 +}
 +} // namespace
-+
+ 
  namespace Service::VI {
  
- Conductor::Conductor(Core::System& system, Container& container, DisplayList& displays)
-@@ -22,6 +34,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -22,6 +43,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
          m_vsync_managers.insert({display.GetId(), VsyncManager{}});
      });
  
@@ -2488,7 +2497,7 @@ index 622b67a83c..a3233e1df7 100644
      if (system.IsMulticore()) {
          m_event = Core::Timing::CreateEvent(
              "ScreenComposition",
-@@ -47,6 +69,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -47,6 +78,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
  }
  
  Conductor::~Conductor() {
@@ -2497,7 +2506,7 @@ index 622b67a83c..a3233e1df7 100644
      m_system.CoreTiming().UnscheduleEvent(m_event);
  
      if (m_system.IsMulticore()) {
-@@ -67,7 +91,39 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
+@@ -67,7 +100,39 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
      }
  }
  
@@ -2604,10 +2613,10 @@ index 3cc84acfdf..1db5fe21de 100644
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..e01a7acb1f
+index 0000000000..1cdef55536
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1271 @@
+@@ -0,0 +1,1292 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +
@@ -2668,6 +2677,9 @@ index 0000000000..e01a7acb1f
 +    std::unordered_map<u64, std::vector<TextureDesc>> windows;
 +    // Command buffers being recorded, and finished command lists by handle.
 +    std::unordered_map<u64, std::vector<Command>> recording;
++    /// Bumped (under `lock`) whenever a recording starts or ends: draws keep a per-thread pointer to their command buffer's
++    /// list and append without the lock while this is unchanged (see the draw hook).
++    std::atomic<u64> recording_generation{0};
 +    /// Length of each command buffer's last list: the next recording reserves that much, so Append does not regrow
 +    /// (and move every Command) a few times per list per frame.
 +    std::unordered_map<u64, size_t> recorded_size;
@@ -3165,6 +3177,7 @@ index 0000000000..e01a7acb1f
 +    h["nvnCommandBufferBeginRecording"] = [](HookContext& ctx, State& s) {
 +        auto& list = s.recording[ctx.x[0]];
 +        list.clear();
++        s.recording_generation.fetch_add(1, std::memory_order_release);
 +        if (const auto it = s.recorded_size.find(ctx.x[0]); it != s.recorded_size.end()) list.reserve(it->second + it->second / 8);
 +    };
 +    h["nvnCommandBufferSetRenderTargets"] = [](HookContext& ctx, State& s) {
@@ -3605,6 +3618,7 @@ index 0000000000..e01a7acb1f
 +                auto& s = S();
 +                std::scoped_lock lock{s.lock};
 +                auto node = s.recording.extract(cmdbuf);
++                s.recording_generation.fetch_add(1, std::memory_order_release);
 +                if (!node.empty()) {
 +                    s.recorded_size[cmdbuf] = node.mapped().size();
 +                    s.lists[ret.x[0]] = std::make_shared<const std::vector<Command>>(std::move(node.mapped()));
@@ -3818,9 +3832,25 @@ index 0000000000..e01a7acb1f
 +            if (op == Op::Dispatch) {
 +                KartRe::Log("nvn-dispatch groups={}x{}x{}", ctx.x[1], ctx.x[2], ctx.x[3]);
 +            }
-+            {
++            // Draws are most of the NVN calls, and in split-screen several game threads record at once: append without the
++            // global lock. A command buffer is recorded by one thread at a time, and the map's nodes do not move, so a thread
++            // may keep a pointer to its own list until a recording starts or ends anywhere (the generation changes).
++            struct RecordingCache {
++                u64 cmdbuf = 0;
++                std::vector<Command>* list = nullptr;
++                u64 generation = ~u64{0};
++            };
++            static thread_local RecordingCache cache;
++            const u64 gen = st.recording_generation.load(std::memory_order_acquire);
++            if (cache.list && cache.cmdbuf == ctx.x[0] && cache.generation == gen) {
++                cache.list->push_back(std::move(c));
++            } else {
 +                std::scoped_lock lock{st.lock};
-+                Append(st, ctx.x[0], std::move(c));
++                cache = {};
++                if (const auto rit = st.recording.find(ctx.x[0]); rit != st.recording.end()) {
++                    rit->second.push_back(std::move(c));
++                    cache = {ctx.x[0], &rit->second, st.recording_generation.load(std::memory_order_relaxed)};
++                }
 +            }
 +            return replaced && ReturnFromCall(ctx);
 +        });
