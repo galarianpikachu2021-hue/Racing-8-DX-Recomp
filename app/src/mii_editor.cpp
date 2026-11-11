@@ -15,6 +15,8 @@
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QDesktopServices>
+#include <QUrl>
 
 namespace {
 const char* const kFavoriteColors[] = {"Red", "Orange", "Yellow", "Light green", "Green", "Blue",
@@ -92,6 +94,12 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
     auto* bottom = new QHBoxLayout;
     status = new QLabel;
     status->setWordWrap(true);
+    auto* open_folder = new QPushButton(tr("Open Miis folder"));
+    connect(open_folder, &QPushButton::clicked, this, [this] {
+        QDir().mkpath(miis_dir);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(miis_dir));
+    });
+    bottom->addWidget(open_folder);
     save_button = new QPushButton(tr("Save Miis"));
     revert = new QPushButton(tr("Undo changes"));
     bottom->addWidget(status, 1);

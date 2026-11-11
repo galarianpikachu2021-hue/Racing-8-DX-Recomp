@@ -13173,10 +13173,10 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..5ee4dcdf77
+index 0000000000..7a9a4076e9
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,575 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
 +#include "suyu_cmd/native_gpu/overlay_menu.h"
@@ -13245,7 +13245,8 @@ index 0000000000..5ee4dcdf77
 +                       0, true, ""};
 +    items[kSharp] = {"Sharpening", {"Off", "Low", "Medium", "High"}, 3, true, ""};
 +    items[kJitter] = {"Camera jitter", {"Off", "On"}, 0, true, ""};
-+    items[kFrameGen] = {"Frame generation", {"Off", "Built-in (2x)"}, 0, true, "needs a temporal upscaler"};
++    items[kFrameGen] = {"Frame generation", {"Off", "Built-in 2x (120 fps)", "Built-in 3x (180 fps)", "Built-in 4x (240 fps)"}, 0, true,
++                        "needs an upscaler; 3x/4x need a 180/240 Hz display"};
 +    items[kHdr] = {"HDR output", {"Off", "On"}, 0, false, "display not in HDR mode"};
 +    items[kHdrPaper] = {"HDR paper white", {"100 nits", "150 nits", "203 nits (standard)", "250 nits", "300 nits"}, 1, false, "needs HDR output"};
 +    items[kHdrPeak] = {"HDR peak brightness", {"400 nits", "600 nits", "800 nits", "1000 nits", "1500 nits"}, 0, false, "needs HDR output"};
@@ -13313,7 +13314,7 @@ index 0000000000..5ee4dcdf77
 +}
 +
 +void Menu::SetFrameGenPlugins(const std::vector<std::string>& names) {
-+    items[kFrameGen].options = {"Off", "Built-in (2x)"};
++    items[kFrameGen].options = {"Off", "Built-in 2x (120 fps)", "Built-in 3x (180 fps)", "Built-in 4x (240 fps)"};
 +    for (const auto& n : names) items[kFrameGen].options.push_back(n + " (2x)");
 +}
 +
@@ -14910,10 +14911,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..4e96ca1836
+index 0000000000..4e38bd95be
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8155 @@
+@@ -0,0 +1,8260 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -16068,6 +16069,11 @@ index 0000000000..4e96ca1836
 +        vk.vkAllocateCommandBuffers(device, &cbai, &cmd2);
 +        vk.vkCreateFence(device, &fci, nullptr, &fence2);
 +        vk.vkCreateSemaphore(device, &sci, nullptr, &acquired2);
++        for (auto& x : fgx) { // the 3rd and 4th presented frames of 3x/4x frame generation
++            vk.vkAllocateCommandBuffers(device, &cbai, &x.cmd);
++            vk.vkCreateFence(device, &fci, nullptr, &x.fence);
++            vk.vkCreateSemaphore(device, &sci, nullptr, &x.acquired);
++        }
 +        vk.vkCreateSemaphore(device, &sci, nullptr, &rendered2);
 +        if (!CreateUploadRing() || !CreateDescriptorPool() || !CreateSamplers() ||
 +            !CreateDummyTextures() || !CreateSwapchain()) {
@@ -16512,11 +16518,14 @@ index 0000000000..4e96ca1836
 +    void MakeRenderedSemaphores() {
 +        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered3_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        rendered_sems.assign(swap_images.size(), VK_NULL_HANDLE);
 +        rendered2_sems.assign(swap_images.size(), VK_NULL_HANDLE);
++        rendered3_sems.assign(swap_images.size(), VK_NULL_HANDLE);
 +        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 +        for (VkSemaphore& s : rendered_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
 +        for (VkSemaphore& s : rendered2_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
++        for (VkSemaphore& s : rendered3_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
 +    }
 +
 +    // ------------------------------------------------------------ resources
@@ -19744,9 +19753,10 @@ index 0000000000..4e96ca1836
 +            names.push_back(id);
 +        }
 +        overlay = std::make_unique<KartOverlay::Menu>(names);
-+        fg_ids = {"off", "builtin"};
++        // Built-in frame generation makes 1, 2 or 3 frames between two game frames (120/180/240 fps from the game's 60); plugins 1.
++        fg_ids = {"off", "builtin", "builtin3", "builtin4"};
 +        for (const auto& id : KartRecomp::FrameGenHost::Discover()) fg_ids.push_back(id);
-+        overlay->SetFrameGenPlugins(std::vector<std::string>(fg_ids.begin() + 2, fg_ids.end()));
++        overlay->SetFrameGenPlugins(std::vector<std::string>(fg_ids.begin() + kFgFirstPlugin, fg_ids.end()));
 +        LoadOverlaySettings();
 +        if (const char* want = std::getenv("KARTRECOMP_UPSCALER")) {
 +            const auto it = std::find(overlay_upscaler_ids.begin(), overlay_upscaler_ids.end(), want);
@@ -19864,7 +19874,8 @@ index 0000000000..4e96ca1836
 +    /// Frame-generation backend: index into fg_ids (0 off, 1 the built-in interpolator, then plugins).
 +    void SelectFrameGen(int index) {
 +        fg_plugin_failed = false;
-+        if (index >= 2 && static_cast<size_t>(index) < fg_ids.size()) {
++        fg_mult = index == 2 ? 3 : index == 3 ? 4 : 2;
++        if (index >= kFgFirstPlugin && static_cast<size_t>(index) < fg_ids.size()) {
 +            framegen.Select(UpscalerDevice(), fg_ids[static_cast<size_t>(index)]);
 +        } else {
 +            framegen.Unload();
@@ -21102,9 +21113,9 @@ index 0000000000..4e96ca1836
 +            dlci.bindingCount = 2;
 +            dlci.pBindings = bindings;
 +            vk.vkCreateDescriptorSetLayout(device, &dlci, nullptr, &hdr_dsl);
-+            const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
++            const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8};
 +            VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-+            dpci.maxSets = 2; // one per image presented in a frame (the generated one and the real one)
++            dpci.maxSets = 4; // one per image presented in a frame (up to 3 generated ones and the real one)
 +            dpci.poolSizeCount = 1;
 +            dpci.pPoolSizes = &pool_size;
 +            vk.vkCreateDescriptorPool(device, &dpci, nullptr, &hdr_pool);
@@ -21114,6 +21125,8 @@ index 0000000000..4e96ca1836
 +            dsai.pSetLayouts = &hdr_dsl;
 +            vk.vkAllocateDescriptorSets(device, &dsai, &hdr_sets[0]);
 +            vk.vkAllocateDescriptorSets(device, &dsai, &hdr_sets[1]);
++            vk.vkAllocateDescriptorSets(device, &dsai, &hdr_sets[2]);
++            vk.vkAllocateDescriptorSets(device, &dsai, &hdr_sets[3]);
 +            const VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32};
 +            VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 +            plci.setLayoutCount = 1;
@@ -21449,19 +21462,87 @@ index 0000000000..4e96ca1836
 +        MemoryBarrier();
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fg_pipe);
 +        vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fg_layout, 0, 1, &fg_set, 0, nullptr);
++        // A plugin makes one frame (half way); the built-in interpolator 1, 2 or 3 (at 1/n .. (n-1)/n, n = fg_mult).
++        fg_frame_mult = mode > 0.5f ? 2 : fg_mult;
++        fg_last_mode = mode;
++        fg_last_win = win_img;
++        RecordInterp(1.0f / static_cast<float>(fg_frame_mult));
++        return true;
++    }
++
++    /// The interpolation pass into fg_out/fg_ui at time `t` between the previous and the current frame (descriptor set as written by
++    /// GenerateInterp this frame).
++    void RecordInterp(float t) {
++        Image* win_img = fg_last_win;
++        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fg_pipe);
++        vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fg_layout, 0, 1, &fg_set, 0, nullptr);
 +        const struct { int32_t size[2]; float render[2]; float t; float mode; float pad[2]; } push{
 +            {static_cast<int32_t>(win_img->width), static_cast<int32_t>(win_img->height)},
-+            {static_cast<float>(up_motion.width), static_cast<float>(up_motion.height)}, 0.5f, mode, {0, 0}};
++            {static_cast<float>(up_motion.width), static_cast<float>(up_motion.height)}, t, fg_last_mode, {0, 0}};
 +        vk.vkCmdPushConstants(cmd, fg_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 +        vk.vkCmdDispatch(cmd, (win_img->width + 7) / 8, (win_img->height + 7) / 8, 1);
 +        MemoryBarrier();
-+        return true;
++    }
++
++    /// 3x/4x: the k-th presented frame of this game frame (k = 2 .. n-1), generated at t = k/n into a swapchain image of its own and
++    /// presented (k-1)/n of a frame after the first.
++    void PresentExtraFrame(int k, std::chrono::steady_clock::time_point first_present) {
++        auto& x = fgx[static_cast<size_t>(k - 2)];
++        vk.vkWaitForFences(device, 1, &x.fence, VK_TRUE, UINT64_MAX);
++        u32 idx = 0;
++        const VkResult acq = vk.vkAcquireNextImageKHR(device, swapchain, 100'000'000, x.acquired, VK_NULL_HANDLE, &idx);
++        if (SwapchainStale(acq)) resize_pending = true;
++        if (acq != VK_SUCCESS) return;
++        vk.vkResetFences(device, 1, &x.fence);
++        const VkCommandBuffer main_cmd = cmd;
++        cmd = x.cmd;
++        vk.vkResetCommandBuffer(cmd, 0);
++        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++        vk.vkBeginCommandBuffer(cmd, &bi);
++        MemoryBarrier(); // after the earlier submissions' use of fg_out
++        RecordInterp(static_cast<float>(k) / static_cast<float>(fg_frame_mult));
++        const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++        const VkImage target = swap_images[idx];
++        Barrier(target, color_range, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++        PresentBody(target, &fg_out, &fg_ui, 2.0f, k, false);
++        const bool drawn = DrawOverlay(target);
++        Barrier(target, color_range, drawn ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
++        vk.vkEndCommandBuffer(cmd);
++        cmd = main_cmd;
++        const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
++        si.waitSemaphoreCount = 1;
++        si.pWaitSemaphores = &x.acquired;
++        si.pWaitDstStageMask = &wait_stage;
++        si.commandBufferCount = 1;
++        si.pCommandBuffers = &x.cmd;
++        si.signalSemaphoreCount = 1;
++        si.pSignalSemaphores = &rendered3_sems[idx];
++        {
++            std::scoped_lock lock{queue_mutex};
++            vk.vkQueueSubmit(queue_handle, 1, &si, x.fence);
++        }
++        QueuePresent(first_present + std::chrono::microseconds(static_cast<long>(fg_period_ms * 1000.0 * (k - 1) / fg_frame_mult)), idx,
++                     rendered3_sems[idx], false);
++    }
++
++    /// Hands a present to the presenter thread, to be made at `at`.
++    void QueuePresent(std::chrono::steady_clock::time_point at, u32 index, VkSemaphore sem, bool real) {
++        if (!fg_thread.joinable()) fg_thread = std::thread([this] { FgPresentThread(); });
++        {
++            std::scoped_lock lock{fg_mx};
++            fg_queue.push_back({at, index, sem, real});
++            std::sort(fg_queue.begin(), fg_queue.end(), [](const auto& a, const auto& b) { return a.at < b.at; });
++        }
++        fg_cv.notify_all();
 +    }
 +
 +    /// Second half of a frame-generation frame: waits until half a frame after the generated frame went out, then presents the
 +    /// real frame in a command buffer of its own.
 +    void PresentRealFrame(Image* src, std::chrono::steady_clock::time_point first_present) {
-+        FgWaitIdle(); // the previous real frame has gone out (and its semaphore is free again)
++        FgWaitReal(); // the previous real frame has gone out (and its semaphore is free again)
 +        vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
 +        u32 index2 = 0;
 +        const VkResult acq = vk.vkAcquireNextImageKHR(device, swapchain, 100'000'000, acquired2, VK_NULL_HANDLE, &index2);
@@ -21497,28 +21578,21 @@ index 0000000000..4e96ca1836
 +            std::scoped_lock lock{queue_mutex};
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence2);
 +        }
-+        // The image is drawn; only presenting it waits for half a frame, and that wait happens on a thread of its own so the
++        // The image is drawn; only presenting it waits ((n-1)/n of a frame), and that wait happens on a thread of its own so the
 +        // renderer can start on the next frame (the game stalled on a renderer that slept).
-+        if (!fg_thread.joinable()) fg_thread = std::thread([this] { FgPresentThread(); });
-+        {
-+            std::scoped_lock lock{fg_mx};
-+            fg_at = first_present + std::chrono::microseconds(static_cast<long>(fg_period_ms * 500.0));
-+            fg_pending_index = index2;
-+            fg_pending = true;
-+        }
-+        fg_cv.notify_all();
++        QueuePresent(first_present + std::chrono::microseconds(static_cast<long>(fg_period_ms * 1000.0 * (fg_frame_mult - 1) / fg_frame_mult)),
++                     index2, rendered2_sems[index2], true);
 +    }
 +
 +    void FgPresentThread() {
 +        KrPlatform::SetCurrentThreadName("FrameGenPresent");
 +        std::unique_lock lk{fg_mx};
 +        while (true) {
-+            fg_cv.wait(lk, [&] { return fg_pending || fg_stop; });
++            fg_cv.wait(lk, [&] { return !fg_queue.empty() || fg_stop; });
 +            if (fg_stop) return;
-+            const auto at = fg_at;
-+            u32 index2 = fg_pending_index;
++            const FgPresent next = fg_queue.front();
 +            lk.unlock();
-+            std::this_thread::sleep_until(at);
++            std::this_thread::sleep_until(next.at);
 +            const auto woke = std::chrono::steady_clock::now();
 +            double lock_ms = 0.0, present_ms = 0.0;
 +            {
@@ -21527,31 +21601,38 @@ index 0000000000..4e96ca1836
 +                lock_ms = std::chrono::duration<double, std::milli>(locked - woke).count();
 +                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +                pi.waitSemaphoreCount = 1;
-+                pi.pWaitSemaphores = &rendered2_sems[index2];
++                pi.pWaitSemaphores = &next.sem;
 +                pi.swapchainCount = 1;
 +                pi.pSwapchains = &swapchain;
-+                pi.pImageIndices = &index2;
++                pi.pImageIndices = &next.index;
 +                const VkResult r = vk.vkQueuePresentKHR(queue_handle, &pi);
 +                if (SwapchainStale(r)) resize_pending = true;
 +                present_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - locked).count();
 +            }
 +            lk.lock();
 +            // Diagnostics for the periodic log line: how late the wake-up was, how long the queue lock and the present call took.
-+            fg_stat_late_max = std::max(fg_stat_late_max, std::chrono::duration<double, std::milli>(woke - at).count());
++            fg_stat_late_max = std::max(fg_stat_late_max, std::chrono::duration<double, std::milli>(woke - next.at).count());
 +            fg_stat_lock_max = std::max(fg_stat_lock_max, lock_ms);
 +            fg_stat_present_max = std::max(fg_stat_present_max, present_ms);
 +            fg_stat_present_sum += present_ms;
 +            ++fg_stat_count;
-+            fg_pending = false;
++            fg_queue.erase(fg_queue.begin());
 +            fg_cv.notify_all();
 +        }
 +    }
 +
-+    /// Waits until the deferred present of the real frame (if any) has been made.
++    /// Waits until every deferred present of the last frame has been made.
 +    void FgWaitIdle() {
 +        if (!fg_thread.joinable()) return;
 +        std::unique_lock lk{fg_mx};
-+        fg_cv.wait(lk, [&] { return !fg_pending; });
++        fg_cv.wait(lk, [&] { return fg_queue.empty(); });
++    }
++
++    /// Waits until the last frame's real present has been made (its command buffer and semaphore are reused).
++    void FgWaitReal() {
++        if (!fg_thread.joinable()) return;
++        std::unique_lock lk{fg_mx};
++        fg_cv.wait(lk, [&] { return std::none_of(fg_queue.begin(), fg_queue.end(), [](const auto& p) { return p.real; }); });
 +    }
 +
 +    /// The HDR10 present pass: the finished frame (in `src`, letterboxed into the rectangle) with the 3D part's highlights
@@ -22384,6 +22465,7 @@ index 0000000000..4e96ca1836
 +            if (++fg_count % 600 == 1) {
 +                LOG_INFO(Frontend, "frame generation: {} generated frames so far (frame period {:.1f} ms)", fg_count, fg_period_ms);
 +            }
++            for (int k = 2; k < fg_frame_mult; ++k) PresentExtraFrame(k, now);
 +            PresentRealFrame(fg_real, now);
 +        }
 +        if (!dumps.empty()) {
@@ -22678,6 +22760,11 @@ index 0000000000..4e96ca1836
 +        vk.vkDestroySemaphore(device, rendered, nullptr);
 +        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered3_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (auto& x : fgx) {
++            vk.vkDestroyFence(device, x.fence, nullptr);
++            vk.vkDestroySemaphore(device, x.acquired, nullptr);
++        }
 +        vk.vkDestroyFence(device, fence, nullptr);
 +        vk.vkDestroyCommandPool(device, pool, nullptr);
 +        vk.vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -22882,6 +22969,25 @@ index 0000000000..4e96ca1836
 +    bool hdr_active = false;          ///< the swapchain is HDR10 and the present pass expands the 3D image
 +    bool hdr_failed = false;
 +    bool fg_on = false;               ///< frame generation is on and a temporal upscaler is running
++    static constexpr int kFgFirstPlugin = 4; ///< fg_ids: off, builtin (2x), builtin3, builtin4, then plugins
++    int fg_mult = 2;                  ///< presented frames per game frame (built-in: 2..4; plugins: 2)
++    int fg_frame_mult = 2;            ///< what this frame used (a plugin's frame is always half way)
++    float fg_last_mode = 0.0f;
++    Image* fg_last_win = nullptr;
++    struct FgExtra {
++        VkCommandBuffer cmd = VK_NULL_HANDLE;
++        VkFence fence = VK_NULL_HANDLE;
++        VkSemaphore acquired = VK_NULL_HANDLE;
++    };
++    std::array<FgExtra, 2> fgx{};
++    std::vector<VkSemaphore> rendered3_sems; ///< per swapchain image, for the extra generated frames
++    struct FgPresent {
++        std::chrono::steady_clock::time_point at;
++        u32 index;
++        VkSemaphore sem;
++        bool real;
++    };
++    std::vector<FgPresent> fg_queue;  ///< deferred presents, earliest first (presenter thread)
 +    std::array<u64, 8> fg_skip{};
 +    u64 fg_tried = 0;
 +    bool fg_failed = false, fg_generated = false;
@@ -22917,7 +23023,7 @@ index 0000000000..4e96ca1836
 +    VkPipelineLayout hdr_layout = VK_NULL_HANDLE;
 +    VkDescriptorSetLayout hdr_dsl = VK_NULL_HANDLE;
 +    VkDescriptorPool hdr_pool = VK_NULL_HANDLE;
-+    VkDescriptorSet hdr_sets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++    VkDescriptorSet hdr_sets[4] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
 +    VkSampler hdr_sampler = VK_NULL_HANDLE;
 +    Image ov_font;
 +    bool ov_font_uploaded = false, ov_failed = false;

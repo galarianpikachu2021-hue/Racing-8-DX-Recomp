@@ -2,6 +2,9 @@
 #include "main_window.h"
 #include "mii_editor.h"
 
+#include <QDesktopServices>
+#include <QUrl>
+
 #include "ctgp_convert.h"
 #include "setup_page.h"
 #include "updater.h"
@@ -337,6 +340,14 @@ QWidget* MainWindow::buildPlayTab() {
     buttons->addWidget(fullscreen_check);
     buttons->addWidget(nvn_capture_check);
     buttons->addStretch();
+    // The game's save and the Mii database live in plain folders of their own (<data root>/saves, <data root>/miis).
+    auto* saves_button = new QPushButton(tr("Open saves folder"));
+    saves_button->setToolTip(tr("Your game save (userdata.dat). Copy it to back it up."));
+    connect(saves_button, &QPushButton::clicked, this, [this] {
+        QDir().mkpath(package.savesDir());
+        QDesktopServices::openUrl(QUrl::fromLocalFile(package.savesDir()));
+    });
+    buttons->addWidget(saves_button);
     auto* update_button = new QPushButton(tr("Check for updates"));
     connect(update_button, &QPushButton::clicked, this, [this] { updater->check(false); });
     buttons->addWidget(update_button);
@@ -807,8 +818,9 @@ QWidget* MainWindow::buildEnhancementsTab() {
     sharpness_combo = makeCombo({tr("Off"), tr("Low"), tr("Medium"), tr("High")});
     jitter_check = new QCheckBox(tr("Camera jitter (needed by temporal upscalers; they switch it on themselves)"));
     framegen_combo = new QComboBox;
-    framegen_combo->setToolTip(tr("Doubles the frame rate with a generated frame between each pair of real ones. The HUD is drawn over "
-                                  "the generated frame, so it never smears. Needs a temporal upscaler."));
+    framegen_combo->setToolTip(tr("Generated frames between the game's own 60 per second: 2x = 120 fps, 3x = 180 fps, 4x = 240 fps "
+                                  "(the built-in generator; FSR 3 makes 2x). The HUD is drawn over every generated frame, so it never "
+                                  "smears. Needs an upscaler on, and a display at least that fast (180/240 Hz) for 3x/4x."));
     hdr_check = new QCheckBox(tr("HDR10 output (needs the display in HDR mode)"));
     hdr_paper_combo = makeCombo({tr("100 nits"), tr("150 nits"), tr("203 nits (standard)"), tr("250 nits"), tr("300 nits")});
     hdr_peak_combo = makeCombo({tr("400 nits"), tr("600 nits"), tr("800 nits"), tr("1000 nits"), tr("1500 nits")});
@@ -920,14 +932,16 @@ void MainWindow::loadOverlay() {
     }
     upscaler_combo->setCurrentIndex(qMax(0, upscaler_ids.indexOf(overlay.value(QStringLiteral("upscaler"), QStringLiteral("off")))));
 
-    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin")} + FindPluginIds(package.pluginsParent(), QStringLiteral("framegen"), {DataLayout::Default().pluginsDir()});
+    framegen_ids = QStringList{QStringLiteral("off"), QStringLiteral("builtin"), QStringLiteral("builtin3"), QStringLiteral("builtin4")} + FindPluginIds(package.pluginsParent(), QStringLiteral("framegen"), {DataLayout::Default().pluginsDir()});
     if (!framegen_ids.contains(QStringLiteral("fsr3")) && FindPluginIds(package.pluginsParent(), QStringLiteral("upscaler"), {DataLayout::Default().pluginsDir()}).contains(QStringLiteral("fsr3"))) {
         framegen_ids << QStringLiteral("fsr3"); // the FSR 3 library carries its frame generation
     }
     framegen_combo->clear();
     for (const auto& id : framegen_ids) {
         framegen_combo->addItem(id == QLatin1String("off")       ? tr("Off")
-                                : id == QLatin1String("builtin") ? tr("Built-in (2x)")
+                                : id == QLatin1String("builtin") ? tr("Built-in 2x (120 fps)")
+                                : id == QLatin1String("builtin3") ? tr("Built-in 3x (180 fps)")
+                                : id == QLatin1String("builtin4") ? tr("Built-in 4x (240 fps)")
                                 : id == QLatin1String("fsr3")    ? tr("FSR 3 frame generation (2x)")
                                                                  : id + QStringLiteral(" (2x)"));
     }
