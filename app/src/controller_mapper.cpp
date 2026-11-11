@@ -11,6 +11,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QShowEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QSaveFile>
@@ -692,6 +693,18 @@ public:
     int key = 0;
 
 protected:
+    // Takes the keyboard as soon as it opens, wherever the mouse is (focus-follows-mouse desktops otherwise leave it unfocused).
+    void showEvent(QShowEvent* e) override {
+        QDialog::showEvent(e);
+        raise();
+        activateWindow();
+        setFocus(Qt::OtherFocusReason);
+        grabKeyboard();
+    }
+    void done(int r) override {
+        releaseKeyboard();
+        QDialog::done(r);
+    }
     void keyPressEvent(QKeyEvent* e) override {
         if (e->key() == Qt::Key_Escape) {
             reject();
