@@ -10,6 +10,8 @@ Strict rule unchanged: no JIT anywhere.
   60 s (CPU mode). `local/exp/ab.sh <label> <module dir>` runs one race with the release engine (`local/game/mk8d-engine`, v0.2.3,
   stamp `d201f1ec0e-abi6`) and a module folder, restores the configs, and prints fps (PERF lines 45-135) and the core-0 split.
 - Single runs vary about 2% in core-0 samples; compare two runs each, alternating.
+- Caveat: the `--effects` TAS wedges the player's kart on the wall after the first turns in every build (shots at frames 5400-8100),
+  so the profile is 11 computer karts plus a stuck player. Valid for A/B, but fix the TAS before quoting absolute numbers.
 - `tools/profile-report.py` fixes (2026-11-11): symbols of `recompiled_*.so` are now read; file offsets are translated through the ELF
   LOAD segments (lld places code 0x1000 above its file offset, which had shifted every name to a neighbour: profiles symbolized before
   this showed `recomp_ginv`/`recomp_aes_sbox` where the memory helpers were); map paths may contain spaces.
@@ -48,7 +50,9 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
 | experiment | result |
 |---|---|
 | dc1: shared 8,192-entry cache of recent targets in front of the block index (`recomp_export.c`) | **worse**: core 0 +7% (33.8 k vs 31.4-31.9 k), dispatch 15% vs 12%. The table is written by three game threads and its lines bounce between cores. Dropped (likely also why the earlier dispatch cache was reverted). |
-| cc1: chain conditional branches (216 k two-way exits in `main` tail-call their targets instead of returning to the dispatcher) | running |
+| cc1: chain conditional branches (216 k two-way exits in `main` tail-call their targets instead of returning to the dispatcher) | **neutral**: core 0 31.1 k / 32.3 k vs 31.4 k / 31.9 k; dispatch share 12% -> 7.4%, but game code rose by the same amount (the block-index miss is replaced by misses and mispredicts in the chained code). Same outcome as the old block chaining. |
+| nc1: on top of cc1, BL as a native C call with a guarded direct continuation (176,702 BLs in `main`, depth counted in the unused `fm_reserved` field, capped at 48), so a RET does not go back to the dispatcher | **better, -4.5% core 0**: 30.19 k / 30.20 k vs baseline 31.4 / 31.9 / 31.5 k; dispatch 6.2-6.5%. Fully static, 60 fps, same picture and log errors as the baseline. |
+| im1: on top of nc1, the plain loads' fast path inline in the hot (-O2) pieces only (an older whole-image inline was 14% slower from code growth) | running |
 
 ## Plan (ordered by expected gain per effort; revise with each result)
 
