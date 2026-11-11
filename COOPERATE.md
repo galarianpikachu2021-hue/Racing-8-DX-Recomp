@@ -13,7 +13,7 @@ Why locally: GitHub Actions minutes may be billed. **Do not start, re-run or tri
 
 ## Steps
 
-1. `git fetch origin`; check out `origin/main` (detached, separate folder, `core.autocrlf=false`). `CMakeLists.txt` must say `project(KartRecomp VERSION 0.2.3 ...)` and `main` must be at `b5b835d` or later (4.0.1 support and the 4.0.1 mod warning; if the Linux session pushes a newer v0.2.3 commit, take the newest).
+1. `git fetch origin`; check out `origin/main` (detached, separate folder, `core.autocrlf=false`). `CMakeLists.txt` must say `project(KartRecomp VERSION 0.2.3 ...)` and `main` must be at the newest commit (4.0.1 support and the 4.0.1 mod warning; if the Linux session pushes a newer v0.2.3 commit, take the newest).
 2. **Launcher only:** build `kartrecomp.exe`, `kartrecomp-setup.exe`, `kartrecomp-build.exe` from `app/` with Qt 6.7 + zlib as before, then `windeployqt --release --no-translations`. They must report **0.2.3**.
 3. **Everything else from the published v0.2.2 zip** (download `KartRecomp-windows-x64.zip` from the v0.2.2 release; reading it is fine): `engine\` (incl. `mk8d-engine.exe`, `ENGINE_VERSION` = `9586f9ea01-abi6`, `mimalloc-LICENSE.txt`, `plugins\`), `tools\kartrecomp-export.exe`, `toolchain\`, `data\`, and the text/script files. Replace the launcher programs and their Qt files, and add `data\mk8d-4.0.1\hot_blocks.txt` from the repo (`packaging\windows\assemble.ps1` copies every `data\mk8d-*` folder).
 4. Checks: `tests\windows\test_release_contents.ps1 -Dir KartRecomp -RequirePlugins` passes; the new launcher finds the exporter; the Play tab shows "Console language"; `kartrecomp.exe --nolauncher` starts the game directly (with an already-built game) or shows why it cannot; the update check does not offer an update.
