@@ -42,6 +42,10 @@ def main() -> int:
     effects = "--effects" in sys.argv
     time_trial = "--time-trial" in sys.argv
     cup = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--cup=")), 0)
+    # --players=N (2-4): split-screen Grand Prix. The main menu takes input from about frame 510: the A at 520 is dropped, Down at
+    # 530 picks Multiplayer and N-2 Right presses the player count. Players 2..N get script0-<n>.txt next to the given file with the
+    # same menu taps and the accelerator held in the race (player 2 must be connected in sdl2-config.ini, and so on).
+    players = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--players=")), 1)
     # Races always use Smart Steering (the antenna): the stick stays centred and the pause-menu toggle below switches it on once the
     # countdown is over (verified on Mario Kart Stadium and Mario Circuit: the pause panel reads OFF until the L press, ON after).
     # Time trials have no antenna. --weave brings back the old sine-wave steering without it.
@@ -50,7 +54,14 @@ def main() -> int:
     lines = []
     race_start = 2300 if centre_stick else 3400
     # Title and menus: hold A for 4 frames every second.
-    for f in range(400, race_start, 60):
+    menu_taps = [f for f in range(400, race_start, 60) if not (players > 1 and f == 520)]
+    if players > 1:
+        for k in range(4):
+            lines.append(f"{530 + k} KEY_DDOWN 0;0 0;0")
+        for i in range(players - 2):
+            for k in range(4):
+                lines.append(f"{545 + 12 * i + k} KEY_DRIGHT 0;0 0;0")
+    for f in menu_taps:
         for k in range(4):
             lines.append(f"{f + k} KEY_A 0;0 0;0")
         # Character select is on screen around frame 1000.
@@ -94,6 +105,15 @@ def main() -> int:
     lines.sort(key=lambda line: int(line.split()[0]))
     with open(args[0], "w") as out:
         out.write("\n".join(lines) + "\n")
+    if players > 1:
+        import os
+        base = os.path.join(os.path.dirname(os.path.abspath(args[0])), "script0-{}.txt")
+        other = [f"{f + k} KEY_A 0;0 0;0" for f in menu_taps for k in range(4)]
+        other += [f"{f} KEY_A 0;0 0;0" for f in range(race_start, 12000)]
+        other.sort(key=lambda line: int(line.split()[0]))
+        for n in range(2, players + 1):
+            with open(base.format(n), "w") as out:
+                out.write("\n".join(other) + "\n")
     return 0
 
 

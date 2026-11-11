@@ -14884,10 +14884,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..1081d38e45
+index 0000000000..c4a6c165d7
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8073 @@
+@@ -0,0 +1,8108 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -19956,6 +19956,40 @@ index 0000000000..1081d38e45
 +        }
 +        frame_has_scene = last_depth != SIZE_MAX;
 +        if (!frame_has_scene) return;
++        // Split-screen: each player's view is its own scene -> tonemap cycle into the same full-size image. The upscale point
++        // takes one scene per frame (the last), which wiped the other views (only one of four drawn in 4-player). With more than
++        // one cycle the frame renders at the output size with no upscale point: correct, though without render scale or a
++        // temporal upscaler (those would need a history per view).
++        {
++            int cycles = 0;
++            bool depth_since = false, one_target = true;
++            const Pass* last_scene = nullptr;
++            std::optional<ImageKey> view_target;
++            for (const Pass& p : passes) {
++                if (p.depth) {
++                    depth_since = true;
++                    last_scene = &p;
++                } else if (p.tonemap_format && depth_since && last_scene && last_scene->key != p.key && last_scene->key && p.key &&
++                           std::get<3>(*last_scene->key) * 5 >= std::get<3>(*p.key) * 2) {
++                    // A view renders its scene into its own image (at least ~half the width: icons and portraits are not views)
++                    // and tonemaps it into the shared full-size image; a depth-tested pass drawing into that image itself (3D
++                    // parts of a menu) is not another view. Every view targets the same image.
++                    if (view_target && *view_target != *p.key) one_target = false;
++                    view_target = p.key;
++                    ++cycles;
++                    depth_since = false;
++                }
++            }
++            if (!one_target) cycles = 1;
++            if (cycles > 1) {
++                if (!multi_view_logged) {
++                    multi_view_logged = true;
++                    LOG_INFO(Frontend, "split-screen ({} views): render scale and upscaler off for these frames", cycles);
++                }
++                frame_has_scene = false;
++                return;
++            }
++        }
 +        if (scene_ratio > 1.0001f && last_depth + 1 < passes.size() && passes[last_depth].key) {
 +            ss_cmd = passes[last_depth + 1].cmd;
 +            ss_desc = passes[last_depth].cmd->colors[0];
@@ -22747,6 +22781,7 @@ index 0000000000..1081d38e45
 +    float cur_scale = 1.0f;       ///< scale new and resized screen-size targets get right now
 +    float scene_scale = 1.0f, out_scale = 1.0f, frame_scene_scale = 1.0f;
 +    bool split_mode = false;      ///< the 3D render scale row is on
++    bool multi_view_logged = false;
 +    bool post_phase = false;      ///< this frame is past the upscale point
 +    bool frame_upscaled = false;
 +    bool frame_has_scene = false;
