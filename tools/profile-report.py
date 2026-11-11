@@ -19,6 +19,7 @@ is the quick way to compare two builds.
 """
 import bisect
 import collections
+import os
 import re
 import subprocess
 import sys
@@ -75,14 +76,41 @@ def main():
             f = line.split()
             samples[int(f[1])].append([int(x, 16) for x in f[3:]])
             times[int(f[1])].append(int(f[2]))
-    addrs, names = load_symbols(args[1])
-    exe = next(((lo, off) for lo, hi, off, path in maps if path.endswith("mk8d")), None)
+    # The engine build (mk8d-engine) keeps the game's code in recompiled_<module>.so libraries: symbolize those too, from the mapped
+    # paths. The binary given on the command line symbolizes whatever mapping ends with its file name (mk8d or mk8d-engine).
+    main_bin = args[1]
+    tables = {}
+
+    def segments(src):
+        # File offset -> virtual address: lld (and some ld layouts) load the code at a vaddr that differs from its file offset.
+        out = subprocess.run(["readelf", "-lW", src], capture_output=True, text=True).stdout
+        segs = []
+        for line in out.splitlines():
+            f = line.split()
+            if f and f[0] == "LOAD":
+                segs.append((int(f[1], 16), int(f[2], 16), int(f[4], 16)))  # offset, vaddr, filesz
+        return segs
+
+    def table(path):
+        if path not in tables:
+            src = main_bin if os.path.basename(path) == os.path.basename(main_bin) else path
+            tables[path] = (load_symbols(src), segments(src)) if os.path.exists(src) else (([], []), [])
+        return tables[path]
+
+    def symbolized(path):
+        b = os.path.basename(path)
+        return b == os.path.basename(main_bin) or b.endswith("mk8d") or (b.startswith("recompiled_") and b.endswith(".so"))
 
     def name(a):
         for lo, hi, off, path in maps:
             if lo <= a < hi:
-                if path.endswith("mk8d"):
+                if symbolized(path):
+                    (addrs, names), segs = table(path)
                     rel = a - lo + off
+                    for so, sv, sz in segs:
+                        if so <= rel < so + sz:
+                            rel = rel - so + sv
+                            break
                     i = bisect.bisect_right(addrs, rel) - 1
                     return names[i] if i >= 0 else hex(rel)
                 return path.rsplit("/", 1)[-1]
