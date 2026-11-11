@@ -52,7 +52,7 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
 | dc1: shared 8,192-entry cache of recent targets in front of the block index (`recomp_export.c`) | **worse**: core 0 +7% (33.8 k vs 31.4-31.9 k), dispatch 15% vs 12%. The table is written by three game threads and its lines bounce between cores. Dropped (likely also why the earlier dispatch cache was reverted). |
 | cc1: chain conditional branches (216 k two-way exits in `main` tail-call their targets instead of returning to the dispatcher) | **neutral**: core 0 31.1 k / 32.3 k vs 31.4 k / 31.9 k; dispatch share 12% -> 7.4%, but game code rose by the same amount (the block-index miss is replaced by misses and mispredicts in the chained code). Same outcome as the old block chaining. |
 | nc1: on top of cc1, BL as a native C call with a guarded direct continuation (176,702 BLs in `main`, depth counted in the unused `fm_reserved` field, capped at 48), so a RET does not go back to the dispatcher | **better, -4.5% core 0**: 30.19 k / 30.20 k vs baseline 31.4 / 31.9 / 31.5 k; dispatch 6.2-6.5%. Fully static, 60 fps, same picture and log errors as the baseline. |
-| im1: on top of nc1, the plain loads' fast path inline in the hot (-O2) pieces only (an older whole-image inline was 14% slower from code growth) | running |
+| im1: on top of nc1, the plain loads' fast path inline in the hot (-O2) pieces only (an older whole-image inline was 14% slower from code growth) | **no gain**: 30.4 k / 31.6 k vs nc1 30.2 k / 30.2 k; helpers drop to 8% but game code rises to 70%: the stall is the guest data, wherever the load sits. Dropped. |
 
 ## Plan (ordered by expected gain per effort; revise with each result)
 
@@ -64,3 +64,14 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
    removes work per frame (SVC paths per frame, scheduler wakeups).
 4. Intel integrated GPUs: needs its own measurement (GPU time per pass at 720p/1080p, render scale defaults, FSR 1 for upscaling,
    shader/pipeline cache warm-up); no Intel hardware here, so build a test path that logs per-pass GPU time and ask the user to run it.
+
+## Conclusions so far (2026-11-11)
+
+- The game's main thread is bound by cache misses on the game's own data (about 20% of core 0 sits on those loads) and on the
+  dispatcher's block index. Removing instructions around them (inline helpers, a 1:1 mapping, conditional chaining) moves the stall
+  instead of removing it.
+- What does help is not touching cold data at all: native calls (nc1) skip the dispatcher and its index read on every RET, -4.5%.
+  Next in the same spirit: BLR/BR through a per-site cache of the last target (no shared lines), and a compact block index
+  (4-byte entries, or an index of block starts only) so the remaining dispatches touch less memory.
+- nc1 goes into the generator (`ChainTo` for BL in `core/recompiler/arm64_to_c.h`) behind an exporter switch, default off until it
+  has had a full play test, then on with a new module stamp (users rebuild their game once).
