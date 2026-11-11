@@ -865,10 +865,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..332973b8a3
+index 0000000000..4287c726df
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,504 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/kart_hook_trace.h"
 +
@@ -1110,7 +1110,19 @@ index 0000000000..332973b8a3
 +// (raceinfo = [sp], list at raceinfo+0x143c, 16-byte entries: u32 course index (= enum id - 1), u64 {0xffffffff, label}, byte at +0xc).
 +// KARTRECOMP_TEST_CUP="17,19,21,22" (course indices) replaces the four courses of the next Grand Prix. The normal course table is not
 +// touched; only the copy in the race list is.
++// Which game build `main` is (first 8 bytes of its NSO build ID): every hook address below belongs to one build.
++u64 g_main_build = 0;
++constexpr u64 kBuild304 = 0x2452c49bc26ec159ULL; // update 3.0.4
++
++// 4.0.1 has no game hooks yet. Calls inside main never come back to the host dispatcher in the 4.0.1 build (direct and indirect
++// calls are resolved in the generated code), so host hooks there would never run; game changes for 4.0.1 have to be made when the
++// game is recompiled. See docs/FRAMERATE.md ("60 fps split-screen") for the one worked out so far.
++
 +void InstallModHooks(Core::System& system, u64 load_base) {
++    if (g_main_build != kBuild304) {
++        LOG_INFO(Core_ARM, "main build {:016x}: no game hooks for it", g_main_build);
++        return;
++    }
 +    // Main menu (TitleSelect page, handler main+0x4d5d58): event 0x68 is the Toy-Con button, whose case (main+0x4d6234, reached
 +    // through the handler's jump table, so via the dispatcher) sends a "Labo" telemetry event and switches to the Labo page.
 +    // The button is labelled "Mods" now (core/file_sys/kart_text_patch.cpp): leave the handler as for an ignored event
@@ -1266,6 +1278,13 @@ index 0000000000..332973b8a3
 +
 +} // namespace
 +
++void NoteBuildId(std::string_view name, const u8* build_id) {
++    if (name != "main") return;
++    u64 id = 0;
++    for (int i = 0; i < 8; ++i) id = (id << 8) | build_id[i];
++    g_main_build = id;
++}
++
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base) {
 +    if (name == "main") {
 +        g_main_base = load_base;
@@ -1356,10 +1375,10 @@ index 0000000000..332973b8a3
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/kart_hook_trace.h b/src/core/arm/recomp/kart_hook_trace.h
 new file mode 100644
-index 0000000000..ed741ed5aa
+index 0000000000..11a6dabdf0
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,39 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: reverse-engineering aid. KARTRECOMP_HOOK_TRACE="1acb0,4910c8" logs every entry of those blocks of the `main` module
 +// (offsets from its load base) with x0..x7, the caller and any readable text the arguments point at. Blocks only reach the host
@@ -1391,6 +1410,9 @@ index 0000000000..ed741ed5aa
 +/// the first hits are logged to <log dir>/string_watch.txt with the entry pc, the caller and the text (finds who passes a given kind of name).
 +bool StringWatchEnabled();
 +void StringWatch(Core::System& system, u64 pc, const u64* x);
++
++/// Called for each module as it is loaded, before NoteModule: the NSO build ID, so hooks go only into the game build they were found in.
++void NoteBuildId(std::string_view name, const u8* build_id);
 +
 +/// Called for each module as it is loaded.
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base);
@@ -2523,10 +2545,14 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
-index 622b67a83c..056ebdc5a4 100644
+index 622b67a83c..d13852a7a8 100644
 --- a/src/core/hle/service/vi/conductor.cpp
 +++ b/src/core/hle/service/vi/conductor.cpp
-@@ -7,12 +7,34 @@
+@@ -4,15 +4,38 @@
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include "common/logging/log.h"
  #include "common/settings.h"
  #include "core/core.h"
  #include "core/core_timing.h"
@@ -2562,7 +2588,7 @@ index 622b67a83c..056ebdc5a4 100644
  
  namespace Service::VI {
  
-@@ -22,6 +44,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -22,6 +45,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
          m_vsync_managers.insert({display.GetId(), VsyncManager{}});
      });
  
@@ -2579,7 +2605,7 @@ index 622b67a83c..056ebdc5a4 100644
      if (system.IsMulticore()) {
          m_event = Core::Timing::CreateEvent(
              "ScreenComposition",
-@@ -47,6 +79,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -47,6 +80,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
  }
  
  Conductor::~Conductor() {
@@ -2588,7 +2614,7 @@ index 622b67a83c..056ebdc5a4 100644
      m_system.CoreTiming().UnscheduleEvent(m_event);
  
      if (m_system.IsMulticore()) {
-@@ -67,7 +101,39 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
+@@ -67,9 +102,43 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
      }
  }
  
@@ -2626,9 +2652,13 @@ index 622b67a83c..056ebdc5a4 100644
  void Conductor::ProcessVsync() {
 +    m_last_vsync_ns.store(SteadyNs());
      for (auto& [display_id, manager] : m_vsync_managers) {
++        const s32 before = m_swap_interval;
          m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
++        if (m_swap_interval != before) LOG_INFO(Service_VI, "kart-recomp: game swap interval {} -> {}", before, m_swap_interval);
          manager.SignalVsync(m_system.Kernel());
-@@ -110,7 +176,7 @@ s64 Conductor::GetNextTicks() const {
+     }
+ }
+@@ -110,7 +179,7 @@ s64 Conductor::GetNextTicks() const {
          speed_scale = 1.f;
      }
  
@@ -2675,7 +2705,7 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..1db5fe21de 100644
+index 3cc84acfdf..772c0471e1 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -23,6 +23,8 @@
@@ -2687,7 +2717,7 @@ index 3cc84acfdf..1db5fe21de 100644
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +219,14 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +219,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
@@ -2697,6 +2727,7 @@ index 3cc84acfdf..1db5fe21de 100644
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
 +
++    Core::KartHookTrace::NoteBuildId(name, nso_header.build_id.data());
 +    Core::KartHookTrace::NoteModule(system, name, load_base);
 +
      // Load codeset for current process

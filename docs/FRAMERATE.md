@@ -38,3 +38,26 @@ time trials). Frame generation (built-in 2x/3x/4x) gives smooth motion at 120/18
 3. Test at 90 and 120: race timer vs wall clock (time trial), kart speed, item timings, lap/finish times, replays, online off.
    Many systems may count frames instead of using the 1/60 step; those would run fast and need their own patches.
 4. Then the launcher option: game frame rate 60/90/120 (with frame generation on top).
+
+## 60 fps split-screen (3-4 players): investigated 2026-11-11, not done
+
+The user's "60fps-splitscreen-patch.zip" is a Wii U patch (xdelta for Cemu's `Turbo.elf`); it does not apply to Deluxe. The Switch
+equivalent is Eden's "60FPS in Split Screen" `3.0.3.pchtxt` (nsobid 6A85262F...): `main+0xbc0b1c` `bne` -> `b`.
+
+- **Measured** (renderer log "split-screen views per frame", `vk_shadow_backend.cpp`): 4-player races present at 60 fps but draw
+  only 2 of the 4 views per frame (600/600 frames), so each view runs at 30 fps. The game never changes the swap interval
+  (`conductor.cpp` logs a change).
+- **3.0.3** (`KARTRECOMP_EXPORT_NSO_ONLY=1 kartrecomp-export ... --update <3.0.3 nsp>`, then decompress): the patched function walks
+  0x378-byte view entries and, for a view in mode 2 (byte +0x370), makes a copy image of the view (format 0x1a) and blits it; the
+  patch makes it return at once.
+- **4.0.1 counterpart**: `main+0xafee4c` (0x410-byte entries, mode byte +0x408, `cmp w8,#2; b.ne 0xaff094` at 0xafee94/0xafee98).
+  The modes are set once per frame by `main+0xafecc8` (reached through the virtual thunk `main+0x6b380c`, object = owner+0x250):
+  frame counter byte +0x18, group count byte +0x19; group count < 2 or view slot (+0x409) == -1 -> mode 0 (drawn every frame);
+  `counter % groups == slot` -> mode 2 (drawn, copy kept); else mode 1 (the copy is shown). The branch `b.lo 0xafed1c` at
+  `0xafece8` is the switch.
+- **Why it isn't a runtime toggle**: host hooks only run when execution comes back to the host dispatcher. In the 4.0.1 build,
+  calls inside `main` (direct and indirect) are resolved in the generated code, so hooks at 0xafee9c, 0xafecec or the thunk
+  0x6b380c never ran (`KARTRECOMP_HOOK_TRACE` saw no hits in 4-player races).
+- **Next step**: build-time code patch. The exporter applies (address, old word, new word) to the user's own `main` before
+  translating, e.g. `0xafece8: b.lo 0xafed1c` -> `b 0xafed1c` (every view mode 0), as a launcher option that rebuilds the game.
+  Then measure CPU cost (twice the 3D work per frame in 3-4P) and check the picture.

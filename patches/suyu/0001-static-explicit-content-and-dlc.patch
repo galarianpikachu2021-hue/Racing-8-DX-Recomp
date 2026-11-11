@@ -1720,10 +1720,10 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..96d8c18576
+index 0000000000..5d64901042
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,399 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -2048,6 +2048,18 @@ index 0000000000..96d8c18576
 +        }
 +    }
 +    if (!exefs) return Fail(2, "the update NSP has no program ExeFS (is this the game's update NSP?)");
++
++    // Research aid: KARTRECOMP_EXPORT_NSO_ONLY=1 writes the update's ExeFS files to <out>/nso and stops (any update, 32-bit too).
++    if (const char* only = std::getenv("KARTRECOMP_EXPORT_NSO_ONLY"); only && *only == '1') {
++        std::error_code nso_ec;
++        fs::create_directories(out / "nso", nso_ec);
++        for (const auto& f : exefs->GetFiles()) {
++            const auto bytes = f->ReadAllBytes();
++            std::ofstream o(out / "nso" / f->GetName(), std::ios::binary);
++            o.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
++        }
++        return 0;
++    }
 +
 +    for (const auto& f : exefs->GetFiles()) {
 +        if (f->GetName() != "main.npdm") continue;
@@ -15760,10 +15772,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..4e38bd95be
+index 0000000000..f9726b7e09
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8260 @@
+@@ -0,0 +1,8267 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -20868,6 +20880,13 @@ index 0000000000..4e38bd95be
 +            }
 +            if (!one_target) cycles = 1;
 +            if (cycles > 1) {
++                // How many views each split-screen frame draws (the game may draw half of them per frame).
++                static std::array<uint32_t, 5> view_counts{};
++                static uint32_t view_frames = 0;
++                ++view_counts[static_cast<size_t>(std::min(cycles, 4))];
++                if (++view_frames % 600 == 0)
++                    LOG_INFO(Frontend, "split-screen views per frame over 600 frames: 2:{} 3:{} 4:{}", view_counts[2], view_counts[3], view_counts[4]);
++                if (view_frames % 600 == 0) view_counts.fill(0);
 +                if (!multi_view_logged) {
 +                    multi_view_logged = true;
 +                    LOG_INFO(Frontend, "split-screen ({} views): render scale and upscaler off for these frames", cycles);

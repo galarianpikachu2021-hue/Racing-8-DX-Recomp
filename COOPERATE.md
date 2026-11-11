@@ -30,6 +30,16 @@ Engine (`patches/suyu/0001`, `0002`):
 - **Engine dispatch**: two per-dispatch costs removed (shared atomic counter, MXCSR read).
 - **Shader capabilities from the GPU** (Intel Xe has no fp64); `KARTRECOMP_SHADER_CAPS_OFF=fp64,...` simulates smaller GPUs.
 - Research aids, env-gated: `KARTRECOMP_VSYNC_HZ`, `KARTRECOMP_SLEEP_TRACE`, memscan `write32`.
+- **Controllers** (`suyu_cmd/controller_profiles.h`, `emu_window_sdl2.cpp` `ServiceControls`, `input_common` `GetGamepadControls` /
+  `GetHeldGamepadControls`): per-controller layouts in `<config dir>\controller_profiles.ini` (by SDL GUID, plus `[keyboard]`),
+  applied whenever a player gets that controller; in-game menu **Controls** page (every input of the chosen player with the
+  controller's own names, rebind by pressing, swap A/B-X/Y, standard layout). Capture reads the gamepad state, not suyu's mapping
+  (resting Xbox triggers fooled that).
+- **`mk8d-engine --input-capture`** for the launcher: `serve` (stdin questions, answers end with "."), `devices`, `names <dev>`,
+  `defaults <dev>`, `button|stick <s> <dev>`, `held <dev>`. It pumps SDL events itself (no window there).
+- **Quit**: in-game menu "Quit game"; holding B 5 s on the "press L+R" title screen closes the game.
+- Game hooks are tied to the game build (NSO build ID): the 3.0.4 ones are no longer installed on 4.0.1 (they pointed at unrelated code).
+- `kartrecomp-export` research switch `KARTRECOMP_EXPORT_NSO_ONLY=1` (writes the update's ExeFS to `<out>\nso` and stops).
 
 Launcher (`app/`):
 - **Mii editor** (Miis tab, `mii_db.*`, `mii_editor.*`), "Open saves folder" (Play tab), "Open Miis folder".
@@ -38,6 +48,10 @@ Launcher (`app/`):
 - **Builder**: hot pieces at `-O3` (the build stamp changes: existing games rebuild once).
 - Frame generation choices Built-in 2x/3x/4x; Graphics quality just Low/High; the disabled-mods list written in order.
 - `data\mk8d-4.0.1\hot_blocks.txt` extended (4.0.1 is now as fast as 3.0.4).
+- **Controllers tab** (`controller_mapper.*`), like Eden's: per player a device (found automatically), every input listed as
+  "controller's name -> In-game X", Change opens "Press the button for in-game X" and takes the next press, Swap A/B and X/Y,
+  Standard layout, "Give controllers to players automatically" (default on). Uses one `--input-capture serve` helper while the
+  tab is open (stopped while the game runs). Keys are stored as SDL scancodes.
 
 ## Steps
 
@@ -49,6 +63,7 @@ Launcher (`app/`):
 3. Test on the real game (4.0.1 and 3.0.4): Setup builds and boots; a race; **2-player and 4-player split-screen with HDR + FSR 3**
    (all views drawn); Low/High quality (same resolution); frame generation 2x at 150% render scale (generated frames shown);
    Miis tab (add a Mii, save, see it at character select); saves in `userdata\saves`; with the Vector mod on 4.0.1 the game passes
-   the flag screen.
+   the flag screen. Controllers tab: your pad is listed and selected, Change -> press a button -> the row updates; in game F10 ->
+   Controls lists the bindings and rebinding works; Quit game; hold B on the title screen.
 4. Put a test zip on the USB drive **racing8test** in `windows-test-postv023\` with `BUILD-NOTES.txt` (main commit, what was fixed for
    Windows, test results, anything not tested). Push Windows fixes to `windows-port`. Tell the maintainer.
