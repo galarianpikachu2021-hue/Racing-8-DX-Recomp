@@ -13147,7 +13147,7 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..831ea3094c
+index 0000000000..5ee4dcdf77
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 @@ -0,0 +1,574 @@
@@ -13211,7 +13211,7 @@ index 0000000000..831ea3094c
 +    items.resize(kRowCount);
 +    items[kUpscaler] = {"Upscaler", std::move(upscaler_names), 0, true, ""};
 +    items[kModel] = {"Model", {"Auto"}, 0, true, ""};
-+    items[kGraphics] = {"Graphics quality", {"Launcher setting", "Low (handheld)", "High (docked)"}, 0, true, ""};
++    items[kGraphics] = {"Graphics quality", {"Launcher setting", "Low", "High"}, 0, true, ""};
 +    items[kResolution] = {"Output resolution", {"Launcher setting", "720p", "1080p", "1440p", "4K (2160p)"}, 0, true, ""};
 +    items[kQuality] = {"3D render scale",
 +                       {"Off", "100% (DLAA / native AA)", "67% (quality)", "58% (balanced)", "50% (performance)",
@@ -14884,10 +14884,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..593095ceba
+index 0000000000..1081d38e45
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8061 @@
+@@ -0,0 +1,8073 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -19906,9 +19906,21 @@ index 0000000000..593095ceba
 +        }
 +    }
 +
++    /// The game's picture inside the presented layer: handheld draws 1280x720 into a 1920x1080 layer (the compositor's crop says
++    /// so). Scales and the upscale point use the picture, so handheld renders at the full output resolution like docked.
++    u32 PictureWidth(const Frame& frame) const {
++        const s32 w = crop_w.load();
++        return (w > 0 && static_cast<u32>(w) < frame.present.width) ? static_cast<u32>(w) : frame.present.width;
++    }
++    u32 PictureHeight(const Frame& frame) const {
++        const s32 h = crop_h.load();
++        return (h > 0 && static_cast<u32>(h) < frame.present.height) ? static_cast<u32>(h) : frame.present.height;
++    }
++
 +    /// The scales for a frame: the output height over the game's own picture height (1080 docked, 720 handheld).
 +    void ComputeScales(const Frame& frame) {
-+        const float guest_height = frame.present.height ? static_cast<float>(frame.present.height) : 1080.0f;
++        const u32 picture_height = PictureHeight(frame);
++        const float guest_height = picture_height ? static_cast<float>(picture_height) : 1080.0f;
 +        out_scale = static_cast<float>(out_height) / guest_height;
 +        scene_scale = split_mode ? out_scale * scene_ratio : out_scale;
 +    }
@@ -19937,7 +19949,7 @@ index 0000000000..593095ceba
 +                p.key = key_of(c.colors[0]);
 +                const auto info = MapFormat(c.colors[0].format);
 +                p.tonemap_format = info && info->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-+                                   c.colors[0].width == frame.present.width;
++                                   (c.colors[0].width == frame.present.width || c.colors[0].width == PictureWidth(frame));
 +                if (c.depth.valid) last_depth = passes.size(); // a 3D pass: colour and depth
 +            }
 +            passes.push_back(p);

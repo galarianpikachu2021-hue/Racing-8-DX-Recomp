@@ -54,7 +54,7 @@ const QStringList kFilters{"Nearest", "Bilinear", "Bicubic", "Gaussian", "Lanczo
 const QStringList kAntiAliasing{"None", "FXAA", "SMAA"};
 const QStringList kVSync{"Off (immediate)", "Mailbox", "FIFO (vsync)", "FIFO relaxed"};
 const QStringList kFullscreenModes{"Borderless window", "Exclusive"};
-const QStringList kConsoleModes{"Low (handheld, 720p)", "High (docked, 1080p)"};
+const QStringList kConsoleModes{"Low", "High"};
 
 // Emulated console language. Index order is the suyu SDL `Language` enum, one-to-one with
 // suyu's `available_language_codes` (the LanguageCode the console reports to the game at boot).
@@ -381,8 +381,9 @@ QWidget* MainWindow::buildDisplayTab() {
     form->addRow(tr("Fullscreen mode:"), fullscreen_mode_combo);
     form->addRow(tr("Graphics quality:"), docked_combo);
     auto* note = new QLabel(
-        tr("Graphics quality: High is the docked console mode (the game renders at 1080p with its best effects), Low is "
-           "handheld (720p, lighter effects). It can also be changed in game (F10). The resolution scale multiplies that. "
+        tr("Graphics quality: High uses the game's full effects, Low its lighter ones (the console's docked and handheld "
+           "modes). The resolution is the same in both: it follows the output resolution and render scale. It can also be "
+           "changed in game (F10). The resolution scale multiplies the output resolution. "
            "It only looks sharper when the window or screen is larger than the base resolution, "
            "for example 2x in fullscreen on a 1440p or 4K monitor. AMD FSR (1) with sharpening is "
            "the upscaler built in. Changes are saved immediately and apply from the next launch; "
