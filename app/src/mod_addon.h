@@ -68,6 +68,13 @@ QStringList ModsReplacingMenus(const QString& root);
 /// Rebuilds (or removes, when no longer needed) the "!Merged text" mod. `vanilla_ui_dir` is only read when a merge is needed.
 bool UpdateTextMerge(const QString& root, const QString& vanilla_ui_dir, QString* error);
 QString VanillaUiDir(const QString& root);   ///< where the game's own message files are cached
+/// The installed game update ("3.0.4", "4.0.1"; from module/module.json), empty when unknown.
+QString InstalledUpdate(const QString& root);
+/// True when enabled mods replace menu archives on an update other than 3.0.4 and the "!Merged menus" mod is missing or stale.
+bool NeedsMenuMerge(const QString& root);
+/// Rebuilds (or removes, when not needed) "!Merged menus": the update's own menu archives (<vanilla_ui_dir>/UI/cmn) with every
+/// enabled mod's changes relative to 3.0.4 (`baseline`: data/mk8d-3.0.4/ui_cmn_hashes.txt). `report` gets what was taken.
+bool UpdateMenuMerge(const QString& root, const QString& vanilla_ui_dir, const QString& baseline, QString* error, QStringList* report);
 
 QString ModDir(const QString& root);       ///< mods/<tid>/CTGPDX (or CTGPDX.disabled)
 QString AddonDir(const QString& root);

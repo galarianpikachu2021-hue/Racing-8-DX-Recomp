@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mod_addon.h"
 #include "text_merge.h"
+#include "menu_merge.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QSettings>
 
 #include "ini_file.h"
@@ -56,18 +58,34 @@ bool WriteDisabled(const QString& root, const QStringList& names, QString* error
         if (error) *error = QStringLiteral("Start the game once so it creates its config, then try again.");
         return false;
     }
-    int entry = FindEntry(ini);
-    if (!entry) {
-        entry = ini.intValue(kDisabledSection, QStringLiteral("size"), 0) + 1;
-        ini.setRawValue(kDisabledSection, QStringLiteral("size"), QString::number(entry));
-        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\title_id\\default").arg(entry), QStringLiteral("false"));
-        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\title_id").arg(entry), kTitleDecimal);
+    // The whole section is written back in order (entry by entry, each entry's keys together): keys appended at the end made the
+    // engine's config reader assert and could hide entries from it.
+    struct Entry {
+        QString title;
+        QStringList disabled;
+    };
+    QList<Entry> entries;
+    const int count = ini.intValue(kDisabledSection, QStringLiteral("size"), 0);
+    for (int i = 1; i <= count; ++i) {
+        Entry e{ini.value(kDisabledSection, QStringLiteral("%1\\title_id").arg(i)), {}};
+        const int n = ini.intValue(kDisabledSection, QStringLiteral("%1\\disabled\\size").arg(i), 0);
+        for (int j = 1; j <= n; ++j) e.disabled << ini.value(kDisabledSection, QStringLiteral("%1\\disabled\\%2\\d").arg(i).arg(j));
+        entries << e;
     }
-    ini.removeKeysWithPrefix(kDisabledSection, QStringLiteral("%1\\disabled\\").arg(entry));
-    ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\size").arg(entry), QString::number(names.size()));
-    for (int j = 0; j < names.size(); ++j) {
-        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\%2\\d\\default").arg(entry).arg(j + 1), QStringLiteral("false"));
-        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\%2\\d").arg(entry).arg(j + 1), names[j]);
+    const int entry = FindEntry(ini);
+    if (entry) entries[entry - 1].disabled = names;
+    else entries << Entry{kTitleDecimal, names};
+    ini.removeKeysWithPrefix(kDisabledSection, QString());
+    ini.setRawValue(kDisabledSection, QStringLiteral("size"), QString::number(entries.size()));
+    for (int i = 0; i < entries.size(); ++i) {
+        const int k = i + 1;
+        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\title_id\\default").arg(k), QStringLiteral("false"));
+        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\title_id").arg(k), entries[i].title);
+        ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\size").arg(k), QString::number(entries[i].disabled.size()));
+        for (int j = 0; j < entries[i].disabled.size(); ++j) {
+            ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\%2\\d\\default").arg(k).arg(j + 1), QStringLiteral("false"));
+            ini.setRawValue(kDisabledSection, QStringLiteral("%1\\disabled\\%2\\d").arg(k).arg(j + 1), entries[i].disabled[j]);
+        }
     }
     if (!ini.save()) {
         if (error) *error = QStringLiteral("Could not write the game's config.");
@@ -211,7 +229,7 @@ QList<ModEntry> ListMods(const QString& root) {
         ModEntry m;
         m.name = name;
         m.enabled = !disabled.contains(name);
-        if (m.name == kCtgpName || m.name == QLatin1String(TextMerge::kMergedModName)) continue; // CTGP is shown as its own add-on; the merged text is automatic
+        if (m.name == kCtgpName || m.name == QLatin1String(TextMerge::kMergedModName) || m.name == QLatin1String(MenuMerge::kMergedModName)) continue; // CTGP is shown as its own add-on; the merged text is automatic
         m.path = dir.filePath(name);
         m.has_romfs = QFileInfo(QDir(m.path).filePath(QStringLiteral("romfs"))).isDir();
         m.has_exefs = QFileInfo(QDir(m.path).filePath(QStringLiteral("exefs"))).isDir();
@@ -304,7 +322,8 @@ QStringList EnabledModDirs(const QString& root) {
     const QStringList disabled = ReadDisabled(root);
     QStringList out;
     for (const auto& name : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
-        if (name == QLatin1String(TextMerge::kMergedModName) || disabled.contains(name)) continue;
+        if (name == QLatin1String(TextMerge::kMergedModName) || name == QLatin1String(MenuMerge::kMergedModName) || disabled.contains(name))
+            continue;
         out << dir.filePath(name);
     }
     return out;
@@ -367,6 +386,57 @@ bool UpdateTextMerge(const QString& root, const QString& vanilla_ui_dir, QString
     if (TextMerge::Merge(dirs, vanilla_ui_dir, out, error, nullptr) < 0) return false;
     QFile sig(QDir(out).filePath(QStringLiteral(".signature")));
     if (sig.open(QIODevice::WriteOnly | QIODevice::Truncate)) sig.write(MergeSignature(root).toUtf8());
+    return true;
+}
+
+QString InstalledUpdate(const QString& root) {
+    QFile f(QDir(root).filePath(QStringLiteral("module/module.json")));
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    static const QRegularExpression re(QStringLiteral("\"update\"\\s*:\\s*\"([^\"]+)\""));
+    const auto m = re.match(QString::fromUtf8(f.readAll()));
+    return m.hasMatch() ? m.captured(1) : QString();
+}
+
+namespace {
+QString MenuMergedDir(const QString& root) { return QDir(TitleModsDir(root)).filePath(QLatin1String(MenuMerge::kMergedModName)); }
+
+QString MenuSignature(const QString& root) {
+    QString sig = QStringLiteral("update:%1\n").arg(UpdateId(root));
+    for (const auto& mod : EnabledModDirs(root)) {
+        const QDir cmn(QDir(mod).filePath(QStringLiteral("romfs/UI/cmn")));
+        for (const auto& f : cmn.entryInfoList({QStringLiteral("*.sarc")}, QDir::Files, QDir::Name))
+            sig += QStringLiteral("%1/%2:%3:%4\n").arg(QFileInfo(mod).fileName(), f.fileName()).arg(f.size()).arg(f.lastModified().toSecsSinceEpoch());
+    }
+    return sig;
+}
+
+bool MenuMergeWanted(const QString& root) {
+    const QString update = InstalledUpdate(root);
+    return !update.isEmpty() && update != QLatin1String("3.0.4") && !MenuMerge::ReplacedArchives(EnabledModDirs(root)).isEmpty();
+}
+} // namespace
+
+bool NeedsMenuMerge(const QString& root) {
+    if (!MenuMergeWanted(root)) return false;
+    QFile f(QDir(MenuMergedDir(root)).filePath(QStringLiteral(".signature")));
+    return !(f.open(QIODevice::ReadOnly) && f.readAll() == MenuSignature(root).toUtf8());
+}
+
+bool UpdateMenuMerge(const QString& root, const QString& vanilla_ui_dir, const QString& baseline, QString* error, QStringList* report) {
+    const QString out = MenuMergedDir(root);
+    QDir(out).removeRecursively();
+    if (!MenuMergeWanted(root)) return true;
+    MenuMerge::Baseline base;
+    if (!base.load(baseline)) {
+        if (error) *error = QStringLiteral("The menu merge data (%1) is missing.").arg(baseline);
+        return false;
+    }
+    if (MenuMerge::Merge(EnabledModDirs(root), QDir(vanilla_ui_dir).filePath(QStringLiteral("UI/cmn")), base, out, error, report) < 0) {
+        QDir(out).removeRecursively();
+        return false;
+    }
+    QFile sig(QDir(out).filePath(QStringLiteral(".signature")));
+    if (sig.open(QIODevice::WriteOnly | QIODevice::Truncate)) sig.write(MenuSignature(root).toUtf8());
     return true;
 }
 

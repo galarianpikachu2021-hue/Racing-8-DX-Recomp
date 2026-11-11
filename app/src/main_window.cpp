@@ -678,22 +678,12 @@ void MainWindow::launch() {
     }
     log_view->clear();
     if (!resolveCtgpConflict(false, false)) return;
-    // Menu archives from mods are made for one update (nearly always 3.0.x); on 4.0.1 the game stalls on them at its first loading screen.
-    if (!package.root().isEmpty()) {
-        QFile info(QDir(package.root()).filePath(QStringLiteral("module/module.json")));
-        const bool is401 = info.open(QIODevice::ReadOnly) && info.readAll().contains("\"update\": \"4.0.1\"");
-        const QStringList menus = is401 ? ModAddon::ModsReplacingMenus(package.root()) : QStringList();
-        if (!menus.isEmpty()) {
-            const auto answer = QMessageBox::question(this, tr("Mods made for 3.0.4"),
-                tr("Your game is built from update 4.0.1, and these mods replace the game's menu files with versions made for an older "
-                   "update. The game stops at its first loading screen with them.\n\n%1\n\nTurn them off and start?").arg(menus.join(QLatin1Char('\n'))),
-                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-            if (answer == QMessageBox::Cancel) return;
-            if (answer == QMessageBox::Yes) {
-                for (const auto& name : menus) ModAddon::SetModEnabled(package.root(), name, false, nullptr);
-                refreshMods();
-            }
-        }
+    // Menu archives from mods are made for one update (nearly always 3.0.x); on 4.0.1 the game stalled on them at its first loading
+    // screen. They are merged onto the installed update's own archives (the "!Merged menus" mod), like the texts below.
+    if (!package.root().isEmpty() && ModAddon::NeedsMenuMerge(package.root())) {
+        syncTextMerge();
+        status_label->setText(tr("Adapting your menu mods to this game version; press Play again when it is done."));
+        return;
     }
     // Merged mod texts are made from the game's own texts, which differ between updates (3.0.4 / 4.0.1): texts merged for another update
     // stall the game at its first loading screen, so they are re-merged first.
@@ -1218,28 +1208,54 @@ bool DumpVanillaUi(const QString& exe, const QString& workDir, const QStringList
     return true;
 }
 
+// Reads the game's own menu archives (UI/cmn/*.sarc, no mods) into `dir`/UI/cmn for the menu merge.
+bool DumpVanillaMenus(const QString& exe, const QString& workDir, const QStringList& args, QProcessEnvironment env, const QString& dir, QString* error) {
+    QProcess dump;
+    env.insert(QStringLiteral("KARTRECOMP_ROMFS_DUMP"), QStringLiteral("tree=UI/cmn=%1/UI/cmn").arg(dir));
+    env.insert(QStringLiteral("KARTRECOMP_NO_MODS"), QStringLiteral("1"));
+    dump.setProcessEnvironment(env);
+    dump.setWorkingDirectory(workDir);
+    dump.start(exe, args);
+    if (!dump.waitForFinished(240000) || dump.exitCode() != 0 || !QFileInfo::exists(QDir(dir).filePath(QStringLiteral("UI/cmn/menu.sarc")))) {
+        if (error) *error = QStringLiteral("Could not read the game's menu files (is the game package set up?)");
+        return false;
+    }
+    return true;
+}
+
+QString MenuBaseline() {
+    return QDir(QFileInfo(BuilderPaths::Detect().hotList).absolutePath()).filePath(QStringLiteral("ui_cmn_hashes.txt"));
+}
+
 } // namespace
 
 void MainWindow::syncTextMerge() {
     const QString root = package.root();
     if (importing || root.isEmpty()) return;
-    if (!ModAddon::NeedsTextMerge(root)) {
-        if (!ModAddon::HasTextConflict(root)) {
-            QString error;
-            ModAddon::UpdateTextMerge(root, {}, &error); // removes a stale merged copy when the conflict is gone
-        }
+    const bool text = ModAddon::NeedsTextMerge(root), menus = ModAddon::NeedsMenuMerge(root);
+    if (!text && !menus) {
+        QString error;
+        if (!ModAddon::HasTextConflict(root)) ModAddon::UpdateTextMerge(root, {}, &error); // removes a stale merged copy when the conflict is gone
+        ModAddon::UpdateMenuMerge(root, {}, {}, &error, nullptr); // same for menus (only removes when nothing needs merging)
         return;
     }
     const QStringList args = package.launchArguments(false);
     const auto env = package.launchEnvironment();
     const QString exe = package.executable(), workDir = package.workingDirectory();
-    runImport([root, args, env, exe, workDir](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
-        progress(0, 1, QStringLiteral("merging mod texts"));
+    runImport([root, args, env, exe, workDir, text, menus](QString* error, const std::function<bool(int, int, const QString&)>& progress) {
         const QString vanilla = ModAddon::VanillaUiDir(root);
-        if (!QFileInfo::exists(QDir(vanilla).filePath(QStringLiteral("UI/USen/message.sarc"))) && !DumpVanillaUi(exe, workDir, args, env, vanilla, error)) return false;
-        const bool ok = ModAddon::UpdateTextMerge(root, vanilla, error);
-        progress(1, 1, QStringLiteral("done"));
-        return ok;
+        if (text) {
+            progress(0, 2, QStringLiteral("merging mod texts"));
+            if (!QFileInfo::exists(QDir(vanilla).filePath(QStringLiteral("UI/USen/message.sarc"))) && !DumpVanillaUi(exe, workDir, args, env, vanilla, error)) return false;
+            if (!ModAddon::UpdateTextMerge(root, vanilla, error)) return false;
+        }
+        if (menus) {
+            progress(1, 2, QStringLiteral("adapting menu mods to this game version"));
+            if (!QFileInfo::exists(QDir(vanilla).filePath(QStringLiteral("UI/cmn/menu.sarc"))) && !DumpVanillaMenus(exe, workDir, args, env, vanilla, error)) return false;
+            if (!ModAddon::UpdateMenuMerge(root, vanilla, MenuBaseline(), error, nullptr)) return false;
+        }
+        progress(2, 2, QStringLiteral("done"));
+        return true;
     });
 }
 
