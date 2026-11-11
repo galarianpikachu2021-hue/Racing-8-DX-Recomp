@@ -118,3 +118,16 @@ overhead in the strict sense (dispatch, the accessor checks, the engine loop, th
 thread; a LASRecomp-style rebuild could remove part of that, not multiply the frame rate. The four experiments that attacked it
 directly (target cache, compact index, conditional chaining, inline loads) gave 0 to -1%, the engine fixes (np1) about 1.5 points.
 The bigger lever for laptops is the GPU side (Intel iGPUs) and the frame-rate cap: this CPU is at 50-60% load on the game thread.
+
+## Laptop estimate from this PC's numbers (2026-11-11, no Intel hardware here)
+
+- GPU: a race frame costs 1.5 ms on the RX 9070 at 1440p (scene 1.35 ms; log line `GPU frame time (race frames ...)`, which appears
+  when an upscaler is selected). The Switch renders this game on about 0.4 TFLOPS; an Iris Xe iGPU has about 2 TFLOPS and an Arc
+  iGPU (Meteor Lake and later) about 4. Scaling by compute and memory bandwidth (9-17x below the 9070) gives roughly 5-8 ms at 720p
+  and 12-23 ms at 1440p on Iris Xe: 1080p or lower with FSR 1 should hold 60 fps on the GPU side.
+- CPU is the tighter side on laptops: the game thread uses about half of one Zen 5 core at 5.5 GHz here; a 4-core laptop CPU at
+  4 GHz with older cores is roughly 1.6-2x slower per thread, i.e. close to a full core. That is where the CPU work in this
+  document matters for the laptop goal, and why the per-dispatch engine fixes (np1) are worth keeping even at 1-2%.
+- So for laptops, in order: (1) shader capabilities from the device (done, np2), (2) a laptop preset in the launcher (render
+  scale 67% + FSR 1 at 1080p output, frame generation off), (3) a real Intel test by the user with `KARTRECOMP_PROFILE` and the
+  GPU-time log line, (4) further CPU savings.
