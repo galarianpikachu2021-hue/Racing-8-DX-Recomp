@@ -43,6 +43,14 @@ const int kWide = 25;         // candidates 59..83: a 5x5 grid (step 6) around t
 const int kCoarse = kZero + kNear + kPrior + kWide;
 int candidates() { return p.wide > 0.5 ? kCoarse : kCoarse - kWide; }
 
+// The depth can be larger than the vectors (supersampled render scale, 150%/200%: the scene and its depth are drawn larger and
+// the colour is averaged down to the output size): read the depth texel under this pixel's centre.
+ivec2 depth_px(ivec2 px) {
+    ivec2 ds = textureSize(depth_tex, 0);
+    if (ds == ivec2(p.size)) return px;
+    return clamp(ivec2((vec2(px) + 0.5) * vec2(ds) / p.size), ivec2(0), ds - ivec2(1));
+}
+
 shared uint s_bad;
 shared uint s_cam_cost;       // sum of the bad pixels' camera-hypothesis costs, x1000
 shared int s_mv_x, s_mv_y;    // sum of the bad pixels' camera vectors, x16
@@ -102,7 +110,7 @@ void main() {
     if (inside) {
         imageStore(luma_out, px, vec4(luma(texelFetch(cur_tex, px, 0).rgb), 0.0, 0.0, 0.0));
         if (p.valid > 0.5) {
-            float z = texelFetch(depth_tex, px, 0).r;
+            float z = texelFetch(depth_tex, depth_px(px), 0).r;
             // The surface point's unjittered position this frame, and where the camera put it last frame.
             vec2 uv = (vec2(px) + 0.5 - p.jit_cur) / p.size;
             vec4 cur = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
@@ -204,7 +212,7 @@ void main() {
         imageStore(vis_out, px, vec4(e, e * 0.5, 0.0, 1.0));
     } else if (p.debug_vis > 2.5 && p.valid > 0.5) {
         // Mode 3: view distance heat map (red: 0..100 units, green: 0..1000, blue: 0..10000).
-        float zz = texelFetch(depth_tex, px, 0).r;
+        float zz = texelFetch(depth_tex, depth_px(px), 0).r;
         float dd = p.near_plane / max(1.0 - zz, 1e-6);
         imageStore(vis_out, px, vec4(clamp(dd / 100.0, 0.0, 1.0), clamp(dd / 1000.0, 0.0, 1.0), clamp(dd / 10000.0, 0.0, 1.0), 1.0));
     } else if (p.debug_vis > 0.5 && p.valid > 0.5) {
