@@ -67,7 +67,7 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
    shader/pipeline cache warm-up); no Intel hardware here, so build a test path that logs per-pass GPU time and ask the user to run it.
 
 | ci1: on top of nc1, a 4-byte compact copy of the block index (20 MB instead of 40) | **no gain** (30.6 / 30.5 k). Dropped. |
-| np1 (engine, fork `arm_recomp.cpp`): the per-dispatch shared atomic `early_dispatches` add (2.4% of core 0, `lock xadd` bouncing between three threads) now stops counting after 64; the per-dispatch FP-mode read (`stmxcsr`, ~1.9%) only after entry, a serviced SVC or a host hook | engine share of core 0 9.4% -> 7.7% in all three runs; totals 30.7 / 30.7 / 30.6 k vs nc1 30.7 / 32.5 k in the same session. Kept (fork working tree, not yet in patches/suyu). |
+| np1 (engine, fork `arm_recomp.cpp`): the per-dispatch shared atomic `early_dispatches` add (2.4% of core 0, `lock xadd` bouncing between three threads) now stops counting after 64; the per-dispatch FP-mode read (`stmxcsr`, ~1.9%) only after entry, a serviced SVC or a host hook | engine share of core 0 9.4% -> 7.7% in all three runs; totals 30.7 / 30.7 / 30.6 k vs nc1 30.7 / 32.5 k in the same session. Kept (in patches/suyu on this branch). |
 
 Huge pages for guest memory are active in the engine build (log: `MADV_HUGEPAGE on the 4096 MB backing mapping: ok`).
 
@@ -84,3 +84,19 @@ Huge pages for guest memory are active in the engine build (log: `MADV_HUGEPAGE 
   (4-byte entries, or an index of block starts only) so the remaining dispatches touch less memory.
 - nc1 goes into the generator (`ChainTo` for BL in `core/recompiler/arm64_to_c.h`) behind an exporter switch, default off until it
   has had a full play test, then on with a new module stamp (users rebuild their game once).
+
+## Intel integrated GPUs: shader capabilities from the device (np2, 2026-11-11)
+
+The native renderer translated every shader with a fixed desktop profile (64-bit floats, fp16, int8/16/64, full float controls,
+typeless image loads, subgroup vote), never asking the GPU. Intel Xe integrated GPUs (Tiger Lake and later) have no 64-bit floats,
+so any shader using them would fail to build or misrender there. Now `core/nvn_host/shader_translate.{h,cpp}` has
+`ShaderDeviceCaps` (defaults = the old assumptions) and the Vulkan backend lowers it from the real device right after creating it
+(`shaderFloat64/Int64/Int16`, `shaderFloat16/Int8`, float-control properties, demote, formatless storage reads, subgroup vote), with
+one log line: `nvn-host vulkan: shader caps fp64=... fp16=...`.
+- On this AMD card (RADV) every capability is present except independent denorm/rounding modes (RADV reports them as not
+  independent): the old profile claimed those too, so the new one is also more correct on AMD. Race fully static, 60 fps, same errors.
+- Test switch `KARTRECOMP_SHADER_CAPS_OFF=fp64[,fp16,int8,int16,int64,float-controls,demote,typeless,vote]` simulates a smaller GPU
+  here. With `fp64` off (Intel Xe's profile) the race renders correctly (screenshots checked) at 60 fps.
+- Still to check on real Intel hardware (none here): driver compatibility of the present path and HDR, GPU time per frame at
+  720p/1080p, sensible defaults (render scale, FSR 1) for laptops. The Vulkan requirement itself is met by Intel's Mesa (ANV) and
+  Windows drivers on Gen9 and newer (Vulkan 1.3, dynamic rendering).

@@ -14882,10 +14882,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..81a3bb07ed
+index 0000000000..2e2c9aec81
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7990 @@
+@@ -0,0 +1,8039 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -14962,7 +14962,7 @@ index 0000000000..81a3bb07ed
 +#define KR_VK_INSTANCE_FNS(X)                                                                      \
 +    X(vkDestroyInstance) X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceQueueFamilyProperties) \
 +    X(vkGetPhysicalDeviceProperties) X(vkGetPhysicalDeviceMemoryProperties)                        \
-+    X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceSurfaceSupportKHR)                        \
++    X(vkGetPhysicalDeviceFeatures2) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceSurfaceSupportKHR) \
 +    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR)           \
 +    X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkCreateDevice) X(vkEnumerateDeviceExtensionProperties) X(vkGetDeviceProcAddr)          \
 +    X(vkDestroySurfaceKHR)
@@ -15921,6 +15921,55 @@ index 0000000000..81a3bb07ed
 +                 f13.dynamicRendering ? "core" : dynamic_rendering_ext ? "extension" : "none");
 +        if (!f13.dynamicRendering && !dynamic_rendering_ext) {
 +            return Fail("device lacks dynamic rendering");
++        }
++        {
++            // What the translated shaders may use, from this device (Intel Xe iGPUs have no 64-bit floats, mobile GPUs lack
++            // more); the defaults it lowers are the desktop assumptions the translator used before.
++            VkPhysicalDeviceVulkan12Properties p12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
++            VkPhysicalDeviceVulkan11Properties p11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
++            VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
++            p2.pNext = &p11;
++            p11.pNext = &p12;
++            const bool v12 = props.apiVersion >= VK_API_VERSION_1_2 && vk.vkGetPhysicalDeviceProperties2;
++            if (v12) {
++                vk.vkGetPhysicalDeviceProperties2(physical, &p2);
++            }
++            Core::NvnHost::ShaderDeviceCaps caps;
++            caps.float64 = f2.features.shaderFloat64 == VK_TRUE;
++            caps.int64 = f2.features.shaderInt64 == VK_TRUE;
++            caps.int16 = f2.features.shaderInt16 == VK_TRUE;
++            caps.float16 = f12.shaderFloat16 == VK_TRUE;
++            caps.int8 = f12.shaderInt8 == VK_TRUE;
++            caps.typeless_image_loads = f2.features.shaderStorageImageReadWithoutFormat == VK_TRUE;
++            caps.demote_to_helper = f13.shaderDemoteToHelperInvocation == VK_TRUE;
++            caps.float_controls = v12;
++            caps.separate_denorm = v12 && p12.denormBehaviorIndependence == VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
++            caps.separate_rounding = v12 && p12.roundingModeIndependence == VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
++            caps.fp32_denorm_preserve = v12 && p12.shaderDenormPreserveFloat32 == VK_TRUE;
++            caps.fp32_denorm_flush = v12 && p12.shaderDenormFlushToZeroFloat32 == VK_TRUE;
++            caps.vote = v12 && (p11.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) != 0;
++            // Test switch: KARTRECOMP_SHADER_CAPS_OFF=fp64,fp16,int8,int16,int64,float-controls,demote,typeless,vote turns
++            // capabilities off, to check here what a smaller GPU (Intel Xe: fp64) gets.
++            if (const char* off = std::getenv("KARTRECOMP_SHADER_CAPS_OFF")) {
++                const std::string o = std::string{","} + off + ",";
++                const auto has = [&](const char* n) { return o.find(std::string{","} + n + ",") != std::string::npos; };
++                if (has("fp64")) caps.float64 = false;
++                if (has("fp16")) caps.float16 = false;
++                if (has("int8")) caps.int8 = false;
++                if (has("int16")) caps.int16 = false;
++                if (has("int64")) caps.int64 = false;
++                if (has("float-controls")) caps.float_controls = false;
++                if (has("demote")) caps.demote_to_helper = false;
++                if (has("typeless")) caps.typeless_image_loads = false;
++                if (has("vote")) caps.vote = false;
++            }
++            Core::NvnHost::SetShaderDeviceCaps(caps);
++            LOG_INFO(Frontend,
++                     "nvn-host vulkan: shader caps fp64={} fp16={} int8={} int16={} int64={} float-controls={} (denorm "
++                     "preserve {}, flush {}, independent {}/{}) demote={} typeless-loads={} vote={}",
++                     caps.float64, caps.float16, caps.int8, caps.int16, caps.int64, caps.float_controls,
++                     caps.fp32_denorm_preserve, caps.fp32_denorm_flush, caps.separate_denorm, caps.separate_rounding,
++                     caps.demote_to_helper, caps.typeless_image_loads, caps.vote);
 +        }
 +        f2.features.robustBufferAccess = VK_FALSE;
 +        anisotropy_supported = f2.features.samplerAnisotropy == VK_TRUE;

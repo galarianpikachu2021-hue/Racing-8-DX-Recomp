@@ -351,7 +351,7 @@ index 408daa6839..58f3e192ff 100644
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..1b83ba0cd9 100644
+index 67a55424e9..59e5e786d8 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,9 @@
@@ -373,7 +373,47 @@ index 67a55424e9..1b83ba0cd9 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -1974,7 +1979,43 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1910,12 +1915,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+     impl->interrupted.store(false, std::memory_order_relaxed);
+     impl->ctx.halted = 0;
+ 
++    // native-perf: the FP-mode read (stmxcsr) was about 2% of the game thread when done on every dispatch. Only host
++    // work can change the mode, so check after the places that run it: entry (above), a serviced SVC and a host hook.
++    bool fp_check = true;
+     while (!impl->ctx.halted) {
+-        // A host callback or SVC path run since the last block could have
+-        // changed this thread's FP mode; one control-register read per
+-        // dispatch, not per op.
+-        if (fpx_active && !RecompFpEnv::Conforms()) {
+-            RepairFpEnv("dispatch");
++        if (fpx_active && fp_check) {
++            fp_check = false;
++            if (!RecompFpEnv::Conforms()) {
++                RepairFpEnv("dispatch");
++            }
+         }
+         impl->SampleDiagnostics(thread);
+         if (impl->core_index < g_current_pcs.size()) {
+@@ -1929,6 +1937,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+         // resumed, so clear it before continuing.
+         if (impl->ctx.pending_svc != kNoPendingSvc) {
+             impl->ctx.pending_svc = kNoPendingSvc;
++            fp_check = true;
+         }
+ 
+         // A recompiled image is keyed by each block's offset within its own
+@@ -1968,13 +1977,54 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+             continue;
+         }
+ 
++        // native-perf: a shared atomic add on every dispatch was about 2.4% of the game thread (three threads bounce
++        // its cache line); count only until the first 64 are logged.
+         static std::atomic<u64> early_dispatches{0};
+-        const u64 early_dispatch = early_dispatches.fetch_add(1, std::memory_order_relaxed);
++        const u64 early_dispatch = early_dispatches.load(std::memory_order_relaxed) < 64
++                                       ? early_dispatches.fetch_add(1, std::memory_order_relaxed)
++                                       : u64{64};
+         if (early_dispatch < 64) {
              LOG_INFO(Core_ARM, "Early static dispatch #{}: pc={:#x}", early_dispatch,
                       impl->ctx.pc);
          }
@@ -389,6 +429,7 @@ index 67a55424e9..1b83ba0cd9 100644
 +            RecompHooks::HookContext hook_ctx{impl->ctx.x, impl->ctx.pc, impl->system,
 +                                              impl->ctx.vreg};
 +            if (RecompHooks::Dispatch(hook_ctx)) {
++                fp_check = true;
 +                continue;
 +            }
 +        }
@@ -417,7 +458,7 @@ index 67a55424e9..1b83ba0cd9 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2258,6 +2299,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2308,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -427,7 +468,7 @@ index 67a55424e9..1b83ba0cd9 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2581,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2590,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -3809,10 +3850,10 @@ index 0000000000..66d45e856f
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/shader_translate.cpp b/src/core/nvn_host/shader_translate.cpp
 new file mode 100644
-index 0000000000..3107087a33
+index 0000000000..411f56a0e3
 --- /dev/null
 +++ b/src/core/nvn_host/shader_translate.cpp
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,347 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/shader_translate.h"
 +
@@ -3980,24 +4021,27 @@ index 0000000000..3107087a33
 +    const CbufQuery* cbuf;
 +};
 +
++ShaderDeviceCaps g_caps{};
++
 +Shader::Profile DesktopProfile() {
++    const ShaderDeviceCaps& k = g_caps;
 +    Shader::Profile p{};
 +    p.supported_spirv = 0x00010500;
 +    p.unified_descriptor_binding = true;
 +    p.support_descriptor_aliasing = true;
-+    p.support_int8 = true;
-+    p.support_int16 = true;
-+    p.support_int64 = true;
++    p.support_int8 = k.int8;
++    p.support_int16 = k.int16;
++    p.support_int64 = k.int64;
 +    p.support_vertex_instance_id = false;
-+    p.support_float_controls = true;
-+    p.support_separate_denorm_behavior = true;
-+    p.support_separate_rounding_mode = true;
-+    p.support_fp32_denorm_preserve = true;
-+    p.support_fp32_denorm_flush = true;
-+    p.support_demote_to_helper_invocation = true;
++    p.support_float_controls = k.float_controls;
++    p.support_separate_denorm_behavior = k.float_controls && k.separate_denorm;
++    p.support_separate_rounding_mode = k.float_controls && k.separate_rounding;
++    p.support_fp32_denorm_preserve = k.float_controls && k.fp32_denorm_preserve;
++    p.support_fp32_denorm_flush = k.float_controls && k.fp32_denorm_flush;
++    p.support_demote_to_helper_invocation = k.demote_to_helper;
 +    p.support_derivative_control = true;
-+    p.support_typeless_image_loads = true;
-+    p.support_vote = true;
++    p.support_typeless_image_loads = k.typeless_image_loads;
++    p.support_vote = k.vote;
 +    p.warp_size_potentially_larger_than_guest = true;
 +    p.has_broken_spirv_clamp = false;
 +    p.max_user_clip_distances = 8;
@@ -4005,6 +4049,13 @@ index 0000000000..3107087a33
 +}
 +
 +} // namespace
++
++void SetShaderDeviceCaps(const ShaderDeviceCaps& caps) {
++    g_caps = caps;
++}
++const ShaderDeviceCaps& GetShaderDeviceCaps() {
++    return g_caps;
++}
 +
 +// Single-stage and compute translations stay serialized. The heap corruption
 +// once blamed on concurrent translation came from the statistics worker reading
@@ -4022,9 +4073,9 @@ index 0000000000..3107087a33
 +        const u32 cfg_offset = static_cast<u32>(env.StartAddress() + sizeof(Shader::ProgramHeader));
 +        Shader::Maxwell::Flow::CFG cfg{env, flow_pool, cfg_offset};
 +        Shader::HostTranslateInfo host_info{};
-+        host_info.support_float64 = true;
-+        host_info.support_float16 = true;
-+        host_info.support_int64 = true;
++        host_info.support_float64 = g_caps.float64;
++        host_info.support_float16 = g_caps.float16;
++        host_info.support_int64 = g_caps.int64;
 +        host_info.needs_demote_reorder = false;
 +        host_info.support_snorm_render_buffer = true;
 +        host_info.support_viewport_index_layer = true;
@@ -4058,9 +4109,9 @@ index 0000000000..3107087a33
 +    Shader::ObjectPool<Shader::IR::Block> block_pool;
 +    Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
 +    Shader::HostTranslateInfo host_info{};
-+    host_info.support_float64 = true;
-+    host_info.support_float16 = true;
-+    host_info.support_int64 = true;
++    host_info.support_float64 = g_caps.float64;
++    host_info.support_float16 = g_caps.float16;
++    host_info.support_int64 = g_caps.int64;
 +    host_info.support_snorm_render_buffer = true;
 +    host_info.support_viewport_index_layer = true;
 +    host_info.min_ssbo_alignment = 16;
@@ -4132,9 +4183,9 @@ index 0000000000..3107087a33
 +        Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
 +        Shader::Maxwell::Flow::CFG cfg{env, flow_pool, env.StartAddress()};
 +        Shader::HostTranslateInfo host_info{};
-+        host_info.support_float64 = true;
-+        host_info.support_float16 = true;
-+        host_info.support_int64 = true;
++        host_info.support_float64 = g_caps.float64;
++        host_info.support_float16 = g_caps.float16;
++        host_info.support_int64 = g_caps.int64;
 +        host_info.min_ssbo_alignment = 16;
 +        auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host_info);
 +        Shader::Backend::Bindings bindings;
@@ -4152,10 +4203,10 @@ index 0000000000..3107087a33
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/shader_translate.h b/src/core/nvn_host/shader_translate.h
 new file mode 100644
-index 0000000000..497dbb0382
+index 0000000000..c36de3728b
 --- /dev/null
 +++ b/src/core/nvn_host/shader_translate.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,87 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: Maxwell shader -> SPIR-V for nvn-host, with no emulated GPU.
 +//
@@ -4192,6 +4243,27 @@ index 0000000000..497dbb0382
 +/// address); start: offset of the Maxwell program (SPH) from it (0x30 for NVN).
 +/// Maxwell puts a scheduling word every 32 bytes and the decoder finds them by
 +/// address alignment, so the base must keep the code at its real alignment.
++/// What the host GPU's shaders may use. The defaults are what a desktop AMD/NVIDIA GPU offers (and what was assumed before);
++/// the Vulkan backend lowers them to the real device's features once, before any shader is translated, so GPUs without
++/// 64-bit floats, fp16 or full float controls (Intel Xe integrated GPUs, mobile GPUs) get SPIR-V they can run.
++struct ShaderDeviceCaps {
++    bool float64 = true;
++    bool float16 = true;
++    bool int8 = true;
++    bool int16 = true;
++    bool int64 = true;
++    bool float_controls = true;
++    bool separate_denorm = true;
++    bool separate_rounding = true;
++    bool fp32_denorm_preserve = true;
++    bool fp32_denorm_flush = true;
++    bool demote_to_helper = true;
++    bool typeless_image_loads = true;
++    bool vote = true;
++};
++void SetShaderDeviceCaps(const ShaderDeviceCaps& caps);
++const ShaderDeviceCaps& GetShaderDeviceCaps();
++
 +TranslatedShader TranslateShader(const GpuReader& read, u64 base, u32 start);
 +
 +/// All graphics stages of one NVN program, translated together so their
