@@ -59,6 +59,7 @@ shared vec2 s_prior;
 shared vec2 s_pick;
 shared uint s_accept;
 shared uint s_ambiguous;
+shared uint s_vote[64];
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
@@ -105,6 +106,8 @@ void main() {
     vec2 mv = vec2(0.0);
     vec2 mv_cam = vec2(0.0);
     bool bad = false;
+    float cam_cost_px = 0.0;
+    float view_dist_px = 1e9;
     float mismatch = 0.0;
     vec2 base = vec2(px) + (p.jit_prev - p.jit_cur); // where this pixel's surface point would sit last frame if it didn't move
     if (inside) {
@@ -124,10 +127,12 @@ void main() {
             // View distance of a non-inverted infinite-far depth: d = near / (1 - z). The far track, crowd and sky are the static
             // world (or tiny animations): they keep the exact camera vector and never pay for the object search.
             float view_dist = p.near_plane / max(1.0 - z, 1e-6);
+            view_dist_px = view_dist;
             if (p.use_match > 0.5 && z < 0.99999 && view_dist < p.max_dist) {
                 for (int k = 0; k < 5; ++k)
                     cur_l[k] = luma(texture(cur_tex, (vec2(px) + kTap[k] + 1.0) / p.size).rgb);
                 float cam_cost = cost(base + mv);
+                cam_cost_px = cam_cost;
                 // Reactive mask for the upscaler: where the picture isn't explained by the camera (animated characters, effects,
                 // anything without motion data of its own) history is wrong, and FSR drags it along as ghosting.
                 mismatch = clamp((cam_cost - 0.03) * 7.0, 0.0, 0.9);
@@ -199,6 +204,44 @@ void main() {
                 }
             mv = best;
             mismatch = max(mismatch, 0.6); // an estimated object vector is a guess: keep some reactivity
+        }
+    }
+
+    // 3. Per pixel, for pixels the camera vector doesn't explain and no accepted tile vector covered: the player's kart (and
+    // anything else moving with the camera) didn't move on screen, but its tiles straddle the road and are often not accepted as
+    // a whole, which left a patchwork of camera vectors on the kart and FSR blurred it. Each such pixel tries "didn't move"
+    // (+-1 px) and last frame's vector; then a 3x3 vote inside the tile keeps only coherent regions (a kart), not the isolated
+    // chance matches a textured road gives.
+    vec2 pp_best = mv;
+    bool pp_ok = false;
+    if (bad && s_accept == 0u && view_dist_px < 2000.0) { // within ~20 m: the player's kart and what is right around it
+        float best_cost = cam_cost_px;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                vec2 cand = vec2(dx, dy);
+                float c = cost(base + cand);
+                if (c < best_cost) { pp_best = cand; best_cost = c; }
+            }
+        vec2 pv = texelFetch(prev_mv, px, 0).xy;
+        float pc = cost(base + pv);
+        if (pc < best_cost) { pp_best = pv; best_cost = pc; }
+        pp_ok = best_cost < 0.6 * cam_cost_px && best_cost < kLumaTol;
+    }
+    s_vote[li] = pp_ok ? 1u : 0u;
+    barrier();
+    if (pp_ok) {
+        ivec2 lp = ivec2(gl_LocalInvocationID.xy);
+        uint n = 0u, total = 0u;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = lp + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x > 7 || q.y > 7) continue;
+                ++total;
+                n += s_vote[q.y * 8 + q.x];
+            }
+        if (2u * n > total) { // most neighbours agree
+            mv = pp_best;
+            mismatch = max(mismatch * 0.5, 0.3); // a matched vector: some reactivity, less than for a tile guess
         }
     }
 
