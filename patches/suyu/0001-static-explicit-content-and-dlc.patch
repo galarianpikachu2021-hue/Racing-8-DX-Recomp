@@ -14882,10 +14882,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..81a3bb07ed
+index 0000000000..072dd9e1af
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,7990 @@
+@@ -0,0 +1,8012 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -16424,7 +16424,22 @@ index 0000000000..81a3bb07ed
 +        vk.vkGetSwapchainImagesKHR(device, swapchain, &n, nullptr);
 +        swap_images.resize(n);
 +        vk.vkGetSwapchainImagesKHR(device, swapchain, &n, swap_images.data());
++        MakeRenderedSemaphores();
 +        return true;
++    }
++
++    /// One "rendered" semaphore per swapchain image, indexed by the acquired image. One shared semaphore was signalled again for
++    /// the next frame while the presentation engine could still be waiting on it for the previous image (the validation layer's
++    /// VUID-vkQueueSubmit-pSignalSemaphores-00067); drivers that do not tolerate that showed half-finished frames (issue #12).
++    /// Callers have idled the device before (re)creating the swapchain, so nothing is waiting on the old ones.
++    void MakeRenderedSemaphores() {
++        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        rendered_sems.assign(swap_images.size(), VK_NULL_HANDLE);
++        rendered2_sems.assign(swap_images.size(), VK_NULL_HANDLE);
++        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
++        for (VkSemaphore& s : rendered_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
++        for (VkSemaphore& s : rendered2_sems) vk.vkCreateSemaphore(device, &sci, nullptr, &s);
 +    }
 +
 +    // ------------------------------------------------------------ resources
@@ -21085,6 +21100,10 @@ index 0000000000..81a3bb07ed
 +        // Black bars.
 +        VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
 +        vk.vkCmdClearColorImage(cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &color_range);
++        // The picture is written into the same image next (blit or draw), so the clear has to be finished first: two writes need an
++        // explicit dependency even in the same layout. Without it AMD GPUs, which run clears as compute work that can overlap the
++        // next command, blacked out blocks of the picture (GitHub issue #12); NVIDIA happens to run them in order.
++        MemoryBarrier();
 +        // Fit the Display tab's aspect ratio into the window (black bars), as
 +        // suyu's presenter does; "Stretch to window" fills it.
 +        float aspect = 16.0f / 9.0f;
@@ -21313,7 +21332,7 @@ index 0000000000..81a3bb07ed
 +        si.commandBufferCount = 1;
 +        si.pCommandBuffers = &cmd2;
 +        si.signalSemaphoreCount = 1;
-+        si.pSignalSemaphores = &rendered2;
++        si.pSignalSemaphores = &rendered2_sems[index2];
 +        {
 +            std::scoped_lock lock{queue_mutex};
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence2);
@@ -21348,7 +21367,7 @@ index 0000000000..81a3bb07ed
 +                lock_ms = std::chrono::duration<double, std::milli>(locked - woke).count();
 +                VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +                pi.waitSemaphoreCount = 1;
-+                pi.pWaitSemaphores = &rendered2;
++                pi.pWaitSemaphores = &rendered2_sems[index2];
 +                pi.swapchainCount = 1;
 +                pi.pSwapchains = &swapchain;
 +                pi.pImageIndices = &index2;
@@ -22180,7 +22199,7 @@ index 0000000000..81a3bb07ed
 +        si.commandBufferCount = 1;
 +        si.pCommandBuffers = &cmd;
 +        si.signalSemaphoreCount = 1;
-+        si.pSignalSemaphores = &rendered;
++        si.pSignalSemaphores = &rendered_sems[index];
 +        // The previous frame's real image must be on screen before this frame's generated one.
 +        FgWaitIdle();
 +        VkResult pres;
@@ -22189,7 +22208,7 @@ index 0000000000..81a3bb07ed
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence);
 +            VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 +            pi.waitSemaphoreCount = 1;
-+            pi.pWaitSemaphores = &rendered;
++            pi.pWaitSemaphores = &rendered_sems[index];
 +            pi.swapchainCount = 1;
 +            pi.pSwapchains = &swapchain;
 +            pi.pImageIndices = &index;
@@ -22489,6 +22508,8 @@ index 0000000000..81a3bb07ed
 +        vk.vkFreeMemory(device, ring_memory, nullptr);
 +        vk.vkDestroySemaphore(device, acquired, nullptr);
 +        vk.vkDestroySemaphore(device, rendered, nullptr);
++        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
++        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        vk.vkDestroyFence(device, fence, nullptr);
 +        vk.vkDestroyCommandPool(device, pool, nullptr);
 +        vk.vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -22732,6 +22753,7 @@ index 0000000000..81a3bb07ed
 +    VkFormat swap_format = VK_FORMAT_UNDEFINED;
 +    bool have_colorspace_ext = false;
 +    std::map<VkImage, VkImageView> swap_views;
++    std::vector<VkSemaphore> rendered_sems, rendered2_sems; // per swapchain image (MakeRenderedSemaphores)
 +    double overlay_fps = 0, overlay_ms = 0;
 +    std::chrono::steady_clock::time_point fps_time{};
 +    u64 fps_frames = 0;
