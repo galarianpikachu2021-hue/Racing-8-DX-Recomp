@@ -94,7 +94,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
 
     QFile stamp(layout.moduleDir() + "/module.json");
     if (!stamp.open(QIODevice::WriteOnly)) return {false, QStringLiteral("Cannot write %1.").arg(stamp.fileName())};
-    stamp.write("{ \"engineVersion\": \"" + paths.engineVersion.toUtf8() + "\" }\n");
+    stamp.write("{ \"engineVersion\": \"" + paths.engineVersion.toUtf8() + "\", \"update\": \"" + updateName.toUtf8() + "\" }\n");
     report(1000, QStringLiteral("The game is built"));
     return {true, {}};
 }

@@ -312,9 +312,16 @@ QStringList EnabledModDirs(const QString& root) {
 
 namespace {
 
-// Which mods and message files the merged copy was built from; a different signature means it is stale.
+// Which game update the package uses (content/update-3.0.4.nsp holds whichever supported update was installed: 3.0.4 or 4.0.1). The
+// game's own message files differ between updates, so merged texts and the cached vanilla files are per update.
+QString UpdateId(const QString& root) {
+    const QFileInfo u(QDir(root).filePath(QStringLiteral("content/update-3.0.4.nsp")));
+    return u.exists() ? QString::number(u.size(), 16) : QString();
+}
+
+// Which mods, message files and game update the merged copy was built from; a different signature means it is stale.
 QString MergeSignature(const QString& root) {
-    QString sig;
+    QString sig = QStringLiteral("update:%1\n").arg(UpdateId(root));
     for (const auto& mod : EnabledModDirs(root)) {
         const QDir ui(QDir(mod).filePath(QStringLiteral("romfs/UI")));
         for (const auto& lang : ui.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
@@ -329,6 +336,15 @@ QString MergedDir(const QString& root) { return QDir(TitleModsDir(root)).filePat
 
 } // namespace
 
+QStringList ModsReplacingMenus(const QString& root) {
+    QStringList out;
+    for (const auto& mod : EnabledModDirs(root)) {
+        if (!QDir(QDir(mod).filePath(QStringLiteral("romfs/UI/cmn"))).entryList({QStringLiteral("*.sarc")}, QDir::Files).isEmpty())
+            out << QFileInfo(mod).fileName();
+    }
+    return out;
+}
+
 bool HasTextConflict(const QString& root) { return TextMerge::HasConflict(EnabledModDirs(root)); }
 
 bool NeedsTextMerge(const QString& root) {
@@ -337,7 +353,11 @@ bool NeedsTextMerge(const QString& root) {
     return !(f.open(QIODevice::ReadOnly) && f.readAll() == MergeSignature(root).toUtf8());
 }
 
-QString VanillaUiDir(const QString& root) { return QDir(root).filePath(QStringLiteral("addons/vanilla-ui")); }
+QString VanillaUiDir(const QString& root) {
+    // One cache per game update (an update changes the game's own texts).
+    const QString id = UpdateId(root);
+    return QDir(root).filePath(id.isEmpty() ? QStringLiteral("addons/vanilla-ui") : QStringLiteral("addons/vanilla-ui-") + id);
+}
 
 bool UpdateTextMerge(const QString& root, const QString& vanilla_ui_dir, QString* error) {
     const QString out = MergedDir(root);

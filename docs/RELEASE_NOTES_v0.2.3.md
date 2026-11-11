@@ -6,7 +6,7 @@ Downloads: **Linux** `Racing_8_DX_Recomp-x86_64.AppImage` (renamed from `KartRec
 
 ## New
 
-- **Update 4.0.1 is supported** besides 3.0.4 (#3, #5, #19): pick either on the Setup page. 4.0.1 gets its own list of hot code (carried over from 3.0.4's), so it builds as fast as 3.0.4. Files named "v4.0.0" are usually the old 32-bit 3.0.3 update, which cannot be recompiled; the Setup page says so.
+- **Update 4.0.1 is supported** besides 3.0.4 (#3, #5, #19): pick either on the Setup page. 4.0.1 gets its own list of hot code (carried over from 3.0.4's), so it builds as fast as 3.0.4. Files named "v4.0.0" are usually the old 32-bit 3.0.3 update, which cannot be recompiled; the Setup page says so. Mods that replace the game's menu archives (`UI/cmn/*.sarc`) were made for older updates and stop 4.0.1 at its first loading screen: Play offers to turn them off. Merged mod texts are kept per update.
 - **The AppImage runs on older and non-rolling distros** (#13, #15): everything in it is now built on Ubuntu 22.04, so it needs glibc 2.35 at most (Ubuntu 22.04+, Fedora, SteamOS, Debian 12 and newer). Before, it needed glibc 2.44, so the exporter could not start on Fedora 44 or SteamOS ("the exporter gave no answer").
 - **Console language** (#11): the launcher's Play tab has a "Console language" choice; the game starts in that language.
 - **Start the game without the launcher** (#17): `--nolauncher` (or `--play`), e.g. `Racing_8_DX_Recomp-x86_64.AppImage --nolauncher` or `kartrecomp.exe --nolauncher` as a non-Steam game. The game starts with your saved settings; the in-game menu (F10, L3+R3) has the graphics settings.

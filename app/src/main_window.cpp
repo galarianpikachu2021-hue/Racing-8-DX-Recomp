@@ -679,6 +679,30 @@ void MainWindow::launch() {
     }
     log_view->clear();
     if (!resolveCtgpConflict(false, false)) return;
+    // Menu archives from mods are made for one update (nearly always 3.0.x); on 4.0.1 the game stalls on them at its first loading screen.
+    if (!package.root().isEmpty()) {
+        QFile info(QDir(package.root()).filePath(QStringLiteral("module/module.json")));
+        const bool is401 = info.open(QIODevice::ReadOnly) && info.readAll().contains("\"update\": \"4.0.1\"");
+        const QStringList menus = is401 ? ModAddon::ModsReplacingMenus(package.root()) : QStringList();
+        if (!menus.isEmpty()) {
+            const auto answer = QMessageBox::question(this, tr("Mods made for 3.0.4"),
+                tr("Your game is built from update 4.0.1, and these mods replace the game's menu files with versions made for an older "
+                   "update. The game stops at its first loading screen with them.\n\n%1\n\nTurn them off and start?").arg(menus.join(QLatin1Char('\n'))),
+                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+            if (answer == QMessageBox::Cancel) return;
+            if (answer == QMessageBox::Yes) {
+                for (const auto& name : menus) ModAddon::SetModEnabled(package.root(), name, false, nullptr);
+                refreshMods();
+            }
+        }
+    }
+    // Merged mod texts are made from the game's own texts, which differ between updates (3.0.4 / 4.0.1): texts merged for another update
+    // stall the game at its first loading screen, so they are re-merged first.
+    if (!package.root().isEmpty() && ModAddon::NeedsTextMerge(package.root())) {
+        syncTextMerge();
+        status_label->setText(tr("Updating the merged mod texts for this game version; press Play again when it is done."));
+        return;
+    }
     game.setWorkingDirectory(package.workingDirectory());
     auto env = launchEnvironment();
     game.setProcessEnvironment(env);

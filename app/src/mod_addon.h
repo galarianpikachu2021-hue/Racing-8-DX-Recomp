@@ -62,6 +62,9 @@ QStringList EnabledModDirs(const QString& root);
 /// True when two enabled mods replace the same message file, so a merged copy is needed.
 bool NeedsTextMerge(const QString& root);
 bool HasTextConflict(const QString& root);
+// Enabled mods that replace whole menu archives (romfs/UI/cmn/*.sarc). Those are made for one game update; another update's game
+// stalls on them (a 3.0.x menu archive on 4.0.1 stops at the first loading screen).
+QStringList ModsReplacingMenus(const QString& root);
 /// Rebuilds (or removes, when no longer needed) the "!Merged text" mod. `vanilla_ui_dir` is only read when a merge is needed.
 bool UpdateTextMerge(const QString& root, const QString& vanilla_ui_dir, QString* error);
 QString VanillaUiDir(const QString& root);   ///< where the game's own message files are cached
