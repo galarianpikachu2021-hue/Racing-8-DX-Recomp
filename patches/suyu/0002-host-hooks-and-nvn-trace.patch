@@ -4295,7 +4295,7 @@ index 0000000000..c36de3728b
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..d39931ab8d 100644
+index 699980238b..c242f5b386 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -350,17 +350,20 @@ inline constexpr int kChainBudget = 256;
@@ -4324,7 +4324,45 @@ index 699980238b..d39931ab8d 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -946,8 +949,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -369,6 +372,37 @@ inline std::string ChainTo(u64 t) {
+     return b;
+ }
+ 
++// Native calls (kart-recomp native-perf, exporter --native-calls): a BL to a known block is emitted as a real C call of
++// that block, and when the callee comes back with the guest at the return address (it executed RET) and nothing pending,
++// the block after the BL is tail-called directly. A RET then costs no dispatcher round trip and no block-index read
++// (measured: the dispatcher's share of the game thread 12% -> 6%). Any other way back (SVC, budget, halt, a different
++// pc) returns to the dispatcher as before. The host stack depth is counted in the context's spare fm_reserved word and
++// capped, past which the BL chains as before.
++inline bool g_native_calls = false;
++inline constexpr unsigned kNativeCallDepth = 48;
++inline std::string NativeCallTo(u64 t, u64 next) {
++    if (!g_native_calls || !g_chain_blocks || !g_chain_mod || !g_chain_blocks->count(t)) {
++        return ChainTo(t);
++    }
++    char nm[64], nn[64];
++    FuncNameTo(nm, g_chain_mod, t);
++    std::string after = "return;";
++    if (g_chain_blocks->count(next)) {
++        FuncNameTo(nn, g_chain_mod, next);
++        after = std::string{"{ void "} + nn + "(GuestContext*); RECOMP_TAIL return " + nn + "(c); }";
++    }
++    char b[1024];
++    snprintf(b, sizeof b,
++             "{ void %s(GuestContext*); c->pc=g_module_base+0x%llxULL; "
++             "if (c->halted || c->pending_svc != ~UINT64_C(0) || --c->chain_budget <= 0) return; "
++             "if (c->fm_reserved < %uu) { c->fm_reserved++; %s(c); c->fm_reserved--; "
++             "if (c->pc != g_module_base+0x%llxULL || c->halted || c->pending_svc != ~UINT64_C(0) || "
++             "--c->chain_budget <= 0) return; %s } "
++             "RECOMP_TAIL return %s(c); }",
++             nm, (unsigned long long)t, kNativeCallDepth, nm, (unsigned long long)next, after.c_str(), nm);
++    return b;
++}
++
+ // The same for a computed target. A chain of blocks otherwise ends at the first
+ // BR, BLR or RET, and every one of those is a round trip out to the host
+ // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
+@@ -946,8 +980,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -4334,9 +4372,12 @@ index 699980238b..d39931ab8d 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1189,9 +1191,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,10 +1221,10 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+         if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
++            put(NativeCallTo(t, next));
++            return false;
          }
 -        snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; return;",
 -                 (unsigned long long)t);
@@ -4345,7 +4386,7 @@ index 699980238b..d39931ab8d 100644
          return false;
      }
      if ((i & 0xFFFFFC1F) == 0xD65F0000) { put("c->pc=c->x[30]; return; /* RET */"); return false; }
-@@ -5100,7 +5100,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5100,7 +5133,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -4356,7 +4397,7 @@ index 699980238b..d39931ab8d 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5257,6 +5259,17 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5257,6 +5292,17 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -4374,7 +4415,7 @@ index 699980238b..d39931ab8d 100644
          // Lookup indexes every emitted instruction, not only block starts. An
          // indirect transfer can therefore enter the middle of this function.
          // Direct chains publish their exact target PC before calling, so any
-@@ -5321,10 +5334,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5321,10 +5367,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -4386,7 +4427,7 @@ index 699980238b..d39931ab8d 100644
          }
          rcu += "}\n\n";
          flush_unit(unit, false);
-@@ -5566,7 +5576,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5566,7 +5609,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -4395,7 +4436,7 @@ index 699980238b..d39931ab8d 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5758,7 +5768,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5758,7 +5801,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -4405,7 +4446,7 @@ index 699980238b..d39931ab8d 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5838,12 +5849,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +5882,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -4433,7 +4474,7 @@ index 699980238b..d39931ab8d 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +5889,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +5922,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -4443,7 +4484,7 @@ index 699980238b..d39931ab8d 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6888,10 +6913,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,10 +6946,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -4470,7 +4511,7 @@ index 699980238b..d39931ab8d 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -7580,6 +7621,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +7654,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif

@@ -52,7 +52,8 @@ Where the time inside the hot helpers goes (leaf-IP histogram; a sample lands on
 |---|---|
 | dc1: shared 8,192-entry cache of recent targets in front of the block index (`recomp_export.c`) | **worse**: core 0 +7% (33.8 k vs 31.4-31.9 k), dispatch 15% vs 12%. The table is written by three game threads and its lines bounce between cores. Dropped (likely also why the earlier dispatch cache was reverted). |
 | cc1: chain conditional branches (216 k two-way exits in `main` tail-call their targets instead of returning to the dispatcher) | **neutral**: core 0 31.1 k / 32.3 k vs 31.4 k / 31.9 k; dispatch share 12% -> 7.4%, but game code rose by the same amount (the block-index miss is replaced by misses and mispredicts in the chained code). Same outcome as the old block chaining. |
-| nc1: on top of cc1, BL as a native C call with a guarded direct continuation (176,702 BLs in `main`, depth counted in the unused `fm_reserved` field, capped at 48), so a RET does not go back to the dispatcher | **better, -4.5% core 0**: 30.19 k / 30.20 k vs baseline 31.4 / 31.9 / 31.5 k; dispatch 6.2-6.5%. Fully static, 60 fps, same picture and log errors as the baseline. |
+| nc1: on top of cc1, BL as a native C call with a guarded direct continuation (176,702 BLs in `main`, depth counted in the unused `fm_reserved` field, capped at 48), so a RET does not go back to the dispatcher | **about -1%, within the noise** over 6 runs (30.2, 30.2, 30.8, 32.5, 30.8, 31.5 k; mean 31.0 k) vs 5 baseline runs (31.4, 31.9, 31.5, 31.2, 30.4 k; mean 31.3 k). The first two runs suggested -4.5%: luck. Dispatch share 12% -> 6.4% is steady. Fully static, 60 fps, same picture and log errors. |
+| nc0: native calls WITHOUT conditional chaining | **worse**: 31.9, 32.1, 35.0 k. Each conditional branch in a callee returns to the dispatcher, which unwinds every native frame, so the continuation is lost and the extra call costs. Native calls only make sense together with conditional chaining. |
 | im1: on top of nc1, the plain loads' fast path inline in the hot (-O2) pieces only (an older whole-image inline was 14% slower from code growth) | **no gain**: 30.4 k / 31.6 k vs nc1 30.2 k / 30.2 k; helpers drop to 8% but game code rises to 70%: the stall is the guest data, wherever the load sits. Dropped. |
 
 ## Plan (ordered by expected gain per effort; revise with each result)
@@ -100,3 +101,20 @@ one log line: `nvn-host vulkan: shader caps fp64=... fp16=...`.
 - Still to check on real Intel hardware (none here): driver compatibility of the present path and HDR, GPU time per frame at
   720p/1080p, sensible defaults (render scale, FSR 1) for laptops. The Vulkan requirement itself is met by Intel's Mesa (ANV) and
   Windows drivers on Gen9 and newer (Vulkan 1.3, dynamic rendering).
+
+## Generator switch (2026-11-11)
+
+`kartrecomp-export --native-calls` emits the nc0 form from the generator (`NativeCallTo` in `core/recompiler/arm64_to_c.h`;
+`export.json` records `"native_calls"`); checked block by block against the post-processed source (120,449 blocks, identical).
+Default off and NOT recommended on its own (nc0 is slower); it would need conditional chaining in the generator too, and even then
+the measured gain is about 1%. Left in as the record of the experiment.
+
+## Where this leaves the "100% native" plan (honest numbers)
+
+On this PC the game thread spends, per 60 s of the effects race, about 31 k samples: roughly 45% in the game's own code, 30% in
+memory accessors (three quarters of that is waiting for the game's data, which any native build also waits for), 12% in dispatch,
+8-10% in the engine (NVN hooks, dispatch loop) and under 1% in the emulated kernel and services. Everything that is emulation
+overhead in the strict sense (dispatch, the accessor checks, the engine loop, the kernel) adds up to roughly a quarter of the
+thread; a LASRecomp-style rebuild could remove part of that, not multiply the frame rate. The four experiments that attacked it
+directly (target cache, compact index, conditional chaining, inline loads) gave 0 to -1%, the engine fixes (np1) about 1.5 points.
+The bigger lever for laptops is the GPU side (Intel iGPUs) and the frame-rate cap: this CPU is at 50-60% load on the game thread.

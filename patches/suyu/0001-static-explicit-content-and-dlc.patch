@@ -1112,10 +1112,10 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..6edacab4ef
+index 0000000000..96d8c18576
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,387 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -1381,6 +1381,7 @@ index 0000000000..6edacab4ef
 +        else if (a == "--out") out = next();
 +        else if (a == "--info") info = next();
 +        else if (a == "--progress-fd") g_progress_fd = std::atoi(next().c_str());
++        else if (a == "--native-calls") suyu::recomp::g_native_calls = true;
 +        else return Fail(2, "unknown argument: " + a);
 +    }
 +    if (!info.empty()) {
@@ -1495,7 +1496,8 @@ index 0000000000..6edacab4ef
 +    {
 +        std::ofstream o(out / "export.json");
 +        o << "{ \"modules\": " << modules.size() << ", \"blocks\": " << blocks
-+          << ", \"image_abi\": " << (suyu::recomp::g_emit_fastmem ? 6 : 5) << " }\n";
++          << ", \"image_abi\": " << (suyu::recomp::g_emit_fastmem ? 6 : 5)
++          << ", \"native_calls\": " << (suyu::recomp::g_native_calls ? "true" : "false") << " }\n";
 +    }
 +    fs::remove_all(scratch, ec);
 +    Progress(100, "Done");
