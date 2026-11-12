@@ -263,3 +263,17 @@ round-robin time slice for priority 59; debug switch `KARTRECOMP_ALLOW_PTRACE=1`
 
 Next: the display queue onto `KARTRECOMP_NATIVE_IPC` (its blocking wait now only stalls one virtual core), then moving kernel
 pieces (handle table, synchronisation objects, memory map) into `kart_runtime`, and the play test before any of this is default.
+
+## First play test (user, 2026-11-12) and what it showed
+
+Mario Circuit with the user's mods and settings (FSR 3 100%, HDR, 3x frame generation, vsync, 1440p), all native switches on:
+"a lot of slowdown", audio volumes "a little mixed up", delay "a little off", then a crash after ~5 minutes.
+- **Slowdown**: the user's `launch.env` pins the emulated-core threads (`KARTRECOMP_PIN=2,3,4,5`); with native threads those threads
+  do not exist, so nothing was pinned and every hand-off woke a host thread on another CPU. Native threads now honour
+  `KARTRECOMP_PIN` (virtual core N's threads run on the Nth CPU). Scripted race with the user's settings and mods: emulated+pin
+  59.58 fps / 10 s under 58; native without pin 59.24 / 15 (min 49); native+pin 59.48 / 11.
+- **Audio**: recorded the real output (`pw-record` of the sink) for emulated / threads / IPC / both in a scripted run: same level
+  (x0.9-1.05 per 10 s), menu envelope correlation 0.93-0.99, offsets = start-time differences. No measurable difference; the heard
+  mix/delay is most likely the slowdown (picture slow, audio real time). To confirm by ear after the pin fix.
+- **Crash**: not native-related: the known character-mod null call (docs/NATIVE_GPU.md "PC 0"); the engine's null-call recovery
+  stopped after 100,000 calls (~5 min of a race with that racer). The cap is removed.

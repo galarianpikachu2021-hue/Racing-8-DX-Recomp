@@ -804,7 +804,7 @@ index 408daa6839..663bb22f05 100644
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..59e5e786d8 100644
+index 67a55424e9..636e7d2025 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,9 @@
@@ -855,7 +855,7 @@ index 67a55424e9..59e5e786d8 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +1977,54 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +1977,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -891,12 +891,13 @@ index 67a55424e9..59e5e786d8 100644
 +        // that is not there, e.g. the camera code in the character-select screen with a driver replaced by a mod) would
 +        // end this thread, because strict mode has no JIT to hand it to. Treat it like the call returning at once
 +        // (what a missing virtual method with no effect would do) and keep playing; the first few are logged.
-+        // KARTRECOMP_NO_NULLCALL_RECOVERY=1 turns this off. A run that keeps doing it is stopped normally.
++        // KARTRECOMP_NO_NULLCALL_RECOVERY=1 turns this off. There is no limit: a character mod without a bone the game expects
++        // does this every frame for as long as that racer is on the track (a cap of 100,000 ended a race after five minutes).
 +        if (!block && impl->ctx.pc == 0 && impl->ctx.x[30] != 0) {
 +            static const bool disabled = std::getenv("KARTRECOMP_NO_NULLCALL_RECOVERY") != nullptr;
 +            static std::atomic<u64> recovered{0};
 +            const u64 n = recovered.fetch_add(1, std::memory_order_relaxed);
-+            if (!disabled && n < 100000) {
++            if (!disabled) {
 +                if (n < 8) {
 +                    LOG_ERROR(Core_ARM,
 +                              "recomp: call to null (x30={:#x}, x0={:#x}); returning to the caller instead "
@@ -911,7 +912,7 @@ index 67a55424e9..59e5e786d8 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2258,6 +2308,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2309,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -921,7 +922,7 @@ index 67a55424e9..59e5e786d8 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2590,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2591,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -3629,13 +3630,14 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..02fae3372b
+index 0000000000..0d270aded9
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,234 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_threads.h"
 +
++#include <array>
 +#include <atomic>
 +#include <condition_variable>
 +#include <cstdlib>
@@ -3645,6 +3647,9 @@ index 0000000000..02fae3372b
 +#include <thread>
 +#include <unordered_map>
 +
++#ifdef __linux__
++#include <sched.h>
++#endif
 +#include "common/logging/log.h"
 +#include "common/thread.h"
 +#include "core/core.h"
@@ -3685,8 +3690,44 @@ index 0000000000..02fae3372b
 +    return core >= 0 && core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES) ? core : 0;
 +}
 +
++/// KARTRECOMP_PIN=<cpu>,<cpu>,<cpu>,<cpu>: virtual core N's threads run on the Nth listed host CPU (as the emulated-core threads
++/// did). A hand-off between two threads of one core then stays on one CPU: the next thread starts where the last one stopped,
++/// with its caches warm, instead of being woken on some other CPU.
++int PinnedCpu(int core) {
++    static const std::array<int, 4> cpus = [] {
++        std::array<int, 4> out{-1, -1, -1, -1};
++        if (const char* pin = std::getenv("KARTRECOMP_PIN")) {
++            std::size_t i = 0;
++            for (const char* p = pin; *p && i < out.size();) {
++                char* end = nullptr;
++                const long cpu = std::strtol(p, &end, 10);
++                if (end == p) break;
++                out[i++] = static_cast<int>(cpu);
++                p = *end == ',' ? end + 1 : end;
++            }
++        }
++        return out;
++    }();
++    return core >= 0 && core < 4 ? cpus[static_cast<std::size_t>(core)] : -1;
++}
++
++void PinToCore(int core) {
++#ifdef __linux__
++    thread_local int pinned = -1;
++    const int cpu = PinnedCpu(core);
++    if (cpu < 0 || cpu == pinned || cpu >= CPU_SETSIZE) return;
++    cpu_set_t set;
++    CPU_ZERO(&set);
++    CPU_SET(cpu, &set);
++    if (sched_setaffinity(0, sizeof(set), &set) == 0) pinned = cpu;
++#else
++    (void)core;
++#endif
++}
++
 +/// Takes the thread's virtual core and puts its registers into that core's CPU interface.
 +void Enter(KernelCore& kernel, KThread* thread) {
++    PinToCore(t_sched->Core());
 +    Scheduler().Acquire(t_sched);
 +    t_core = t_sched->Core();
 +    thread->SetCurrentCore(t_core);
@@ -3800,6 +3841,7 @@ index 0000000000..02fae3372b
 +    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).SaveContext(thread);
 +    Scheduler().Yield(t_sched);
 +    t_core = t_sched->Core();
++    PinToCore(t_core);
 +    thread->SetCurrentCore(t_core);
 +    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).LoadContext(thread);
 +}
