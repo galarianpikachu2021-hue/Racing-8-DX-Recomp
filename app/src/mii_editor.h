@@ -15,6 +15,7 @@ class QLineEdit;
 class QListWidget;
 class QPushButton;
 class QSpinBox;
+class MiiPreview;
 
 class MiiEditor : public QWidget {
     Q_OBJECT
@@ -29,6 +30,7 @@ public:
 
 private:
     void showMii(int row);
+    void updatePreview();
     void storeEdits();
     void refreshList();
     void setDirty(bool dirty);
@@ -48,5 +50,6 @@ private:
     QPushButton *add_male = nullptr, *add_female = nullptr, *duplicate = nullptr, *remove = nullptr, *up = nullptr, *down = nullptr,
                 *save_button = nullptr, *revert = nullptr;
     QWidget* form = nullptr;
+    MiiPreview* preview = nullptr;
     QLabel* status = nullptr;
 };

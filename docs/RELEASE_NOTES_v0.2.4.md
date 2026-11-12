@@ -24,7 +24,9 @@ Downloads: **Linux** `Racing_8_DX_Recomp-x86_64.AppImage`, **Windows** `KartReco
 - **Sharper motion**: better motion vectors for your own kart (less smearing with FSR 3 and frame generation).
 - **Saves and Miis in plain folders**: `saves` and `miis` in the data folder (`~/.local/share/kartrecomp`, or `userdata` beside the exe on
   Windows); the launcher has "Open saves folder" and "Open Miis folder". Your old save is copied over once and kept.
-- **Mii editor** (Miis tab).
+- **Mii editor** (Miis tab), with a live sketch of the face: placement, size, rotation and colour of every part as you change it
+  (the exact eye, mouth and hair styles show in the game).
+- **Title screen**: B no longer opens the main menu (hold it 5 s to quit; A or L+R starts as usual).
 - **Menu mods on 4.0.1** (for example Vector): the game no longer stops at the flag screen; the launcher merges the mod's menu changes
   into the 4.0.1 menus.
 - **Faster**: 4.0.1 now runs as fast as 3.0.4; less memory use; shaders adapt to GPUs without 64-bit floats (Intel Xe).
