@@ -571,11 +571,180 @@ index 0000000000..9839ebcc04
 +}
 +
 +} // namespace KartRe
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index 5617a93b91..849d89f383 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <chrono>
++#include <cstdlib>
+ #include <limits>
+ #include <string>
+ #include <thread>
+@@ -196,6 +197,47 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
+     auto const start = Common::X64::FencedRDTSC();
+     auto const& caps = Common::g_cpu_caps;
+     [[maybe_unused]] auto const end = start + Common::g_wall_clock.NsToTicks(time);
++    // kart-recomp (Windows): a UMWAIT/MWAITX wait counts as running time, so the HostTiming thread (about 2,800 timed events a second,
++    // mostly input polling, each wait under 1 ms) held one logical core at 100%. On a PC with few cores that core is taken from the
++    // guest and render threads. With 8 or fewer logical CPUs the wait is now spent in short high-resolution timer sleeps (4 cores:
++    // frames on time 68% -> 76%, over 20 ms 9% -> 4%; 8 threads: equal; 16 threads: 3 points worse, so the instruction stays there).
++    // KARTRECOMP_TIMING_WAIT=1 forces the sleeps, =0 the old behaviour.
++    static const bool coarse_wait = [] {
++        const char* v = std::getenv("KARTRECOMP_TIMING_WAIT");
++        if (v && v[0] == '0') return false;
++        if (v && v[0] == '1') return true;
++        DWORD_PTR process_mask = 0, system_mask = 0;
++        if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) return false;
++        int logical = 0;
++        for (; process_mask; process_mask &= process_mask - 1) ++logical;
++        return logical <= 8;
++    }();
++    // (CPUs without MWAITX/UMWAIT already sleep in the last branch below.)
++    if (coarse_wait && (caps.monitorx || caps.waitpkg) && time > std::chrono::microseconds(300)) {
++        // High-resolution timer sleeps of at most 0.5 ms, looking at the flag between them (a Set() is seen within about 0.5 ms).
++        static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++        if (timer) {
++            const s64 tick_hz = static_cast<s64>(Common::g_wall_clock.NsToTicks(std::chrono::seconds(1)));
++            for (;;) {
++                bool expected = true;
++                if (is_set.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
++                    return true;
++                }
++                const s64 left = static_cast<s64>(end) - static_cast<s64>(Common::X64::FencedRDTSC());
++                const s64 left_ns = left * 1000000000LL / (tick_hz > 0 ? tick_hz : 1);
++                if (left_ns < 250000) {
++                    break; // the last quarter millisecond is waited out precisely below
++                }
++                const s64 sleep_ns = std::min<s64>(left_ns - 150000, 500000);
++                LARGE_INTEGER due;
++                due.QuadPart = -(sleep_ns / 100);
++                if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
++                    break;
++                }
++                WaitForSingleObject(timer, INFINITE);
++            }
++        }
++    }
+     if (caps.monitorx) {
+         while (true) {
+             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
+diff --git a/src/common/virtual_buffer.cpp b/src/common/virtual_buffer.cpp
+index af26bfff5b..6a098a7bbd 100644
+--- a/src/common/virtual_buffer.cpp
++++ b/src/common/virtual_buffer.cpp
+@@ -6,6 +6,12 @@
+ 
+ #ifdef _WIN32
+ #include <windows.h>
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstdlib>
++#include <mutex>
+ #else
+ #include <sys/mman.h>
+ #endif
+@@ -15,9 +21,82 @@
+ 
+ namespace Common {
+ 
++#ifdef _WIN32
++namespace {
++// kart-recomp (Windows): large buffers are reserved and committed page by page on first touch, like an mmap on Linux. The guest page
++// table alone is 4 GB (39-bit address space), of which a race touches about 25 MB; committing it all up front charged 4 GB against
++// the system's commit limit (RAM + page file), which an 8 GB PC with a small page file can run out of. A vectored exception handler
++// commits 64 KB around a first access inside a registered range and resumes; anything else passes on. KARTRECOMP_LAZY_COMMIT=0 off.
++constexpr std::size_t kLazyMinimum = std::size_t{256} << 20;
++constexpr std::uintptr_t kCommitChunk = 0x10000;
++struct LazyRange {
++    std::atomic<std::uintptr_t> begin{0};
++    std::atomic<std::uintptr_t> end{0};
++};
++std::array<LazyRange, 16> lazy_ranges;
++std::mutex lazy_mutex;
++
++LONG CALLBACK CommitOnFirstTouch(EXCEPTION_POINTERS* info) {
++    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
++    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) {
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
++    const auto addr = static_cast<std::uintptr_t>(rec->ExceptionInformation[1]);
++    for (const LazyRange& r : lazy_ranges) {
++        const std::uintptr_t begin = r.begin.load(std::memory_order_acquire);
++        const std::uintptr_t end = r.end.load(std::memory_order_acquire);
++        if (begin != 0 && addr >= begin && addr < end) {
++            const std::uintptr_t chunk = std::max(begin, addr & ~(kCommitChunk - 1));
++            const std::size_t length = static_cast<std::size_t>(std::min(end, chunk + kCommitChunk) - chunk);
++            return VirtualAlloc(reinterpret_cast<void*>(chunk), length, MEM_COMMIT, PAGE_READWRITE) ? EXCEPTION_CONTINUE_EXECUTION
++                                                                                                       : EXCEPTION_CONTINUE_SEARCH;
++        }
++    }
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++bool LazyCommitEnabled() {
++    static const bool enabled = [] {
++        const char* v = std::getenv("KARTRECOMP_LAZY_COMMIT");
++        return !(v && v[0] == '0');
++    }();
++    return enabled;
++}
++
++/// Reserves `size` bytes to be committed on first touch; null when no range slot is free (the caller commits everything instead).
++void* ReserveLazy(std::size_t size) {
++    std::scoped_lock lock{lazy_mutex};
++    static const bool installed = AddVectoredExceptionHandler(1, CommitOnFirstTouch) != nullptr;
++    if (!installed) return nullptr;
++    for (LazyRange& r : lazy_ranges) {
++        if (r.begin.load(std::memory_order_relaxed) != 0) continue;
++        void* base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
++        if (!base) return nullptr;
++        r.end.store(reinterpret_cast<std::uintptr_t>(base) + size, std::memory_order_release);
++        r.begin.store(reinterpret_cast<std::uintptr_t>(base), std::memory_order_release);
++        return base;
++    }
++    return nullptr;
++}
++
++void ForgetLazy(void* base) {
++    std::scoped_lock lock{lazy_mutex};
++    for (LazyRange& r : lazy_ranges) {
++        if (r.begin.load(std::memory_order_relaxed) == reinterpret_cast<std::uintptr_t>(base)) {
++            r.begin.store(0, std::memory_order_release);
++            r.end.store(0, std::memory_order_release);
++        }
++    }
++}
++} // namespace
++#endif
++
+ void* AllocateMemoryPages(std::size_t size) noexcept {
+ #ifdef _WIN32
+-    void* base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++    void* base = (size >= kLazyMinimum && LazyCommitEnabled()) ? ReserveLazy(size) : nullptr;
++    if (!base) {
++        base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++    }
+ #else
+     void* base = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     if (base == MAP_FAILED)
+@@ -33,6 +112,7 @@ void FreeMemoryPages(void* base, [[maybe_unused]] std::size_t size) noexcept {
+     if (!base)
+         return;
+ #ifdef _WIN32
++    ForgetLazy(base);
+     ASSERT(VirtualFree(base, 0, MEM_RELEASE));
+ #else
+     ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..58f3e192ff 100644
+index 408daa6839..aff58c4967 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,16 @@ add_library(core STATIC
+@@ -12,6 +12,18 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
@@ -584,6 +753,8 @@ index 408daa6839..58f3e192ff 100644
 +    arm/recomp/kart_hook_trace.cpp
 +    arm/recomp/kart_hook_trace.h
 +    arm/recomp/nvn_trace.cpp
++    arm/recomp/sdk_trace.cpp
++    arm/recomp/sdk_trace.h
 +    arm/recomp/nvn_trace.h
 +    nvn_host/nvn_host.cpp
 +    nvn_host/nvn_host.h
@@ -592,7 +763,7 @@ index 408daa6839..58f3e192ff 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +146,8 @@ add_library(core STATIC
+@@ -136,6 +148,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -601,7 +772,7 @@ index 408daa6839..58f3e192ff 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -1226,7 +1238,7 @@ else()
+@@ -1226,7 +1240,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -1983,6 +2154,191 @@ index 0000000000..5129cdb53e
 +void WriteReport();
 +
 +} // namespace Core::NvnTrace
+diff --git a/src/core/arm/recomp/sdk_trace.cpp b/src/core/arm/recomp/sdk_trace.cpp
+new file mode 100644
+index 0000000000..874a1b567e
+--- /dev/null
++++ b/src/core/arm/recomp/sdk_trace.cpp
+@@ -0,0 +1,144 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/arm/recomp/sdk_trace.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "common/fs/path_util.h"
++#include "common/logging/log.h"
++#include "core/arm/recomp/host_hooks.h"
++
++namespace Core::SdkTrace {
++namespace {
++
++struct Entry {
++    std::string name;
++    std::atomic<u64> calls{0};
++    std::atomic<u64> from_main{0};
++    u64 reported_from_main = 0; ///< from_main at the previous report (report thread only)
++};
++
++std::vector<std::unique_ptr<Entry>> g_entries;
++std::mutex g_lock;
++std::atomic<u64> g_main_begin{0}, g_main_end{0};
++std::once_flag g_report_thread;
++
++template <typename T>
++bool ReadAt(std::span<const u8> image, u64 offset, T& out) {
++    if (offset + sizeof(T) > image.size()) return false;
++    std::memcpy(&out, image.data() + offset, sizeof(T));
++    return true;
++}
++
++/// Every defined function symbol of the module's dynamic symbol table: (name, module-relative address).
++std::vector<std::pair<std::string, u64>> DefinedFunctions(std::span<const u8> image) {
++    std::vector<std::pair<std::string, u64>> out;
++    u32 mod0 = 0;
++    if (!ReadAt(image, 4, mod0) || mod0 + 8 > image.size() || std::memcmp(image.data() + mod0, "MOD0", 4) != 0) return out;
++    s32 dyn_rel = 0;
++    ReadAt(image, mod0 + 4, dyn_rel);
++    u64 dyn = mod0 + static_cast<s64>(dyn_rel);
++    u64 symtab = 0, strtab = 0, hash = 0, strsz = 0;
++    for (;; dyn += 16) {
++        s64 tag = 0;
++        u64 val = 0;
++        if (!ReadAt(image, dyn, tag) || !ReadAt(image, dyn + 8, val) || tag == 0) break;
++        if (tag == 4) hash = val;        // DT_HASH
++        else if (tag == 5) strtab = val; // DT_STRTAB
++        else if (tag == 6) symtab = val; // DT_SYMTAB
++        else if (tag == 10) strsz = val; // DT_STRSZ
++    }
++    if (!symtab || !strtab || !hash) return out;
++    u32 count = 0;
++    ReadAt(image, hash + 4, count); // nchain = number of symbols
++    for (u32 i = 0; i < count; ++i) {
++        const u64 sym = symtab + static_cast<u64>(i) * 24;
++        u32 name_off = 0;
++        u8 info = 0;
++        u16 shndx = 0;
++        u64 value = 0;
++        if (!ReadAt(image, sym, name_off) || !ReadAt(image, sym + 4, info) || !ReadAt(image, sym + 6, shndx) ||
++            !ReadAt(image, sym + 8, value))
++            break;
++        if (shndx == 0 || (info & 0xF) != 2 /* STT_FUNC */ || name_off >= strsz || value == 0) continue;
++        const char* s = reinterpret_cast<const char*>(image.data() + strtab + name_off);
++        out.emplace_back(std::string{s, strnlen(s, image.size() - (strtab + name_off))}, value);
++    }
++    return out;
++}
++
++void WriteReport() {
++    std::vector<Entry*> list;
++    {
++        std::scoped_lock lock{g_lock};
++        for (auto& e : g_entries) list.push_back(e.get());
++    }
++    std::sort(list.begin(), list.end(), [](const Entry* a, const Entry* b) { return a->from_main.load() > b->from_main.load(); });
++    const auto path = Common::FS::GetSuyuPath(Common::FS::SuyuPath::LogDir) / "sdk_trace.txt";
++    std::ofstream out(path, std::ios::trunc);
++    out << "# from_main all from_main_last_10s name  (sdk exports called at least once)\n";
++    for (Entry* e : list) {
++        const u64 all = e->calls.load(), main = e->from_main.load();
++        if (all == 0) continue;
++        out << main << ' ' << all << ' ' << (main - e->reported_from_main) << ' ' << e->name << '\n';
++        e->reported_from_main = main;
++    }
++}
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_SDK_TRACE");
++        return v && *v == '1';
++    }();
++    return on;
++}
++
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
++    (void)system;
++    if (!Enabled()) return;
++    if (name == "main") {
++        g_main_begin = load_base;
++        g_main_end = load_base + image.size();
++        return;
++    }
++    if (name != "sdk") return;
++    const auto functions = DefinedFunctions(image);
++    for (const auto& [fn, offset] : functions) {
++        auto owned = std::make_unique<Entry>();
++        owned->name = fn;
++        Entry* entry = owned.get();
++        {
++            std::scoped_lock lock{g_lock};
++            g_entries.push_back(std::move(owned));
++        }
++        RecompHooks::Install(load_base + offset, [entry](RecompHooks::HookContext& ctx) {
++            entry->calls.fetch_add(1, std::memory_order_relaxed);
++            const u64 lr = ctx.x[30];
++            if (lr >= g_main_begin.load(std::memory_order_relaxed) && lr < g_main_end.load(std::memory_order_relaxed))
++                entry->from_main.fetch_add(1, std::memory_order_relaxed);
++            return false; // observe only
++        });
++    }
++    LOG_INFO(Core_ARM, "SDK trace: {} exported functions of sdk hooked; report in sdk_trace.txt every 10 s", functions.size());
++    std::call_once(g_report_thread, [] {
++        std::thread([] {
++            for (;;) {
++                std::this_thread::sleep_for(std::chrono::seconds(10));
++                WriteReport();
++            }
++        }).detach();
++    });
++}
++
++} // namespace Core::SdkTrace
+diff --git a/src/core/arm/recomp/sdk_trace.h b/src/core/arm/recomp/sdk_trace.h
+new file mode 100644
+index 0000000000..7b57c3a140
+--- /dev/null
++++ b/src/core/arm/recomp/sdk_trace.h
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: SDK call tracer, Phase 0 of the native-engine plan (docs/NATIVE_ENGINE.md).
++//
++// The game reaches the console OS through the Nintendo SDK module ("sdk"): nn::os, nn::fs, nn::hid, nn::audio, ... Every exported
++// function of that module gets a counting hook, so a run shows which SDK functions the game really calls and how often - the work
++// list for replacing the emulated OS with native code. Only calls that come back through the host dispatcher are seen, which is
++// every call from main into the sdk (cross-module); calls inside the sdk are mostly chained and not seen.
++//
++// Enabled with KARTRECOMP_SDK_TRACE=1. Writes <log dir>/sdk_trace.txt every 10 s:
++//   <calls from main> <all calls> <calls from main in the last 10 s> <mangled name>
++#pragma once
++
++#include <span>
++#include <string_view>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::SdkTrace {
++
++bool Enabled();
++
++/// Called by the NSO loader with each module's image before it is mapped; hooks the exports of "sdk", remembers where "main" is.
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
++
++} // namespace Core::SdkTrace
 diff --git a/src/core/cpu_manager.cpp b/src/core/cpu_manager.cpp
 index 315b273ae8..e4feebcffc 100644
 --- a/src/core/cpu_manager.cpp
@@ -2852,7 +3208,7 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..61c8a39b8c 100644
+index 3cc84acfdf..d8c3aac177 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -6,9 +6,11 @@
@@ -2867,19 +3223,26 @@ index 3cc84acfdf..61c8a39b8c 100644
  #include "common/common_funcs.h"
  #include "common/hex_util.h"
  #include "common/logging.h"
-@@ -23,6 +25,8 @@
+@@ -23,6 +25,9 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/arm/recomp/sdk_trace.h"
 +#include "core/arm/recomp/nvn_trace.h"
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +221,34 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +222,40 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
++    // kart-recomp: SDK call tracer (KARTRECOMP_SDK_TRACE=1): which nn:: functions the game calls, for the native-engine plan.
++    Core::SdkTrace::NoteModuleImage(
++        system,
++        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
++        load_base + module_start, name);
++
 +    // kart-recomp: lets the NVN tracer find nvnBootstrapLoader in this module.
 +    Core::NvnTrace::NoteModuleImage(
 +        system,
@@ -5441,172 +5804,3 @@ index 9c31896bde..6e59ab40b1 100644
          const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
          if (!shader_info) {
              const u32 start_address{shader_config.offset};
-diff --git a/src/common/virtual_buffer.cpp b/src/common/virtual_buffer.cpp
-index af26bfff5b..6a098a7bbd 100644
---- a/src/common/virtual_buffer.cpp
-+++ b/src/common/virtual_buffer.cpp
-@@ -6,6 +6,12 @@
- 
- #ifdef _WIN32
- #include <windows.h>
-+#include <algorithm>
-+#include <array>
-+#include <atomic>
-+#include <cstdint>
-+#include <cstdlib>
-+#include <mutex>
- #else
- #include <sys/mman.h>
- #endif
-@@ -15,9 +21,82 @@
- 
- namespace Common {
- 
-+#ifdef _WIN32
-+namespace {
-+// kart-recomp (Windows): large buffers are reserved and committed page by page on first touch, like an mmap on Linux. The guest page
-+// table alone is 4 GB (39-bit address space), of which a race touches about 25 MB; committing it all up front charged 4 GB against
-+// the system's commit limit (RAM + page file), which an 8 GB PC with a small page file can run out of. A vectored exception handler
-+// commits 64 KB around a first access inside a registered range and resumes; anything else passes on. KARTRECOMP_LAZY_COMMIT=0 off.
-+constexpr std::size_t kLazyMinimum = std::size_t{256} << 20;
-+constexpr std::uintptr_t kCommitChunk = 0x10000;
-+struct LazyRange {
-+    std::atomic<std::uintptr_t> begin{0};
-+    std::atomic<std::uintptr_t> end{0};
-+};
-+std::array<LazyRange, 16> lazy_ranges;
-+std::mutex lazy_mutex;
-+
-+LONG CALLBACK CommitOnFirstTouch(EXCEPTION_POINTERS* info) {
-+    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
-+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) {
-+        return EXCEPTION_CONTINUE_SEARCH;
-+    }
-+    const auto addr = static_cast<std::uintptr_t>(rec->ExceptionInformation[1]);
-+    for (const LazyRange& r : lazy_ranges) {
-+        const std::uintptr_t begin = r.begin.load(std::memory_order_acquire);
-+        const std::uintptr_t end = r.end.load(std::memory_order_acquire);
-+        if (begin != 0 && addr >= begin && addr < end) {
-+            const std::uintptr_t chunk = std::max(begin, addr & ~(kCommitChunk - 1));
-+            const std::size_t length = static_cast<std::size_t>(std::min(end, chunk + kCommitChunk) - chunk);
-+            return VirtualAlloc(reinterpret_cast<void*>(chunk), length, MEM_COMMIT, PAGE_READWRITE) ? EXCEPTION_CONTINUE_EXECUTION
-+                                                                                                       : EXCEPTION_CONTINUE_SEARCH;
-+        }
-+    }
-+    return EXCEPTION_CONTINUE_SEARCH;
-+}
-+
-+bool LazyCommitEnabled() {
-+    static const bool enabled = [] {
-+        const char* v = std::getenv("KARTRECOMP_LAZY_COMMIT");
-+        return !(v && v[0] == '0');
-+    }();
-+    return enabled;
-+}
-+
-+/// Reserves `size` bytes to be committed on first touch; null when no range slot is free (the caller commits everything instead).
-+void* ReserveLazy(std::size_t size) {
-+    std::scoped_lock lock{lazy_mutex};
-+    static const bool installed = AddVectoredExceptionHandler(1, CommitOnFirstTouch) != nullptr;
-+    if (!installed) return nullptr;
-+    for (LazyRange& r : lazy_ranges) {
-+        if (r.begin.load(std::memory_order_relaxed) != 0) continue;
-+        void* base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
-+        if (!base) return nullptr;
-+        r.end.store(reinterpret_cast<std::uintptr_t>(base) + size, std::memory_order_release);
-+        r.begin.store(reinterpret_cast<std::uintptr_t>(base), std::memory_order_release);
-+        return base;
-+    }
-+    return nullptr;
-+}
-+
-+void ForgetLazy(void* base) {
-+    std::scoped_lock lock{lazy_mutex};
-+    for (LazyRange& r : lazy_ranges) {
-+        if (r.begin.load(std::memory_order_relaxed) == reinterpret_cast<std::uintptr_t>(base)) {
-+            r.begin.store(0, std::memory_order_release);
-+            r.end.store(0, std::memory_order_release);
-+        }
-+    }
-+}
-+} // namespace
-+#endif
-+
- void* AllocateMemoryPages(std::size_t size) noexcept {
- #ifdef _WIN32
--    void* base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-+    void* base = (size >= kLazyMinimum && LazyCommitEnabled()) ? ReserveLazy(size) : nullptr;
-+    if (!base) {
-+        base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-+    }
- #else
-     void* base = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
-     if (base == MAP_FAILED)
-@@ -33,6 +112,7 @@ void FreeMemoryPages(void* base, [[maybe_unused]] std::size_t size) noexcept {
-     if (!base)
-         return;
- #ifdef _WIN32
-+    ForgetLazy(base);
-     ASSERT(VirtualFree(base, 0, MEM_RELEASE));
- #else
-     ASSERT(munmap(base, size) == 0);
-diff --git a/src/common/thread.cpp b/src/common/thread.cpp
-index 5617a93b91..849d89f383 100644
---- a/src/common/thread.cpp
-+++ b/src/common/thread.cpp
-@@ -5,6 +5,7 @@
- // SPDX-License-Identifier: GPL-2.0-or-later
- 
- #include <chrono>
-+#include <cstdlib>
- #include <limits>
- #include <string>
- #include <thread>
-@@ -196,6 +197,47 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
-     auto const start = Common::X64::FencedRDTSC();
-     auto const& caps = Common::g_cpu_caps;
-     [[maybe_unused]] auto const end = start + Common::g_wall_clock.NsToTicks(time);
-+    // kart-recomp (Windows): a UMWAIT/MWAITX wait counts as running time, so the HostTiming thread (about 2,800 timed events a second,
-+    // mostly input polling, each wait under 1 ms) held one logical core at 100%. On a PC with few cores that core is taken from the
-+    // guest and render threads. With 8 or fewer logical CPUs the wait is now spent in short high-resolution timer sleeps (4 cores:
-+    // frames on time 68% -> 76%, over 20 ms 9% -> 4%; 8 threads: equal; 16 threads: 3 points worse, so the instruction stays there).
-+    // KARTRECOMP_TIMING_WAIT=1 forces the sleeps, =0 the old behaviour.
-+    static const bool coarse_wait = [] {
-+        const char* v = std::getenv("KARTRECOMP_TIMING_WAIT");
-+        if (v && v[0] == '0') return false;
-+        if (v && v[0] == '1') return true;
-+        DWORD_PTR process_mask = 0, system_mask = 0;
-+        if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) return false;
-+        int logical = 0;
-+        for (; process_mask; process_mask &= process_mask - 1) ++logical;
-+        return logical <= 8;
-+    }();
-+    // (CPUs without MWAITX/UMWAIT already sleep in the last branch below.)
-+    if (coarse_wait && (caps.monitorx || caps.waitpkg) && time > std::chrono::microseconds(300)) {
-+        // High-resolution timer sleeps of at most 0.5 ms, looking at the flag between them (a Set() is seen within about 0.5 ms).
-+        static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-+        if (timer) {
-+            const s64 tick_hz = static_cast<s64>(Common::g_wall_clock.NsToTicks(std::chrono::seconds(1)));
-+            for (;;) {
-+                bool expected = true;
-+                if (is_set.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
-+                    return true;
-+                }
-+                const s64 left = static_cast<s64>(end) - static_cast<s64>(Common::X64::FencedRDTSC());
-+                const s64 left_ns = left * 1000000000LL / (tick_hz > 0 ? tick_hz : 1);
-+                if (left_ns < 250000) {
-+                    break; // the last quarter millisecond is waited out precisely below
-+                }
-+                const s64 sleep_ns = std::min<s64>(left_ns - 150000, 500000);
-+                LARGE_INTEGER due;
-+                due.QuadPart = -(sleep_ns / 100);
-+                if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
-+                    break;
-+                }
-+                WaitForSingleObject(timer, INFINITE);
-+            }
-+        }
-+    }
-     if (caps.monitorx) {
-         while (true) {
-             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied

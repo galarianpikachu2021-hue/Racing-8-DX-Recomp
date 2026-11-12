@@ -1,0 +1,118 @@
+# Native engine: from the emulated console OS to our own runtime
+
+Goal (user, 2026-11-12): no emulation left. The game's code is already recompiled and static (no JIT); what is still emulated is the
+console OS underneath it (kernel, IPC, system services) and the guest memory model. The plan replaces the Nintendo SDK's *API*
+(the `sdk` module's exported `nn::` functions, plus the C library and math functions it also provides) subsystem by subsystem with
+host code, then deletes the emulator underneath. Phases: 0 measure the boundary (done, below); 1 C library, math, nn::os; 2 hid,
+time, settings; 3 fs; 4 audio; 5 present/GPU cleanup (the emulated GPU is still created, unused); 6 remaining services, then delete
+the HLE kernel, IPC and services; 7 native memory model (guest address = host address, plain loads in the generated code); 8
+optional function-level codegen. Every step stays fully static (no JIT), sits behind a `KARTRECOMP_NATIVE_<PART>` switch until the
+user has played it, and is checked with the TAS races (1P, 2P, 4P), screenshots and `local/exp/ab.sh` A/B runs.
+
+Why at the SDK API: `main` calls into the separate `sdk` module, and those cross-module calls come back to the host dispatcher, where
+`core/arm/recomp/host_hooks` can answer them (this is how the NVN graphics hooks already work, on 3.0.4 and 4.0.1). Calls inside
+`main` cannot be hooked at run time in the 4.0.1 build (they are resolved in the generated code); calls inside `sdk` mostly not either.
+
+## Phase 0: the measured boundary (2026-11-12)
+
+Tool: `KARTRECOMP_SDK_TRACE=1` (`core/arm/recomp/sdk_trace.{h,cpp}` in the fork). It hooks every exported function of `sdk` (17,270)
+and writes `<log dir>/sdk_trace.txt` every 10 s: calls from main, all calls, calls from main in the last 10 s, mangled name
+(demangle with `c++filt`). Run: `local/exp/mprun2.sh 1 <label>` with `EXTRA_ENV=KARTRECOMP_SDK_TRACE=1` (boot, menus, an effects race;
+the last 10 s window is in the race). Raw files: `local/exp/runs/sdk_trace-{401,304}.txt` (local).
+
+### 4.0.1: 1549 sdk functions called; by group (calls from main, whole run / per second in the race)
+
+| group | functions | calls (run) | calls/s (race) |
+|---|---|---|---|
+| libc | 336 | 66,111,936 | 304,292 |
+| nn::os | 184 | 33,144,172 | 252,895 |
+| libm (math) | 13 | 9,083,600 | 78,363 |
+| nn::audio | 144 | 3,517,166 | 31,505 |
+| nn::util | 25 | 824,792 | 4,636 |
+| nn::hid | 82 | 284,902 | 2,005 |
+| nn::mem | 11 | 159,486 | 716 |
+| nn::fontll | 12 | 26,917 | 0 |
+| nn::mii | 102 | 10,047 | 0 |
+| nn::fs | 118 | 6,794 | 0 |
+| nn::err | 3 | 1,285 | 0 |
+| nn::time | 17 | 899 | 6 |
+| nn::friends | 11 | 606 | 0 |
+| nn::ldn | 1 | 513 | 0 |
+| nn::prepo | 26 | 173 | 0 |
+| nn::crypto | 18 | 38 | 0 |
+| nn::oe | 15 | 21 | 0 |
+| nn::lmem | 20 | 17 | 0 |
+| nn::account | 10 | 13 | 0 |
+| nn::settings | 4 | 8 | 0 |
+| nn::vi | 28 | 6 | 0 |
+| nn::swkbd | 3 | 3 | 0 |
+| nn::pl | 3 | 3 | 0 |
+| nn::aoc | 7 | 2 | 0 |
+| other C++ (nv) | 2 | 2 | 0 |
+| nn::nlibsdk | 22 | 1 | 0 |
+| nn::apm | 3 | 1 | 0 |
+
+- **libc**: `memcpy` 127,628/s, `__memcpy_device` 127,628/s, `memset` 28,617/s, `strcmp` 10,458/s, `memmove` 3,574/s, `__memmove_device` 3,574/s
+- **nn::os**: `os::GetTlsValue` 164,689/s, `os::UnlockMutex` 17,438/s, `os::LockMutex` 17,319/s, `os::GetSystemTick` 9,758/s, `os::ClearLightEvent` 7,164/s, `os::SignalLightEvent` 6,845/s
+- **libm (math)**: `cosf` 33,688/s, `sinf` 33,410/s, `atan2f` 6,484/s, `tanf` 1,835/s, `fmodf` 1,248/s, `asinf` 1,214/s
+- **nn::audio**: `audio::SetVoiceMixVolume` 17,316/s, `audio::IsVoiceValid` 3,360/s, `audio::GetVoicePlayState` 1,681/s, `audio::IsVoiceDroppedFlagOn` 1,676/s, `audio::GetVoicePlayedSampleCount` 1,669/s, `audio::GetReleasedWaveBuffer` 1,669/s
+- **nn::util**: `util::VSNPrintf` 2,640/s, `util::BinaryFileHeader::GetFirstBlock` 1,995/s, `util::BinaryFileHeader::IsRelocated` 0/s, `util::SNPrintf` 0/s, `util::BinaryFileHeader::GetFirstBlock` 0/s, `util::RelocationTable::Relocate` 0/s
+- **nn::hid**: `hid::GetNpadStyleSet` 837/s, `hid::VibrationNode::GetCurrentVibration` 299/s, `hid::VibrationTarget::GetActualVibration` 238/s, `hid::VibrationNode::Update` 192/s, `hid::GetSixAxisSensorStates` 119/s, `hid::GetNpadState` 119/s
+- **nn::mem**: `mem::StandardAllocator::Allocate` 417/s, `mem::StandardAllocator::Reallocate` 298/s, `mem::StandardAllocator::Allocate` 0/s, `mem::StandardAllocator::Free` 0/s, `mem::StandardAllocator::StandardAllocator` 0/s, `mem::StandardAllocator::StandardAllocator` 0/s
+- **nn::fontll**: `fontll::ScalableFontEngine::CheckGlyphExist` 0/s, `fontll::ScalableFontEngine::SetScale` 0/s, `fontll::ScalableFontEngine::GetAdvance` 0/s, `fontll::ScalableFontEngine::GetKerning` 0/s, `fontll::ScalableFontEngine::SetFont` 0/s, `fontll::ScalableFontEngine::SetFlags` 0/s
+- **nn::mii**: `mii::detail::CalculateSizeAndAlignment::AddSizeWithAlignment` 0/s, `mii::detail::CalculateSizeAndAlignment::AddSizeWithAlignment` 0/s, `mii::detail::CalculateSizeAndAlignment::~CalculateSizeAndAlignment` 0/s, `mii::detail::CalculateSizeAndAlignment::~CalculateSizeAndAlignment` 0/s, `mii::detail::CalculateSizeAndAlignment::GetSize` 0/s, `mii::detail::CalculateSizeAndAlignment::CalculateSizeAndAlignment` 0/s
+
+### 3.0.4: 1549 sdk functions called; by group (calls from main, whole run / per second in the race)
+
+| group | functions | calls (run) | calls/s (race) |
+|---|---|---|---|
+| libc | 336 | 64,841,882 | 276,204 |
+| nn::os | 184 | 32,636,303 | 247,240 |
+| libm (math) | 13 | 8,774,679 | 72,216 |
+| nn::audio | 144 | 3,440,163 | 24,730 |
+| nn::util | 25 | 785,195 | 4,200 |
+| nn::hid | 82 | 278,291 | 1,962 |
+| nn::mem | 11 | 158,321 | 718 |
+| nn::fontll | 12 | 26,917 | 0 |
+| nn::mii | 102 | 10,047 | 0 |
+| nn::fs | 118 | 6,762 | 0 |
+| nn::err | 3 | 1,271 | 0 |
+| nn::time | 17 | 898 | 6 |
+| nn::friends | 11 | 606 | 0 |
+| nn::ldn | 1 | 507 | 0 |
+| nn::prepo | 26 | 167 | 0 |
+| nn::crypto | 18 | 38 | 0 |
+| nn::oe | 15 | 20 | 0 |
+| nn::lmem | 20 | 17 | 0 |
+| nn::account | 10 | 13 | 0 |
+| nn::settings | 4 | 8 | 0 |
+| nn::vi | 28 | 6 | 0 |
+| nn::pl | 3 | 3 | 0 |
+| nn::swkbd | 3 | 3 | 0 |
+| other C++ (nv) | 2 | 2 | 0 |
+| nn::aoc | 7 | 2 | 0 |
+| nn::nlibsdk | 22 | 1 | 0 |
+| nn::apm | 3 | 1 | 0 |
+
+
+### What this says
+
+- In a race the game makes about **670,000 SDK calls a second**, and 95% of them are the C library (`memcpy`/`memset`/`strcmp`),
+  `nn::os` (`GetTlsValue` alone 165 k/s, mutexes, light events, ticks) and math (`sinf`/`cosf`/`atan2f`). Each one is a dispatcher
+  round trip plus recompiled ARM code going through the memory helpers. These are small, well defined functions: the first native work.
+- Audio is the next per-frame subsystem (31 k/s, mostly per-voice parameters); hid is small (2 k/s); everything else (fs, mii,
+  fontll, friends, account, prepo, crypto, settings, vi, aoc) is load-time or once: replace or stub without performance pressure.
+- 1,549 of the 17,270 exports are ever called; 3.0.4 and 4.0.1 call the same set.
+
+## Work list (revised order)
+
+1. **Native C library and math**: `memcpy/memmove/memset/memcmp/strcmp/strlen/strncmp...` and `sinf/cosf/tanf/atan2f/asinf/fmodf...`
+   as host hooks working directly on guest memory (fastmem arena: host = base + guest address, checked bounds, fallback to the guest
+   code for anything outside). Bit-exact results matter for the game's simulation (same float results as the ARM code: check with a
+   table of inputs against the recompiled functions before switching). Measure with `local/exp/ab.sh` (3+ runs each).
+2. **nn::os fast paths**: `GetTlsValue/SetTlsValue` (per-thread slot array), `GetSystemTick/ConvertToTimeSpan`; then mutexes, light
+   events, reader-writer locks, message queues as host primitives - only where every user of the object is hooked (sdk-internal users
+   stay on the emulated kernel until later; never mix).
+3. Threads (`nn::os::CreateThread` ...) as host threads without fibers; then hid, settings/oe/time.
+4. fs (load time), then audio (largest), then GPU/present cleanup, then the remaining services, then delete the emulator; native
+   memory model and function-level codegen last (see the plan).
