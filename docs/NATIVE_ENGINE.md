@@ -116,3 +116,16 @@ the last 10 s window is in the race). Raw files: `local/exp/runs/sdk_trace-{401,
 3. Threads (`nn::os::CreateThread` ...) as host threads without fibers; then hid, settings/oe/time.
 4. fs (load time), then audio (largest), then GPU/present cleanup, then the remaining services, then delete the emulator; native
    memory model and function-level codegen last (see the plan).
+
+## Phase 1, step 1: native C library (2026-11-12) - measured, no gain, kept off
+
+`KARTRECOMP_NATIVE_LIBC=1` (`core/arm/recomp/native_libc.{h,cpp}`): `memcpy/__memcpy_device/memmove/__memmove_device/memset/memcmp/
+strlen/strcmp` called from the game are answered by host code on guest memory (page by page through `GetPointerSilent`, which also
+tells the code guard; any unmapped page falls back to the game's own code). Correct: races fully static, 60 fps, same pictures.
+A/B, 1P effects race on 4.0.1, game-thread samples: native 37,898 / 37,881 / 37,325 (mean 37.7 k) vs reference 35,994 / 36,520 /
+38,063 (mean 36.9 k): within the noise, no gain. Profile: SDK code 3.3% -> 2.7% of the game thread, host hook dispatch +0.5 points.
+The C library was cheap to begin with (the 300 k calls/s are mostly tiny copies); the per-call hook cost eats the saving.
+
+Lesson for the plan: replacing SDK functions one call at a time through the dispatcher hook is a way to *remove emulation*, not a
+speed-up; frame-time gains need fewer dispatches (codegen) or less work per access (memory model), as NATIVE_PERF.md found.
+Next native steps (nn::os sync/TLS, hid, fs) should be judged by what they remove (kernel, IPC, services, fibers), not by fps.

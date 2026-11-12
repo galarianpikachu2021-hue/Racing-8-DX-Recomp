@@ -741,10 +741,10 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..aff58c4967 100644
+index 408daa6839..770f1aecf7 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,18 @@ add_library(core STATIC
+@@ -12,6 +12,20 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
@@ -753,6 +753,8 @@ index 408daa6839..aff58c4967 100644
 +    arm/recomp/kart_hook_trace.cpp
 +    arm/recomp/kart_hook_trace.h
 +    arm/recomp/nvn_trace.cpp
++    arm/recomp/native_libc.cpp
++    arm/recomp/native_libc.h
 +    arm/recomp/sdk_trace.cpp
 +    arm/recomp/sdk_trace.h
 +    arm/recomp/nvn_trace.h
@@ -763,7 +765,7 @@ index 408daa6839..aff58c4967 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +148,8 @@ add_library(core STATIC
+@@ -136,6 +150,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -772,7 +774,7 @@ index 408daa6839..aff58c4967 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -1226,7 +1240,7 @@ else()
+@@ -1226,7 +1242,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -1736,6 +1738,222 @@ index 0000000000..11a6dabdf0
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base);
 +
 +} // namespace Core::KartHookTrace
+diff --git a/src/core/arm/recomp/native_libc.cpp b/src/core/arm/recomp/native_libc.cpp
+new file mode 100644
+index 0000000000..4d2941f78a
+--- /dev/null
++++ b/src/core/arm/recomp/native_libc.cpp
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/arm/recomp/native_libc.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <string>
++#include <vector>
++
++#include "common/logging/log.h"
++#include "core/arm/recomp/host_hooks.h"
++#include "core/arm/recomp/sdk_trace.h"
++#include "core/core.h"
++#include "core/memory.h"
++
++namespace Core::NativeLibc {
++namespace {
++
++constexpr u64 kPage = 0x1000;
++
++/// Guest memory as host spans, page by page. Every function here first checks that the whole range is mapped (else the guest code
++/// runs, which faults the way the game expects), then works on host pointers.
++struct Guest {
++    Core::Memory::Memory& mem;
++
++    /// Host pointer for [va, va+len) when it stays inside one page; null when unmapped.
++    u8* Page(u64 va) { return mem.GetPointerSilent(va); }
++
++    bool Mapped(u64 va, u64 len) {
++        if (len == 0) return true;
++        for (u64 p = va & ~(kPage - 1); p < va + len; p += kPage)
++            if (!Page(p)) return false;
++        return true;
++    }
++
++    /// Calls fn(host pointer, guest address, length) for each page-sized piece of [va, va+len).
++    template <typename F>
++    void Pieces(u64 va, u64 len, F&& fn) {
++        while (len) {
++            const u64 n = std::min<u64>(len, kPage - (va & (kPage - 1)));
++            fn(Page(va), va, n);
++            va += n;
++            len -= n;
++        }
++    }
++};
++
++bool Return(RecompHooks::HookContext& ctx, u64 value) {
++    ctx.x[0] = value;
++    ctx.pc = ctx.x[30];
++    return true;
++}
++
++// memcpy/memmove: copy through a host buffer when the ranges overlap or are large and fragmented; one page piece at a time
++// otherwise. Pieces of the source and destination may sit at different host addresses, so the copy walks both.
++void Copy(Guest& g, u64 dst, u64 src, u64 n) {
++    const bool overlap = src < dst + n && dst < src + n;
++    if (overlap || n > 4 * kPage) {
++        std::vector<u8> tmp(n);
++        u64 off = 0;
++        g.Pieces(src, n, [&](u8* p, u64, u64 len) { std::memcpy(tmp.data() + off, p, len); off += len; });
++        off = 0;
++        g.Pieces(dst, n, [&](u8* p, u64, u64 len) { std::memcpy(p, tmp.data() + off, len); off += len; });
++        return;
++    }
++    while (n) {
++        const u64 len = std::min({n, kPage - (src & (kPage - 1)), kPage - (dst & (kPage - 1))});
++        std::memcpy(g.Page(dst), g.Page(src), len);
++        dst += len;
++        src += len;
++        n -= len;
++    }
++}
++
++/// Length of the guest C string at va, or -1 when it runs into an unmapped page or past `limit` bytes.
++s64 StrLen(Guest& g, u64 va, u64 limit = u64{1} << 20) {
++    u64 n = 0;
++    while (n < limit) {
++        const u8* p = g.Page(va + n);
++        if (!p) return -1;
++        const u64 room = kPage - ((va + n) & (kPage - 1));
++        const void* z = std::memchr(p, 0, room);
++        if (z) return static_cast<s64>(n + (static_cast<const u8*>(z) - p));
++        n += room;
++    }
++    return -1;
++}
++
++int ByteDiff(u8 a, u8 b) { return static_cast<int>(a) - static_cast<int>(b); }
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_LIBC");
++        return v && *v == '1';
++    }();
++    return on;
++}
++
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
++    if (!Enabled() || name != "sdk") return;
++    std::map<std::string, u64> exports;
++    for (const auto& [fn, offset] : SdkTrace::ExportedFunctions(image)) exports.emplace(fn, load_base + offset);
++    int installed = 0;
++    const auto hook = [&](const char* fn, RecompHooks::HookFn handler) {
++        const auto it = exports.find(fn);
++        if (it == exports.end()) return;
++        RecompHooks::Install(it->second, std::move(handler));
++        ++installed;
++    };
++    Core::System* sys = &system;
++
++    const auto memcpy_hook = [sys](RecompHooks::HookContext& ctx) {
++        Guest g{sys->ApplicationMemory()};
++        const u64 dst = ctx.x[0], src = ctx.x[1], n = ctx.x[2];
++        if (!g.Mapped(dst, n) || !g.Mapped(src, n)) return false;
++        Copy(g, dst, src, n);
++        return Return(ctx, dst);
++    };
++    for (const char* fn : {"memcpy", "__memcpy_device", "memmove", "__memmove_device"}) hook(fn, memcpy_hook);
++
++    hook("memset", [sys](RecompHooks::HookContext& ctx) {
++        Guest g{sys->ApplicationMemory()};
++        const u64 dst = ctx.x[0], n = ctx.x[2];
++        if (!g.Mapped(dst, n)) return false;
++        const int c = static_cast<int>(ctx.x[1] & 0xFF);
++        g.Pieces(dst, n, [c](u8* p, u64, u64 len) { std::memset(p, c, len); });
++        return Return(ctx, dst);
++    });
++
++    hook("memcmp", [sys](RecompHooks::HookContext& ctx) {
++        Guest g{sys->ApplicationMemory()};
++        u64 a = ctx.x[0], b = ctx.x[1], n = ctx.x[2];
++        if (!g.Mapped(a, n) || !g.Mapped(b, n)) return false;
++        while (n) {
++            const u64 len = std::min({n, kPage - (a & (kPage - 1)), kPage - (b & (kPage - 1))});
++            const u8* pa = g.Page(a);
++            const u8* pb = g.Page(b);
++            for (u64 i = 0; i < len; ++i)
++                if (pa[i] != pb[i]) return Return(ctx, static_cast<u64>(static_cast<s64>(ByteDiff(pa[i], pb[i]))));
++            a += len;
++            b += len;
++            n -= len;
++        }
++        return Return(ctx, 0);
++    });
++
++    hook("strlen", [sys](RecompHooks::HookContext& ctx) {
++        Guest g{sys->ApplicationMemory()};
++        const s64 n = StrLen(g, ctx.x[0]);
++        if (n < 0) return false;
++        return Return(ctx, static_cast<u64>(n));
++    });
++
++    hook("strcmp", [sys](RecompHooks::HookContext& ctx) {
++        Guest g{sys->ApplicationMemory()};
++        u64 a = ctx.x[0], b = ctx.x[1];
++        for (u64 done = 0; done < (u64{1} << 20);) {
++            const u8* pa = g.Page(a);
++            const u8* pb = g.Page(b);
++            if (!pa || !pb) return false;
++            const u64 len = std::min(kPage - (a & (kPage - 1)), kPage - (b & (kPage - 1))); // bytes left in both pages
++            for (u64 i = 0; i < len; ++i)
++                if (pa[i] != pb[i] || pa[i] == 0) return Return(ctx, static_cast<u64>(static_cast<s64>(ByteDiff(pa[i], pb[i]))));
++            a += len;
++            b += len;
++            done += len;
++        }
++        return false;
++    });
++
++    LOG_INFO(Core_ARM, "native libc: {} C library functions of sdk answered by host code (KARTRECOMP_NATIVE_LIBC=1)", installed);
++}
++
++} // namespace Core::NativeLibc
+diff --git a/src/core/arm/recomp/native_libc.h b/src/core/arm/recomp/native_libc.h
+new file mode 100644
+index 0000000000..b5cd0c5fe2
+--- /dev/null
++++ b/src/core/arm/recomp/native_libc.h
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native C library for the game (native-engine plan, phase 1; docs/NATIVE_ENGINE.md).
++//
++// The sdk module carries the C library the game uses (memcpy, memset, strcmp, ...). The game calls these about 300,000 times a second
++// in a race, each time through the host dispatcher into recompiled ARM code that goes through the guest memory helpers. With
++// KARTRECOMP_NATIVE_LIBC=1 those calls from the game are answered by host code working directly on guest memory instead. A call
++// touching an unmapped page falls back to the game's own code, so the behaviour on bad pointers is unchanged.
++#pragma once
++
++#include <span>
++#include <string_view>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::NativeLibc {
++
++bool Enabled();
++
++/// Called by the NSO loader with each module's image before it is mapped; hooks the C library functions of "sdk".
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
++
++} // namespace Core::NativeLibc
 diff --git a/src/core/arm/recomp/nvn_trace.cpp b/src/core/arm/recomp/nvn_trace.cpp
 new file mode 100644
 index 0000000000..dd70859f8d
@@ -2156,10 +2374,10 @@ index 0000000000..5129cdb53e
 +} // namespace Core::NvnTrace
 diff --git a/src/core/arm/recomp/sdk_trace.cpp b/src/core/arm/recomp/sdk_trace.cpp
 new file mode 100644
-index 0000000000..874a1b567e
+index 0000000000..8603bf77ee
 --- /dev/null
 +++ b/src/core/arm/recomp/sdk_trace.cpp
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,147 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/sdk_trace.h"
 +
@@ -2201,8 +2419,9 @@ index 0000000000..874a1b567e
 +    return true;
 +}
 +
-+/// Every defined function symbol of the module's dynamic symbol table: (name, module-relative address).
-+std::vector<std::pair<std::string, u64>> DefinedFunctions(std::span<const u8> image) {
++} // namespace
++
++std::vector<std::pair<std::string, u64>> ExportedFunctions(std::span<const u8> image) {
 +    std::vector<std::pair<std::string, u64>> out;
 +    u32 mod0 = 0;
 +    if (!ReadAt(image, 4, mod0) || mod0 + 8 > image.size() || std::memcmp(image.data() + mod0, "MOD0", 4) != 0) return out;
@@ -2237,6 +2456,8 @@ index 0000000000..874a1b567e
 +    }
 +    return out;
 +}
++
++namespace {
 +
 +void WriteReport() {
 +    std::vector<Entry*> list;
@@ -2275,7 +2496,7 @@ index 0000000000..874a1b567e
 +        return;
 +    }
 +    if (name != "sdk") return;
-+    const auto functions = DefinedFunctions(image);
++    const auto functions = ExportedFunctions(image);
 +    for (const auto& [fn, offset] : functions) {
 +        auto owned = std::make_unique<Entry>();
 +        owned->name = fn;
@@ -2306,10 +2527,10 @@ index 0000000000..874a1b567e
 +} // namespace Core::SdkTrace
 diff --git a/src/core/arm/recomp/sdk_trace.h b/src/core/arm/recomp/sdk_trace.h
 new file mode 100644
-index 0000000000..7b57c3a140
+index 0000000000..49a539dcf1
 --- /dev/null
 +++ b/src/core/arm/recomp/sdk_trace.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,35 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: SDK call tracer, Phase 0 of the native-engine plan (docs/NATIVE_ENGINE.md).
 +//
@@ -2323,7 +2544,10 @@ index 0000000000..7b57c3a140
 +#pragma once
 +
 +#include <span>
++#include <string>
 +#include <string_view>
++#include <utility>
++#include <vector>
 +
 +#include "common/common_types.h"
 +
@@ -2334,6 +2558,9 @@ index 0000000000..7b57c3a140
 +namespace Core::SdkTrace {
 +
 +bool Enabled();
++
++/// Every defined function in a module's dynamic symbol table: (mangled name, module-relative address).
++std::vector<std::pair<std::string, u64>> ExportedFunctions(std::span<const u8> image);
 +
 +/// Called by the NSO loader with each module's image before it is mapped; hooks the exports of "sdk", remembers where "main" is.
 +void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
@@ -3208,7 +3435,7 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..d8c3aac177 100644
+index 3cc84acfdf..117ab22786 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -6,9 +6,11 @@
@@ -3223,22 +3450,29 @@ index 3cc84acfdf..d8c3aac177 100644
  #include "common/common_funcs.h"
  #include "common/hex_util.h"
  #include "common/logging.h"
-@@ -23,6 +25,9 @@
+@@ -23,6 +25,10 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/arm/recomp/native_libc.h"
 +#include "core/arm/recomp/sdk_trace.h"
 +#include "core/arm/recomp/nvn_trace.h"
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +222,40 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +223,46 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
 +    // kart-recomp: SDK call tracer (KARTRECOMP_SDK_TRACE=1): which nn:: functions the game calls, for the native-engine plan.
 +    Core::SdkTrace::NoteModuleImage(
++        system,
++        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
++        load_base + module_start, name);
++
++    // kart-recomp: native C library for the game's calls into the sdk (KARTRECOMP_NATIVE_LIBC=1).
++    Core::NativeLibc::NoteModuleImage(
 +        system,
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
