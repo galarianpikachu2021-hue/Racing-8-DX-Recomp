@@ -622,12 +622,28 @@ bool MainWindow::launchWithoutWindow() {
         QMessageBox::warning(nullptr, tr("Cannot start"), problems + QStringLiteral("\n\n") + tr("Open the launcher without --nolauncher to fix this."));
         return false;
     }
+    headless = true;
     connect(&game, &QProcess::finished, qApp, [](int code, QProcess::ExitStatus) { QCoreApplication::exit(code); });
     connect(&game, &QProcess::errorOccurred, qApp, [](QProcess::ProcessError e) {
         if (e == QProcess::FailedToStart) QCoreApplication::exit(1);
     });
+    // Mod texts or menus that need merging for this game version are merged first (in the background); then the game starts.
+    connect(this, &MainWindow::importFinished, qApp, [this](bool ok, const QString& error) {
+        if (!start_after_merge) return;
+        start_after_merge = false;
+        if (!ok) {
+            QMessageBox::warning(nullptr, tr("Cannot start"), tr("Preparing your mods failed: %1").arg(error));
+            QCoreApplication::exit(1);
+            return;
+        }
+        QTimer::singleShot(0, qApp, [this] {
+            launch();
+            if (game.state() == QProcess::NotRunning && !start_after_merge) QCoreApplication::exit(1);
+        });
+    });
     launch();
-    return game.state() != QProcess::NotRunning; // start() is asynchronous: Starting counts
+    // start() is asynchronous: Starting counts; so does a merge that starts the game when it is done.
+    return game.state() != QProcess::NotRunning || start_after_merge;
 }
 
 void MainWindow::launch() {
@@ -646,17 +662,22 @@ void MainWindow::launch() {
         return;
     }
     log_view->clear();
-    if (!resolveCtgpConflict(false, false)) return;
+    // Without the launcher nobody can answer: the mods stay as they were set in the launcher.
+    if (!headless && !resolveCtgpConflict(false, false)) return;
     // Menu archives from mods are made for one update (nearly always 3.0.x); on 4.0.1 the game stalled on them at its first loading
     // screen. They are merged onto the installed update's own archives (the "!Merged menus" mod), like the texts below.
-    if (!package.root().isEmpty() && ModAddon::NeedsMenuMerge(package.root())) {
+    if (!package.root().isEmpty() && ModAddon::NeedsMenuMerge(package.root()) && !(headless && (importing || headless_merges >= 2))) {
+        start_after_merge = headless;
+        headless_merges += headless ? 1 : 0;
         syncTextMerge();
         status_label->setText(tr("Adapting your menu mods to this game version; press Play again when it is done."));
         return;
     }
     // Merged mod texts are made from the game's own texts, which differ between updates (3.0.4 / 4.0.1): texts merged for another update
     // stall the game at its first loading screen, so they are re-merged first.
-    if (!package.root().isEmpty() && ModAddon::NeedsTextMerge(package.root())) {
+    if (!package.root().isEmpty() && ModAddon::NeedsTextMerge(package.root()) && !(headless && (importing || headless_merges >= 2))) {
+        start_after_merge = headless;
+        headless_merges += headless ? 1 : 0;
         syncTextMerge();
         status_label->setText(tr("Updating the merged mod texts for this game version; press Play again when it is done."));
         return;

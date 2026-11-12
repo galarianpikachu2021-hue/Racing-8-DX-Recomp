@@ -82,6 +82,9 @@ private:
     QLabel* status_label = nullptr;
     QCheckBox* fullscreen_check = nullptr;
     bool force_fullscreen = false;
+    bool headless = false;          ///< --nolauncher: no window, no questions; the game starts on its own once mod merging is done
+    bool start_after_merge = false; ///< headless: launch() again when the running merge finishes
+    int headless_merges = 0;        ///< headless: merges run so far (at most two: texts, then menus; never loop)
     QCheckBox* nvn_capture_check = nullptr;
     QComboBox* renderer_combo = nullptr;
     QComboBox* native_res_combo = nullptr;
