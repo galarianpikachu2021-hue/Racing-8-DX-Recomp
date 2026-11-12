@@ -9,6 +9,6 @@ done
 case "${1:-}" in
   setup|build|export) tool="kartrecomp-$1"; shift; exec "$here/usr/bin/$tool" "$@";;
   engine) shift; exec "$here/usr/bin/mk8d-engine" "$@";;
-  play|--nolauncher|--play) shift; exec "$here/usr/bin/kartrecomp" --nolauncher "$@";;  # start the built game without the launcher (#17)
+  play|--nolauncher|--play|-nolauncher|-play) shift; exec "$here/usr/bin/kartrecomp" --nolauncher "$@";;  # start the built game without the launcher (#17)
 esac
 exec "$here/usr/bin/kartrecomp" "$@"
