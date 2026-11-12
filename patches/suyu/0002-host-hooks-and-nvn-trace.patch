@@ -6388,6 +6388,385 @@ index 1b328796c9..a5bf25a9bd 100644
  
      if (!is_connected) {
          if (npad_type == NpadStyleIndex::Handheld) {
+diff --git a/src/kart_runtime/README.md b/src/kart_runtime/README.md
+new file mode 100644
+index 0000000000..683620653f
+--- /dev/null
++++ b/src/kart_runtime/README.md
+@@ -0,0 +1,11 @@
++# kart_runtime: the native engine's own runtime
++
++Engine-independent building blocks for the native engine (kart-recomp `docs/NATIVE_ENGINE.md`). Rules:
++
++- Nothing here includes or names anything from suyu (no `core/`, `common/`, kernel or HLE types). C++20 standard library only
++  (SDL where a component needs a device). It must build and pass its tests on its own: `tests/build_and_run.sh`.
++- The emulator side reaches these through thin adapters in its own files; when the emulator is gone, the adapters go and this stays.
++
++| component | what it is |
++|---|---|
++| `core_scheduler.h` | Host threads sharing virtual CPU cores the way the console's threads do: one running thread per core, strict priority, FIFO among equals, a preemption request for the running thread. Replaces fibers and emulated-core threads. |
+diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
+new file mode 100644
+index 0000000000..ec34a3c3fc
+--- /dev/null
++++ b/src/kart_runtime/core_scheduler.h
+@@ -0,0 +1,190 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart_runtime: virtual CPU cores for host threads.
++//
++// On the console every game thread belongs to a core; at most one thread runs per core, the runnable thread with the best
++// priority (lowest number) always runs, and equal priorities take turns only when the running one blocks or yields. Games rely on
++// this (threads of one core share data without locks). Here every game thread is a real host thread, and this class decides which
++// of them may execute game code:
++//
++//   Acquire(t)  the thread wants to run: returns when it is the running thread of its core
++//   Release(t)  the thread stops running (it is about to wait, or it ended): the core goes to the best waiting thread
++//   Yield(t)    lets waiting threads of the same or better priority run first, then continues
++//   PreemptRequested(t)  true when a better-priority thread waits for t's core: t should Yield at its next safe point
++//
++// No dependencies beyond the standard library; see README.md.
++#pragma once
++
++#include <atomic>
++#include <condition_variable>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <vector>
++
++namespace KartRuntime {
++
++class CoreScheduler {
++public:
++    class Thread {
++    public:
++        int Core() const { return core; }
++        int Priority() const { return priority; }
++
++    private:
++        friend class CoreScheduler;
++        int core = 0;
++        int priority = 0;
++        bool waiting = false;         ///< in its core's wait list
++        bool granted = false;         ///< it is the running thread of its core
++        std::uint64_t order = 0;      ///< arrival order among equal priorities
++        std::atomic<bool> preempt{false};
++        std::condition_variable wake;
++    };
++
++    explicit CoreScheduler(int core_count) : cores(static_cast<std::size_t>(core_count)) {}
++
++    /// A new thread for `core` with `priority` (lower = runs first). Not running yet.
++    std::unique_ptr<Thread> Create(int core, int priority) {
++        auto t = std::make_unique<Thread>();
++        t->core = core;
++        t->priority = priority;
++        return t;
++    }
++
++    void Acquire(Thread* t) {
++        std::unique_lock lk{lock};
++        Enqueue(t);
++        Dispatch(t->core);
++        t->wake.wait(lk, [t] { return t->granted; });
++    }
++
++    void Release(Thread* t) {
++        std::scoped_lock lk{lock};
++        ReleaseLocked(t);
++    }
++
++    void Yield(Thread* t) {
++        std::unique_lock lk{lock};
++        t->preempt.store(false, std::memory_order_relaxed);
++        if (!BetterOrEqualWaiter(t)) return;
++        ReleaseLocked(t);
++        Enqueue(t);
++        Dispatch(t->core);
++        t->wake.wait(lk, [t] { return t->granted; });
++    }
++
++    bool PreemptRequested(const Thread* t) const { return t->preempt.load(std::memory_order_relaxed); }
++
++    /// Changes take effect at once: a waiting thread is re-sorted, a running one may get a preemption request.
++    void SetPriority(Thread* t, int priority) {
++        std::scoped_lock lk{lock};
++        t->priority = priority;
++        Dispatch(t->core);
++    }
++
++    /// Moves a thread to another core. A running thread keeps running until it next releases or yields (ask it with
++    /// PreemptRequested); a waiting one waits for the new core.
++    void SetCore(Thread* t, int core) {
++        std::scoped_lock lk{lock};
++        const int old = t->core;
++        if (old == core) return;
++        if (t->waiting) {
++            Remove(cores[static_cast<std::size_t>(old)].waiting, t);
++            t->core = core;
++            cores[static_cast<std::size_t>(core)].waiting.push_back(t);
++            Dispatch(core);
++        } else if (t->granted) {
++            // Leave the old core now and queue for the new one; the thread itself blocks at its next Yield/Acquire.
++            cores[static_cast<std::size_t>(old)].running = nullptr;
++            t->granted = false;
++            t->core = core;
++            Enqueue(t);
++            t->preempt.store(true, std::memory_order_relaxed);
++            Dispatch(old);
++            Dispatch(core);
++        } else {
++            t->core = core;
++        }
++    }
++
++    /// The running thread of a core (null when idle). For diagnostics and tests.
++    const Thread* Running(int core) {
++        std::scoped_lock lk{lock};
++        return cores[static_cast<std::size_t>(core)].running;
++    }
++
++private:
++    struct CoreState {
++        Thread* running = nullptr;
++        std::vector<Thread*> waiting;
++    };
++
++    static void Remove(std::vector<Thread*>& list, Thread* t) {
++        for (auto it = list.begin(); it != list.end(); ++it) {
++            if (*it == t) {
++                list.erase(it);
++                return;
++            }
++        }
++    }
++
++    void Enqueue(Thread* t) {
++        t->waiting = true;
++        t->granted = false;
++        t->order = ++arrivals;
++        cores[static_cast<std::size_t>(t->core)].waiting.push_back(t);
++    }
++
++    static bool Before(const Thread* a, const Thread* b) {
++        return a->priority != b->priority ? a->priority < b->priority : a->order < b->order;
++    }
++
++    Thread* Best(CoreState& c) {
++        Thread* best = nullptr;
++        for (Thread* w : c.waiting)
++            if (!best || Before(w, best)) best = w;
++        return best;
++    }
++
++    bool BetterOrEqualWaiter(const Thread* t) {
++        for (const Thread* w : cores[static_cast<std::size_t>(t->core)].waiting)
++            if (w->priority <= t->priority) return true;
++        return false;
++    }
++
++    /// Gives an idle core to its best waiter; asks a running thread to yield when a better one waits.
++    void Dispatch(int core) {
++        CoreState& c = cores[static_cast<std::size_t>(core)];
++        Thread* best = Best(c);
++        if (!best) return;
++        if (!c.running) {
++            Remove(c.waiting, best);
++            best->waiting = false;
++            best->granted = true;
++            best->preempt.store(false, std::memory_order_relaxed);
++            c.running = best;
++            best->wake.notify_one();
++            best = Best(c);
++            if (!best) return;
++        }
++        if (best->priority < c.running->priority) c.running->preempt.store(true, std::memory_order_relaxed);
++    }
++
++    void ReleaseLocked(Thread* t) {
++        CoreState& c = cores[static_cast<std::size_t>(t->core)];
++        if (t->waiting) { // moved to another core while running, or released before it was granted
++            Remove(c.waiting, t);
++            t->waiting = false;
++        }
++        if (c.running == t) c.running = nullptr;
++        t->granted = false;
++        t->preempt.store(false, std::memory_order_relaxed);
++        Dispatch(t->core);
++    }
++
++    std::mutex lock;
++    std::vector<CoreState> cores;
++    std::uint64_t arrivals = 0;
++};
++
++} // namespace KartRuntime
+diff --git a/src/kart_runtime/tests/build_and_run.sh b/src/kart_runtime/tests/build_and_run.sh
+new file mode 100755
+index 0000000000..a6681aba4f
+--- /dev/null
++++ b/src/kart_runtime/tests/build_and_run.sh
+@@ -0,0 +1,10 @@
++#!/usr/bin/env bash
++# Builds and runs kart_runtime's tests on their own (no emulator, no CMake): proof that the runtime stands alone.
++set -euo pipefail
++here="$(cd "$(dirname "$0")" && pwd)"
++out="${1:-$(mktemp -d)}"
++for t in "$here"/test_*.cpp; do
++  n="$(basename "$t" .cpp)"
++  "${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror -pthread ${CXXFLAGS:-} "$t" -o "$out/$n"
++  "$out/$n"
++done
+diff --git a/src/kart_runtime/tests/test_core_scheduler.cpp b/src/kart_runtime/tests/test_core_scheduler.cpp
+new file mode 100644
+index 0000000000..e3e1ccc18e
+--- /dev/null
++++ b/src/kart_runtime/tests/test_core_scheduler.cpp
+@@ -0,0 +1,144 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Standalone test of KartRuntime::CoreScheduler (no test framework: exits non-zero with a message on failure).
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
++#include <vector>
++
++#include "../core_scheduler.h"
++
++using KartRuntime::CoreScheduler;
++using namespace std::chrono_literals;
++
++#define CHECK(cond)                                                                    \
++    do {                                                                               \
++        if (!(cond)) {                                                                 \
++            std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
++            std::exit(1);                                                              \
++        }                                                                              \
++    } while (0)
++
++// Many threads on few cores doing short bursts: never two running on one core.
++static void OnePerCore() {
++    constexpr int kCores = 3, kThreads = 24, kRounds = 400;
++    CoreScheduler s{kCores};
++    std::atomic<int> on_core[kCores]{};
++    std::atomic<long> bursts{0};
++    std::vector<std::thread> pool;
++    for (int i = 0; i < kThreads; ++i) {
++        pool.emplace_back([&, i] {
++            auto t = s.Create(i % kCores, 40 + i % 5);
++            for (int r = 0; r < kRounds; ++r) {
++                s.Acquire(t.get());
++                CHECK(on_core[t->Core()].fetch_add(1) == 0);
++                for (volatile int spin = 0; spin < 200; spin = spin + 1) {}
++                if (r % 7 == 0) {
++                    on_core[t->Core()].fetch_sub(1);
++                    s.Yield(t.get()); // may hand the core over and come back
++                    CHECK(on_core[t->Core()].fetch_add(1) == 0);
++                }
++                CHECK(on_core[t->Core()].fetch_sub(1) == 1);
++                bursts.fetch_add(1);
++                s.Release(t.get());
++            }
++        });
++    }
++    for (auto& th : pool) th.join();
++    CHECK(bursts.load() == static_cast<long>(kThreads) * kRounds);
++    for (int c = 0; c < kCores; ++c) CHECK(s.Running(c) == nullptr);
++}
++
++// Waiters are served best priority first, then in arrival order.
++static void PriorityOrder() {
++    CoreScheduler s{1};
++    auto holder = s.Create(0, 10);
++    s.Acquire(holder.get());
++    std::vector<int> order;
++    std::mutex order_lock;
++    std::vector<std::thread> pool;
++    const int priorities[] = {50, 20, 50, 30, 20};
++    for (int i = 0; i < 5; ++i) {
++        pool.emplace_back([&, i] {
++            auto t = s.Create(0, priorities[i]);
++            s.Acquire(t.get());
++            {
++                std::scoped_lock lk{order_lock};
++                order.push_back(i);
++            }
++            s.Release(t.get());
++        });
++        std::this_thread::sleep_for(30ms); // arrival order = i
++    }
++    CHECK(!s.PreemptRequested(holder.get())); // nobody waiting is better than priority 10
++    s.Release(holder.get());
++    for (auto& th : pool) th.join();
++    const std::vector<int> want{1, 4, 3, 0, 2}; // 20 (first), 20 (second), 30, 50 (first), 50 (second)
++    CHECK(order == want);
++}
++
++// A better-priority arrival asks the running thread to yield; an equal one does not, but Yield lets it in.
++static void Preemption() {
++    CoreScheduler s{1};
++    auto low = s.Create(0, 40);
++    s.Acquire(low.get());
++    std::atomic<int> stage{0};
++    std::thread high([&] {
++        auto t = s.Create(0, 10);
++        s.Acquire(t.get());
++        stage = 1;
++        s.Release(t.get());
++    });
++    while (!s.PreemptRequested(low.get())) std::this_thread::sleep_for(1ms);
++    CHECK(stage == 0); // still waiting: preemption is a request
++    s.Yield(low.get());
++    CHECK(stage == 1); // the better thread ran before we came back
++    CHECK(s.Running(0) == low.get());
++    high.join();
++
++    std::thread equal([&] {
++        auto t = s.Create(0, 40);
++        s.Acquire(t.get());
++        stage = 2;
++        s.Release(t.get());
++    });
++    std::this_thread::sleep_for(50ms);
++    CHECK(!s.PreemptRequested(low.get()) && stage == 1);
++    s.Yield(low.get()); // equal priority: takes its turn on a yield
++    CHECK(stage == 2);
++    s.Release(low.get());
++    equal.join();
++}
++
++// Raising a waiter's priority above the running thread requests preemption; moving a waiter to an idle core runs it.
++static void PriorityAndCoreChanges() {
++    CoreScheduler s{2};
++    auto a = s.Create(0, 30);
++    s.Acquire(a.get());
++    std::atomic<bool> ran{false};
++    std::unique_ptr<CoreScheduler::Thread> b = s.Create(0, 50);
++    std::thread other([&] {
++        s.Acquire(b.get());
++        ran = true;
++        s.Release(b.get());
++    });
++    std::this_thread::sleep_for(50ms);
++    CHECK(!ran && !s.PreemptRequested(a.get()));
++    s.SetPriority(b.get(), 5);
++    CHECK(s.PreemptRequested(a.get()));
++    s.SetPriority(b.get(), 50);
++    s.SetCore(b.get(), 1); // core 1 is idle: b runs there without a taking a break
++    other.join();
++    CHECK(ran && s.Running(0) == a.get());
++    s.Release(a.get());
++}
++
++int main() {
++    OnePerCore();
++    PriorityOrder();
++    Preemption();
++    PriorityAndCoreChanges();
++    std::puts("core_scheduler: all tests passed");
++    return 0;
++}
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 index 8fd46dffa7..1870c99abe 100644
 --- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp

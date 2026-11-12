@@ -201,3 +201,40 @@ calling thread would block a whole emulated CPU core) - it moves with native thr
 Checked: 1P and 4P races on 4.0.1 (with native hid): all six services seen on the native path in the log, 60 fps, the same 12 log
 errors as the emulated path. To hear-test: music, sound effects and rumble should be unchanged.
 With this, the per-frame IPC left on the emulated transport is the display queue (~120/s) and load-time requests.
+
+## Transferable by design: `src/kart_runtime/` (user rule, 2026-11-12)
+
+The end state is our own engine, so new native parts must not be written against suyu's classes. They go into the fork's
+`src/kart_runtime/`: standard library only (SDL where a device is needed), nothing from suyu included or named, own tests that
+build without the emulator (`src/kart_runtime/tests/build_and_run.sh`). suyu reaches them through thin adapters in its own files;
+when suyu goes, the adapters go and the runtime stays. The earlier suyu-bound pieces (`native_hid`, `native_ipc`, `native_libc`)
+get the same treatment when they are next touched: logic behind a runtime interface, suyu glue outside.
+
+### First component: `kart_runtime/core_scheduler.h` (native threads, part 1)
+
+Host threads sharing virtual CPU cores the way the console's threads do: one running thread per core, the best priority always
+first, FIFO among equals, and a preemption *request* the running thread honours at a safe point (`Acquire`, `Release`, `Yield`,
+`PreemptRequested`, `SetPriority`, `SetCore`). Games rely on these rules (threads of one core share data without locks), so 1:1
+host threads need them; fibers and the four emulated-core threads provide them today.
+Tests (`tests/test_core_scheduler.cpp`): 24 threads on 3 cores never overlap on a core, waiters are served by priority then
+arrival, preemption request and yield, priority and core changes. Pass, also under ThreadSanitizer.
+
+### Part 2 (next): the adapter - game threads as host threads in suyu
+
+What suyu already has: its service threads are host threads registered as "dummy" KThreads; when the kernel makes one wait, it
+blocks on a host condition variable after the scheduler lock is released (`KScheduler::RescheduleCurrentHLEThread` ->
+`KThread::DummyThreadBeginWait`), and it is woken when its state becomes runnable (`OnThreadStateChanged` ->
+`GlobalSchedulerContext::WakeupWaitingDummyThreads` -> `DummyThreadEndWait`). Game threads can use the same path. To do
+(`KARTRECOMP_NATIVE_THREADS=1`, all at once - one kernel mode or the other):
+1. A game thread starts a host thread instead of a fiber (`KThread::InitializeUserThread`, `CpuManager::GetGuestThreadFunc`); the
+   host thread sets itself as the kernel's current thread and runs the dispatcher loop (`MultiCoreRunGuestThread`'s body).
+2. Each such thread needs its own CPU interface (`ArmRecomp` holds the registers per emulated core today: `PhysicalCore::RunThread`,
+   `KProcess::GetArmInterface(core)`); `GetCurrentProcessorNumber` answers the thread's virtual core.
+3. Kept out of the emulated cores' priority queue (`KScheduler::OnThreadStateChanged`, `UpdateHighestPriorityThreadsImpl`); the
+   four `CPUCore_N` threads and their idle threads are not started.
+4. `CoreScheduler::Acquire` before running game code, `Release` when the kernel makes the thread wait (in the dummy-wait path),
+   `PreemptRequested` checked where `PhysicalCore::IsInterrupted` is checked now, then `Yield`; `SleepThread(0/-1/-2)` -> `Yield`;
+   priority and core-mask SVCs -> `SetPriority` / `SetCore`.
+5. Termination and suspension (`KThread::RequestTerminate`, process pause) reach the host thread through the same interrupt check.
+Then the display queue can join `KARTRECOMP_NATIVE_IPC` (a blocking wait only blocks its own thread), and the kernel's remaining
+pieces (handle table, synchronisation objects, memory map) are moved into `kart_runtime` one by one.

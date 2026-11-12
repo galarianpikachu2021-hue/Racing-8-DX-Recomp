@@ -61,3 +61,13 @@ equivalent is Eden's "60FPS in Split Screen" `3.0.3.pchtxt` (nsobid 6A85262F...)
 - **Next step**: build-time code patch. The exporter applies (address, old word, new word) to the user's own `main` before
   translating, e.g. `0xafece8: b.lo 0xafed1c` -> `b 0xafed1c` (every view mode 0), as a launcher option that rebuilds the game.
   Then measure CPU cost (twice the 3D work per frame in 3-4P) and check the picture.
+
+## 2026-11-12: checked for a global frame step - there is none
+
+Asked again ("try to fix that custom fps stuff"). The hope was one engine-wide "frames per step" value that the 1/60 sites
+multiply by. Disassembly of the sites says no: they convert **integer frame counters** to seconds (`scvtf` of a frame count, then
+`* 1/60`, e.g. main+0x236b84..b90; main+0x371774..a8 even takes the frame count modulo 60 first). Timers, the countdown and the
+clocks are whole frames, so at 90 Hz every counter still advances once per frame and the game runs 1.5x fast. A true 90 or 120 fps
+means changing each counter's meaning by hand (hundreds of places, lap times at risk): not a patch.
+What works for higher rates: frame generation (built-in 2x/3x/4x = 120/180/240 from the game's 60). A possible extension is an
+arbitrary output rate (e.g. 144 or 165 from 60: generated frames at the right time positions), which needs only renderer work.
