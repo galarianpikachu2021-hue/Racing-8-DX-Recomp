@@ -184,3 +184,20 @@ once, then the generated code calls it directly). They are answered at the syste
 
 Steps 1-2 can run on top of the emulated kernel (native services for some commands, the rest unchanged); steps 3-5 switch the
 whole process over at once (one kernel or the other), so they come after every service the game uses has a native handler.
+
+## Native kernel step 1: IPC on the calling thread (2026-11-12) - works, off by default
+
+`KARTRECOMP_NATIVE_IPC=all-safe` (or a comma list of service names; `core/hle/service/native_ipc.{h,cpp}`, hooked into
+`SendSyncRequest` in `core/hle/kernel/svc/svc_ipc.cpp`, sessions registered from `ServerManager::RegisterSession/DestroySession`):
+a request to an enabled service is handled on the thread that sent it - the same handler and reply, but no request queue, no
+service thread, no wake-ups. Works for plain sessions and domains (the target object's handler is found from the domain header).
+Only plain requests (CMIF types 4 and 6); Close and control messages keep the emulated path.
+
+Safe services (they never defer a reply - only `sm` does - and never wait on the host; every request still runs under the
+service's own lock): `ISystemClock`, `ITimeZoneService`, `ISteadyClock`, `hid` (incl. rumble), `IActiveVibrationDeviceList`,
+`IAudioRenderer`, `nvdrv`. Not yet: the display queue (`IHOSBinderDriver`: `DequeueBuffer` waits for a free buffer, which on the
+calling thread would block a whole emulated CPU core) - it moves with native threads.
+
+Checked: 1P and 4P races on 4.0.1 (with native hid): all six services seen on the native path in the log, 60 fps, the same 12 log
+errors as the emulated path. To hear-test: music, sound effects and rumble should be unchanged.
+With this, the per-frame IPC left on the emulated transport is the display queue (~120/s) and load-time requests.

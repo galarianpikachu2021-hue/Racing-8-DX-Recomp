@@ -741,7 +741,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..a66b9a4f1a 100644
+index 408daa6839..4a0118ce65 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,22 @@ add_library(core STATIC
@@ -776,7 +776,16 @@ index 408daa6839..a66b9a4f1a 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -1226,7 +1244,7 @@ else()
+@@ -1051,6 +1069,8 @@ add_library(core STATIC
+     hle/service/ro/ro_nro_utils.h
+     hle/service/ro/ro_results.h
+     hle/service/ro/ro_types.h
++    hle/service/native_ipc.cpp
++    hle/service/native_ipc.h
+     hle/service/server_manager.cpp
+     hle/service/server_manager.h
+     hle/service/service.cpp
+@@ -1226,7 +1246,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -3346,6 +3355,33 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/svc/svc_ipc.cpp b/src/core/hle/kernel/svc/svc_ipc.cpp
+index 94638e61ad..a55aa0a363 100644
+--- a/src/core/hle/kernel/svc/svc_ipc.cpp
++++ b/src/core/hle/kernel/svc/svc_ipc.cpp
+@@ -14,6 +14,7 @@
+ #include "core/hle/kernel/k_server_session.h"
+ #include "core/hle/kernel/k_session.h"
+ #include "core/hle/kernel/svc.h"
++#include "core/hle/service/native_ipc.h"
+ #include "core/hle/kernel/svc_results.h"
+ 
+ namespace Kernel::Svc {
+@@ -29,6 +30,14 @@ Result SendSyncRequestImpl(KernelCore& kernel, uintptr_t message, size_t buffer_
+     KScopedAutoObject parent = {kernel, session->GetParent()};
+     ASSERT(parent.IsNotNull());
+ 
++    // kart-recomp: requests to services enabled in KARTRECOMP_NATIVE_IPC run on this thread (core/hle/service/native_ipc.h).
++    if (message == 0 && Service::NativeIpc::Enabled()) {
++        Result native_result = ResultSuccess;
++        if (Service::NativeIpc::TryHandle(kernel, parent->GetServerSession(), &native_result)) {
++            R_RETURN(native_result);
++        }
++    }
++
+     // Send the request.
+     R_RETURN(session->SendSyncRequest(kernel, message, buffer_size));
+ }
 diff --git a/src/core/hle/kernel/svc/svc_thread.cpp b/src/core/hle/kernel/svc/svc_thread.cpp
 index 79c6ac2079..c9ac4da74e 100644
 --- a/src/core/hle/kernel/svc/svc_thread.cpp
@@ -3394,6 +3430,36 @@ index 79c6ac2079..c9ac4da74e 100644
      // When the input tick is positive, sleep.
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
+diff --git a/src/core/hle/service/hle_ipc.cpp b/src/core/hle/service/hle_ipc.cpp
+index db80205a42..7bac09862b 100644
+--- a/src/core/hle/service/hle_ipc.cpp
++++ b/src/core/hle/service/hle_ipc.cpp
+@@ -30,7 +30,7 @@
+ namespace Service {
+ 
+ SessionRequestHandler::SessionRequestHandler(Kernel::KernelCore& kernel_, const char* service_name_)
+-    : kernel{kernel_} {}
++    : kernel{kernel_}, native_ipc_name{service_name_ ? service_name_ : ""} {}
+ 
+ SessionRequestHandler::~SessionRequestHandler() = default;
+ 
+diff --git a/src/core/hle/service/hle_ipc.h b/src/core/hle/service/hle_ipc.h
+index 08e78c9b0c..9059761f32 100644
+--- a/src/core/hle/service/hle_ipc.h
++++ b/src/core/hle/service/hle_ipc.h
+@@ -77,8 +77,12 @@ public:
+     virtual Result HandleSyncRequest(Kernel::KServerSession& session,
+                                      HLERequestContext& context) = 0;
+ 
++    /// kart-recomp: the service's name, for the native IPC path (core/hle/service/native_ipc.h).
++    const char* NativeIpcName() const { return native_ipc_name; }
++
+ protected:
+     Kernel::KernelCore& kernel;
++    const char* native_ipc_name = "";
+ };
+ 
+ using SessionRequestHandlerWeakPtr = std::weak_ptr<SessionRequestHandler>;
 diff --git a/src/core/hle/service/mii/mii_database_manager.cpp b/src/core/hle/service/mii/mii_database_manager.cpp
 index 1dec5ab984..e8ee5a0089 100644
 --- a/src/core/hle/service/mii/mii_database_manager.cpp
@@ -3427,6 +3493,178 @@ index 1dec5ab984..e8ee5a0089 100644
          }
  
          // mount point should be "mii:"
+diff --git a/src/core/hle/service/native_ipc.cpp b/src/core/hle/service/native_ipc.cpp
+new file mode 100644
+index 0000000000..e7fc00cfb2
+--- /dev/null
++++ b/src/core/hle/service/native_ipc.cpp
+@@ -0,0 +1,124 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/service/native_ipc.h"
++
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <set>
++#include <sstream>
++#include <string>
++#include <unordered_map>
++
++#include "common/logging/log.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_server_session.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/ipc.h"
++#include "core/hle/service/hle_ipc.h"
++#include "core/memory.h"
++
++namespace Service::NativeIpc {
++namespace {
++
++std::mutex g_lock;
++std::unordered_map<Kernel::KServerSession*, std::weak_ptr<SessionRequestManager>> g_sessions;
++
++/// Services whose handlers answer at once - they never defer a reply (only sm does) and never wait on the host (the display queue's
++/// DequeueBuffer does: on the calling thread that would block a whole emulated core, so it waits for native threads). Every request
++/// still runs under the service's own lock (ServiceFrameworkBase::LockService).
++const std::set<std::string>& SafeServices() {
++    static const std::set<std::string> safe{"ISystemClock",   "ITimeZoneService", "ISteadyClock", "hid",
++                                            "IActiveVibrationDeviceList", "IAudioRenderer", "nvdrv"};
++    return safe;
++}
++
++const std::set<std::string>& Wanted() {
++    static const std::set<std::string> wanted = [] {
++        std::set<std::string> out;
++        const char* v = std::getenv("KARTRECOMP_NATIVE_IPC");
++        if (!v) return out;
++        std::istringstream list{v};
++        for (std::string item; std::getline(list, item, ',');) {
++            if (item == "all-safe") out.insert(SafeServices().begin(), SafeServices().end());
++            else if (SafeServices().contains(item)) out.insert(item);
++            else if (!item.empty()) LOG_WARNING(Service, "native IPC: {} is not on the safe list, left on the emulated path", item);
++        }
++        return out;
++    }();
++    return wanted;
++}
++
++} // namespace
++
++bool Enabled() {
++    return !Wanted().empty();
++}
++
++void Register(Kernel::KServerSession* session, std::weak_ptr<SessionRequestManager> manager) {
++    if (!Enabled()) return;
++    std::scoped_lock lk{g_lock};
++    g_sessions[session] = std::move(manager);
++}
++
++void Unregister(Kernel::KServerSession* session) {
++    if (!Enabled()) return;
++    std::scoped_lock lk{g_lock};
++    g_sessions.erase(session);
++}
++
++bool TryHandle(Kernel::KernelCore& kernel, Kernel::KServerSession& session, Result* out) {
++    if (!Enabled()) return false;
++    std::shared_ptr<SessionRequestManager> manager;
++    {
++        std::scoped_lock lk{g_lock};
++        const auto it = g_sessions.find(&session);
++        if (it == g_sessions.end()) return false;
++        manager = it->second.lock();
++    }
++    if (!manager) return false;
++
++    // What the service thread does for a request (KServerSession::ReceiveRequest + ServerManager::CompleteSyncRequest), on the
++    // calling thread: the context reads the request from, and the handler writes the reply into, the caller's TLS command buffer.
++    Kernel::KThread* thread = Kernel::GetCurrentThreadPointer(kernel);
++    Core::Memory::Memory& memory = thread->GetOwnerProcess()->GetMemory();
++    u32* cmd_buf = reinterpret_cast<u32*>(memory.GetPointer(thread->GetTlsAddress()));
++    if (!cmd_buf) return false;
++    // Plain requests only (CMIF Request / RequestWithContext): Close and control messages keep the emulated path, which also
++    // tears the session down.
++    if (const u32 type = cmd_buf[0] & 0xFFFF; type != 4 && type != 6) return false;
++    auto ctx = std::make_shared<HLERequestContext>(kernel, memory, &session, thread);
++    ctx->SetSessionRequestManager(manager);
++    ctx->PopulateFromIncomingCommandBuffer(cmd_buf); // reads the request only (incoming handles are not taken yet)
++    // The object the request is for: the session's handler, or in a domain (several objects behind one session, chosen by the
++    // domain header) that object's handler. Only messages to an enabled service go on.
++    const char* name = nullptr;
++    if (manager->IsDomain()) {
++        if (!ctx->HasDomainMessageHeader()) return false;
++        const auto& header = ctx->GetDomainMessageHeader();
++        if (header.command != IPC::DomainMessageHeader::CommandType::SendMessage) return false;
++        if (header.object_id == 0 || header.object_id > manager->DomainHandlerCount()) return false;
++        const auto handler = manager->DomainHandler(header.object_id - 1).lock();
++        if (!handler) return false;
++        name = handler->NativeIpcName();
++    } else {
++        if (!manager->HasSessionHandler()) return false;
++        name = manager->SessionHandler().NativeIpcName();
++    }
++    if (!name || !Wanted().contains(name)) return false;
++    ctx->SetIsDeferred(false);
++    *out = manager->CompleteSyncRequest(&session, *ctx);
++    if (ctx->GetIsDeferred()) {
++        // Must not happen for the safe services; if it ever does, the reply is lost: say so loudly.
++        LOG_CRITICAL(Service, "native IPC: {} deferred a reply; remove it from KARTRECOMP_NATIVE_IPC", name);
++    }
++    {
++        static std::mutex seen_lock;
++        static std::set<std::string> seen;
++        std::scoped_lock lk{seen_lock};
++        if (seen.insert(name).second) LOG_INFO(Service, "native IPC: {} answered on the calling thread", name);
++    }
++    return true;
++}
++
++} // namespace Service::NativeIpc
+diff --git a/src/core/hle/service/native_ipc.h b/src/core/hle/service/native_ipc.h
+new file mode 100644
+index 0000000000..26c8087726
+--- /dev/null
++++ b/src/core/hle/service/native_ipc.h
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native IPC, step 1 of the native kernel (docs/NATIVE_ENGINE.md).
++//
++// The emulated path for a request: the calling thread queues it on the server session and waits; a service thread wakes, builds a
++// request context from the caller's command buffer, runs the handler (which writes the reply into that buffer) and wakes the
++// caller. With KARTRECOMP_NATIVE_IPC=<service>,<service>,... (or "all-safe") requests to those services are run on the calling
++// thread instead: same handler, same reply, no queue, no service thread, no wakeups. Only plain sessions (not domains) of services
++// whose handlers never defer a reply.
++#pragma once
++
++#include <memory>
++
++#include "common/common_types.h"
++#include "core/hle/result.h"
++
++namespace Kernel {
++class KernelCore;
++class KServerSession;
++} // namespace Kernel
++
++namespace Service {
++class SessionRequestManager;
++}
++
++namespace Service::NativeIpc {
++
++bool Enabled();
++
++/// The service framework's session registry (ServerManager::RegisterSession / DestroySession).
++void Register(Kernel::KServerSession* session, std::weak_ptr<SessionRequestManager> manager);
++void Unregister(Kernel::KServerSession* session);
++
++/// Runs a request on the calling thread when its service is enabled. True when it was handled (result in *out).
++bool TryHandle(Kernel::KernelCore& kernel, Kernel::KServerSession& session, Result* out);
++
++} // namespace Service::NativeIpc
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..1b76552ee6 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
@@ -3538,6 +3776,34 @@ index 8cb5a04b12..79f69b9401 100644
      // If any new buffers were acquired, we can present.
      if (has_acquired_buffer && !composition_stack.empty()) {
          // Sort back-to-front: lower z first, higher z last so top-most draws last (on top).
+diff --git a/src/core/hle/service/server_manager.cpp b/src/core/hle/service/server_manager.cpp
+index 00937db8ab..47bb8444fd 100644
+--- a/src/core/hle/service/server_manager.cpp
++++ b/src/core/hle/service/server_manager.cpp
+@@ -18,6 +18,7 @@
+ #include "core/hle/kernel/svc_results.h"
+ #include "core/hle/service/hle_ipc.h"
+ #include "core/hle/service/ipc_helpers.h"
++#include "core/hle/service/native_ipc.h"
+ #include "core/hle/service/server_manager.h"
+ #include "core/hle/service/sm/sm.h"
+ 
+@@ -136,6 +137,7 @@ void ServerManager::RunServer(std::unique_ptr<ServerManager>&& server_manager) {
+ Result ServerManager::RegisterSession(Kernel::KServerSession* server_session,
+                                       std::shared_ptr<SessionRequestManager> manager) {
+     // We are taking ownership of the server session, so don't open it.
++    NativeIpc::Register(server_session, manager); // kart-recomp: requests may be answered on the calling thread
+     auto* session = new Session(m_system.Kernel(), server_session, std::move(manager));
+ 
+     // Begin tracking the server session.
+@@ -432,6 +434,7 @@ Result ServerManager::OnDeferralEvent() {
+ }
+ 
+ void ServerManager::DestroySession(Session* session) {
++    NativeIpc::Unregister(static_cast<Kernel::KServerSession*>(session->GetNativeHandle()));
+     // Unlink.
+     {
+         std::scoped_lock lk{m_deferred_list_mutex};
 diff --git a/src/core/hle/service/service.cpp b/src/core/hle/service/service.cpp
 index 8b6d05a8dc..b50e5673d5 100644
 --- a/src/core/hle/service/service.cpp
