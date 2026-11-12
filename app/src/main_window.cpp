@@ -49,8 +49,9 @@
 namespace {
 
 // Values are suyu's enum indices (src/common/settings_enums.h), in enum order.
-const QStringList kResolutions{"0.25x", "0.5x", "0.75x", "1x (720p/1080p)", "1.25x", "1.5x",
-                               "2x (1440p/2160p)", "3x", "4x", "5x", "6x", "7x", "8x"};
+// The picture sizes the emulated GPU's multipliers stand for (1x = 1080p docked), listed as pixels instead of multiples.
+const QStringList kResolutions{"480 x 270",   "960 x 540",   "1440 x 810",  "1920 x 1080 (1080p)", "2400 x 1350",   "2880 x 1620", "3840 x 2160 (4K)",
+                               "5760 x 3240", "7680 x 4320", "9600 x 5400", "11520 x 6480",        "13440 x 7560", "15360 x 8640"};
 const QStringList kAspects{"16:9", "4:3", "21:9", "16:10", "32:9", "Stretch to window"};
 const QStringList kFilters{"Nearest", "Bilinear", "Bicubic", "Gaussian", "Lanczos", "ScaleForce",
                            "AMD FSR", "Area", "Zero-tangent", "B-spline", "Mitchell", "Spline-1",
@@ -400,9 +401,9 @@ QWidget* MainWindow::buildDisplayTab() {
     auto* note = new QLabel(
         tr("Graphics quality: High uses the game's full effects, Low its lighter ones (the console's docked and handheld "
            "modes). The resolution is the same in both: it follows the output resolution and render scale. It can also be "
-           "changed in game (F10). The resolution scale multiplies the output resolution. "
-           "It only looks sharper when the window or screen is larger than the base resolution, "
-           "for example 2x in fullscreen on a 1440p or 4K monitor. AMD FSR (1) with sharpening is "
+           "changed in game (F10). The internal resolution is the picture size the emulated GPU draws at. "
+           "It only looks sharper when the window or screen is larger than 1920 x 1080, "
+           "for example 3840 x 2160 in fullscreen on a 1440p or 4K monitor. AMD FSR (1) with sharpening is "
            "the upscaler built in. Changes are saved immediately and apply from the next launch; "
            "they are locked while the game runs."));
     note->setWordWrap(true);
@@ -794,7 +795,27 @@ QWidget* MainWindow::buildEnhancementsTab() {
     scale_combo = makeCombo({tr("Off (3D drawn at the output resolution)"), tr("100% (DLAA / native anti-aliasing)"), tr("67% (quality)"),
                              tr("58% (balanced)"), tr("50% (performance)"), tr("33% (ultra performance)"), tr("150% (supersampling)"),
                              tr("200% (supersampling)")});
-    scale_combo->setToolTip(tr("How large the 3D scene is drawn compared with the output resolution. Below 100% needs a temporal upscaler."));
+    scale_combo->setToolTip(tr("The size the 3D scene is drawn at, as pixels (from the native output resolution on the Play tab; the HUD "
+                               "stays at the output resolution). Smaller than the output resolution needs a temporal upscaler."));
+    {
+        // Shows the real picture size of every choice instead of a percentage; follows the Play tab's native output resolution.
+        const auto refresh = [this] {
+            static const int kHeights[] = {720, 1080, 1440, 2160};
+            const int h = kHeights[native_res_combo ? qBound(0, native_res_combo->currentIndex(), 3) : 2];
+            const auto size = [h](double f) { return QStringLiteral("%1 x %2").arg(qRound(h * 16.0 / 9.0 * f)).arg(qRound(h * f)); };
+            const QString labels[] = {tr("Off: %1 (the output resolution)").arg(size(1.0)),
+                                      tr("%1 (DLAA / native anti-aliasing)").arg(size(1.0)),
+                                      tr("%1 (quality)").arg(size(2.0 / 3.0)),
+                                      tr("%1 (balanced)").arg(size(0.58)),
+                                      tr("%1 (performance)").arg(size(0.5)),
+                                      tr("%1 (ultra performance)").arg(size(1.0 / 3.0)),
+                                      tr("%1 (supersampling)").arg(size(1.5)),
+                                      tr("%1 (supersampling)").arg(size(2.0))};
+            for (int i = 0; i < scale_combo->count() && i < 8; ++i) scale_combo->setItemText(i, labels[i]);
+        };
+        refresh();
+        if (native_res_combo) connect(native_res_combo, &QComboBox::currentIndexChanged, this, refresh);
+    }
     sharpness_combo = makeCombo({tr("Off"), tr("Low"), tr("Medium"), tr("High")});
     jitter_check = new QCheckBox(tr("Camera jitter (needed by temporal upscalers; they switch it on themselves)"));
     framegen_combo = new QComboBox;
