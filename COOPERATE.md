@@ -75,3 +75,47 @@ Launcher (`app/`):
    Controls lists the bindings and rebinding works; Quit game; hold B on the title screen.
 4. Put a test zip on the USB drive **racing8test** in `windows-test-postv023\` with `BUILD-NOTES.txt` (main commit, what was fixed for
    Windows, test results, anything not tested). Push Windows fixes to `windows-port`. Tell the maintainer.
+
+---
+
+## Windows session note (2026-11-12): v0.2.4 test zip built from `main` c2b9f30 plus three Windows commits on `windows-port`
+
+The zip is on **racing8test** in `windows-test-postv023\` (with `.sha256` and `BUILD-NOTES.txt`). It is `main` c2b9f30 plus three
+commits on `windows-port`, none on `main`; take them or not. Engine stamp unchanged (`9586f9ea01-abi6`): no generated code or module
+ABI change. Everything else in steps 1-2 compiled on MSVC as it was; ctest 12/12; `test_release_contents.ps1` PASS.
+
+1. **dbc2b4f, zip contents.** `assemble.ps1` copies only listed files from `data\mk8d-3.0.4\`, so `ui_cmn_hashes.txt` was *not* in the
+   zip (the same bug as the AppImage). It is now copied, and `test_release_contents.ps1` requires it.
+2. **2d1e56e, render priority (patch 0001, Windows only).** The guest CPU threads run at TIME_CRITICAL; `NativeRender` and
+   `FrameGenPresent` ran at normal priority and lost the CPU to them on PCs with few spare cores (#14, #20). Both now run at HIGHEST
+   (`KrPlatform::CurrentThreadRenderPriority`, `KARTRECOMP_RENDER_PRIORITY=0` turns it off). 4.0.1 race limited to 4 cores: frames on
+   time 65-70% -> 77%, frames over 20 ms 7-10% -> 5%, record 11 -> 8 ms (two runs each). All cores: 85-86% / 2%, unchanged.
+   Linux has no such priority gap (no TIME_CRITICAL there), so nothing to port.
+3. **e9939a4, memory (patch 0002, Windows only),** your "measure first, then decide" item. Measured in a 4.0.1 race at the same point:
+   - `ClearBackingRegion`: 75% of the resident guest RAM was zero-filled pages (your 74% on Linux). On Windows whole pages are now
+     released with `DiscardVirtualMemory` on the backing section. A self-test at start (64 KB section, two views) checks that a
+     discarded page reads back as zeros through the other view; `MEM_RESET` failed that test (old data came back), so it is not used.
+     `KARTRECOMP_DISCARD_ZERO=0` turns it off; the log says which path is in use.
+   - `VirtualBuffer` committed its whole size on Windows, so the 4 GB guest page table (about 25 MB touched in a race) was charged against
+     the commit limit. Buffers of 256 MB or more are now reserved and committed 64 KB at a time on first touch by a vectored exception
+     handler (`KARTRECOMP_LAZY_COMMIT=0` turns it off).
+   - Result: working set 5,213 -> 3,765 MB, resident guest RAM 3,168 -> 1,687 MB, private commit 8,190 -> 4,078 MB. Frame pacing the
+     same or better. `mi_collect` was not needed: mimalloc's purge delay already returns freed memory. The ~1.8 GB still private is live
+     data. The 4 GB guest RAM section is still created with `SEC_COMMIT`, so its commit charge stays (resident memory does not).
+
+**Tested on the final zip** (i9-12900K, NVIDIA RTX A4500, 1440p 60 Hz SDR monitor, keyboard only, firmware 23.0.1 and matching keys, mods off):
+- Setup builds a 4.0.1 game from scratch (about 4 min) and its test boot passes.
+- 4.0.1 race: 83% on time / 4% over 20 ms with a warm pipeline cache. The very first race (cold cache) is 77% / 6%, from pipeline builds.
+- 3.0.4 game (built with `--patch split60`, the exporter accepts it) races on the final engine: 86% / 3%.
+- Low/High quality: same picture size. In Low the 1280x720 handheld picture sits in a larger layer, so screenshots look smaller. That
+  is expected, not a bug.
+- Frame generation, FSR 3 at 150% render scale: generated frames are shown in a race (4,801 by 123 s, nothing skipped, 87% on time).
+  In menus every frame is skipped with "history reset", which is expected.
+- `-nolauncher -f` reaches the engine as `-f`. Holding B on the title quits. Saves go to `userdata\data\kartrecomp\saves` and the
+  Mii database to `...\miis`; nothing new in the NAND user-save folder. The launcher's "Open saves folder" points at the same place.
+
+**Not tested:** 2P/4P split-screen (the "4:600" split60 log line and the HDR + FSR 3 views); HDR (SDR monitor); an AMD GPU; the
+Controllers tab and F10 Controls (no gamepad on this PC); Miis tab editing; Vector mod on 4.0.1 (not on this PC).
+
+For your information: the engine finds `plugins\` relative to its working directory. The launcher sets that directory correctly; a
+script that starts `mk8d-engine.exe` from elsewhere gets no upscalers.
