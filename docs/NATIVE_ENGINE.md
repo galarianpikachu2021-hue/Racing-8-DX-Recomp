@@ -137,8 +137,12 @@ Next native steps (nn::os sync/TLS, hid, fs) should be judged by what they remov
 pads, keyboard, controller profiles, TAS, the overlay's input block), with the hid service's state layout, button masks and
 connection attributes (npad.cpp). The game no longer reads its buttons and sticks through the emulated hid service's shared memory.
 Checked: scripted 1P and 4P races (every player's input drives the menus and the race), 60 fps, same pictures as the emulated path.
-Still on the emulated service: motion (`GetSixAxisSensorStates`), touch, vibration output, and the service itself (it still runs and
-fills shared memory nobody reads). Next for hid: those three, then the hid service is not needed at run time.
+Step 2 (same day): motion (`GetSixAxisSensorStates` from the controller objects' motion data, "at rest" until the game starts the
+sensor, as six_axis.cpp) and touch (`GetTouchScreenStates<1..16>`: one state, no touches; the PC game has no touch screen and nothing
+fed the emulated one) are native too: 25 functions in all. The trace confirms every per-frame hid read goes through the native path.
+Still on the emulated service: vibration output (the game drives the SDK's software vibration mixer, `VibrationNode::Update`; the SDK
+then sends the result to the service from inside the sdk module, which cannot be hooked - it moves with the IPC/kernel work), the
+one-time setup calls, and the service's own per-tick update (it still fills shared memory nobody reads).
 
 Direction (user, 2026-11-12): the goal is a true recomp (no emulation left), not speed. Steps are judged by what emulation they
 remove. For the OS primitives (`nn::os` locks, events, threads) the plan is a small native kernel at the system-call level rather

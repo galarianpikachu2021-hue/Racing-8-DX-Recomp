@@ -1742,10 +1742,10 @@ index 0000000000..11a6dabdf0
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
-index 0000000000..72bfb56740
+index 0000000000..f1c251f6f5
 --- /dev/null
 +++ b/src/core/arm/recomp/native_hid.cpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,264 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_hid.h"
 +
@@ -1755,8 +1755,10 @@ index 0000000000..72bfb56740
 +#include <cstring>
 +#include <map>
 +#include <string>
++#include <vector>
 +
 +#include "common/logging/log.h"
++#include "common/settings.h"
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/arm/recomp/sdk_trace.h"
 +#include "core/core.h"
@@ -1848,6 +1850,48 @@ index 0000000000..72bfb56740
 +    return s;
 +}
 +
++/// nn::hid::SixAxisSensorState (hid_types.h): 0x60 bytes.
++struct SixAxisState {
++    s64 delta_time;
++    s64 sampling_number;
++    float accel[3], gyro[3], rotation[3], orientation[3][3];
++    u32 attribute; ///< bit 0 connected
++    u32 reserved;
++};
++static_assert(sizeof(SixAxisState) == 0x60);
++
++/// Motion sensors the game has started (nn::hid::StartSixAxisSensor), by handle: the service reports "at rest" for the others.
++std::atomic<u32> g_started_handles[16];
++
++bool SensorStarted(u32 handle) {
++    for (const auto& h : g_started_handles)
++        if (h.load(std::memory_order_relaxed) == handle) return true;
++    return false;
++}
++
++/// The state the hid service would publish for a six-axis handle (six_axis.cpp OnUpdate).
++SixAxisState ReadMotion(Core::System& system, u32 handle) {
++    SixAxisState s{};
++    s.delta_time = 5'000'000; // 5 ms, as the service reports
++    static const auto start = std::chrono::steady_clock::now();
++    s.sampling_number = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() / 5;
++    s.accel[2] = -1.0f; // at rest, lying flat
++    s.orientation[0][0] = s.orientation[1][1] = s.orientation[2][2] = 1.0f;
++    s.attribute = 1;
++    const u32 npad_id = (handle >> 8) & 0xFF, device = (handle >> 16) & 0xFF; // {style index, npad id, device index, pad}
++    auto* c = Controller(system, npad_id);
++    if (!c || !c->IsConnected() || !SensorStarted(handle) || !Settings::values.motion_enabled.GetValue()) return s;
++    const auto motions = c->GetMotions();
++    const auto& m = motions[device == 1 && c->GetNpadStyleIndex() != NpadStyleIndex::Fullkey ? 1 : 0];
++    for (int i = 0; i < 3; ++i) {
++        s.accel[i] = m.accel[i];
++        s.gyro[i] = m.gyro[i];
++        s.rotation[i] = m.rotation[i];
++        for (int j = 0; j < 3; ++j) s.orientation[i][j] = m.orientation[i][j];
++    }
++    return s;
++}
++
 +} // namespace
 +
 +bool Enabled() {
@@ -1897,7 +1941,72 @@ index 0000000000..72bfb56740
 +        });
 +        ++installed;
 +    }
-+    LOG_INFO(Core_ARM, "native hid: {} nn::hid read functions answered from the controller objects (KARTRECOMP_NATIVE_HID=1)", installed);
++    // Motion: the start/stop calls still go to the service too (observed only); the reads are answered here.
++    if (const auto it = exports.find("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE"); it != exports.end()) {
++        RecompHooks::Install(it->second, [sys](RecompHooks::HookContext& ctx) {
++            const u32 handle = sys->ApplicationMemory().Read32(ctx.x[0]);
++            if (SensorStarted(handle)) return false;
++            for (auto& h : g_started_handles) {
++                u32 empty = 0;
++                if (h.compare_exchange_strong(empty, handle)) break;
++            }
++            return false;
++        });
++        ++installed;
++    }
++    if (const auto it = exports.find("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE"); it != exports.end()) {
++        RecompHooks::Install(it->second, [sys](RecompHooks::HookContext& ctx) {
++            const u32 handle = sys->ApplicationMemory().Read32(ctx.x[0]);
++            for (auto& h : g_started_handles) {
++                u32 mine = handle;
++                h.compare_exchange_strong(mine, 0);
++            }
++            return false;
++        });
++        ++installed;
++    }
++    if (const auto it = exports.find("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE");
++        it != exports.end()) {
++        RecompHooks::Install(it->second, [sys](RecompHooks::HookContext& ctx) {
++            auto& mem = sys->ApplicationMemory();
++            const s32 count = static_cast<s32>(ctx.x[1]);
++            if (count < 1) {
++                ctx.x[0] = 0;
++            } else {
++                const SixAxisState st = ReadMotion(*sys, mem.Read32(ctx.x[2]));
++                mem.WriteBlock(ctx.x[0], &st, sizeof(st));
++                ctx.x[0] = 1; // newest state only
++            }
++            ctx.pc = ctx.x[30];
++            return true;
++        });
++        ++installed;
++    }
++    // Touch screen: the PC game has none (nothing feeds the emulated one either): one state with no touches.
++    for (int n = 1; n <= 16; ++n) {
++        const std::string symbol = "_ZN2nn3hid20GetTouchScreenStatesILm" + std::to_string(n) + "EEEiPNS0_16TouchScreenStateIXT_EEEi";
++        const auto it = exports.find(symbol);
++        if (it == exports.end()) continue;
++        const u64 size = 0x10 + static_cast<u64>(n) * 0x28;
++        RecompHooks::Install(it->second, [sys, size](RecompHooks::HookContext& ctx) {
++            auto& mem = sys->ApplicationMemory();
++            if (static_cast<s32>(ctx.x[1]) < 1) {
++                ctx.x[0] = 0;
++            } else {
++                std::vector<u8> zero(size, 0);
++                static const auto start = std::chrono::steady_clock::now();
++                const s64 sampling =
++                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() / 4;
++                std::memcpy(zero.data(), &sampling, sizeof(sampling));
++                mem.WriteBlock(ctx.x[0], zero.data(), size);
++                ctx.x[0] = 1;
++            }
++            ctx.pc = ctx.x[30];
++            return true;
++        });
++        ++installed;
++    }
++    LOG_INFO(Core_ARM, "native hid: {} nn::hid functions answered from the controller objects (KARTRECOMP_NATIVE_HID=1)", installed);
 +}
 +
 +} // namespace Core::NativeHid
