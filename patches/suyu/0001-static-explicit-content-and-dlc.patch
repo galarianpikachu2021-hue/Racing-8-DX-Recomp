@@ -878,7 +878,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..6e1001125a 100644
+index bca83ab630..c3b69279f9 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,6 +1,15 @@
@@ -1145,7 +1145,7 @@ index bca83ab630..6e1001125a 100644
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
      if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
-@@ -1298,6 +1463,335 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1463,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
@@ -1163,18 +1163,13 @@ index bca83ab630..6e1001125a 100644
 +    // On the title screen ("press L + R"), holding B for 5 s quits: a way out with a controller only (no keyboard, the launcher's
 +    // --nolauncher mode, a handheld PC). Only until the first L+R or A press, so B (brake, back) can never quit a menu or a race.
 +    if (title_passed) return;
-+    bool b = false;
-+    for (const auto id : {Core::HID::NpadIdType::Player1, Core::HID::NpadIdType::Player2, Core::HID::NpadIdType::Player3,
-+                          Core::HID::NpadIdType::Player4, Core::HID::NpadIdType::Handheld}) {
-+        const auto* controller = system.HIDCore().GetEmulatedController(id);
-+        if (!controller || !controller->IsConnected()) continue;
-+        const auto buttons = controller->GetNpadButtons();
-+        if ((buttons.l && buttons.r) || buttons.a) {
-+            title_passed = true;
-+            return;
-+        }
-+        b |= buttons.b != 0;
++    // The controller code ends the title screen at the first A or L+R press (hid_core EmulatedController::SetButton).
++    if (!KartOverlay::BlockTitleB().load()) {
++        title_passed = true;
++        LOG_INFO(Frontend, "kart-recomp: title screen passed, B goes to the game");
++        return;
 +    }
++    const bool b = KartOverlay::TitleBHeld().load() != 0; // B is not passed to the game here, so it is read from the raw state
 +    const u64 now = SDL_GetTicks();
 +    if (!b) {
 +        b_held_since = 0;

@@ -251,10 +251,10 @@ index 0000000000..7d4a017150
 +} // namespace KartCodePatches
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
-index 0000000000..0345e00158
+index 0000000000..fff81b0826
 --- /dev/null
 +++ b/src/common/kart_overlay.h
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,198 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: input path to the in-game overlay menu (suyu_cmd/native_gpu/overlay_menu.h).
 +// The window and controller drivers push navigation events here; while the menu is open the
@@ -374,6 +374,16 @@ index 0000000000..0345e00158
 +inline std::atomic<int>& ConsoleRequest() { // -1 none, 0 handheld (low graphics), 1 docked (high)
 +    static std::atomic<int> v{-1};
 +    return v;
++}
++/// The title screen ("press L + R"): until it is passed the game gets no B (B there would open the main menu, so holding it 5 s to
++/// quit could not work); TitleBHeld has one bit per player for whoever is holding B (hid_core's EmulatedController sets it).
++inline std::atomic<bool>& BlockTitleB() {
++    static std::atomic<bool> on{true};
++    return on;
++}
++inline std::atomic<uint32_t>& TitleBHeld() {
++    static std::atomic<uint32_t> bits{0};
++    return bits;
 +}
 +inline std::atomic<bool>& QuitRequest() { // the overlay's "Quit game": the window closes like its close button
 +    static std::atomic<bool> v{false};
@@ -5015,6 +5025,51 @@ index 699980238b..c242f5b386 100644
  
  uint64_t recomp_umulh(uint64_t a,uint64_t b){
    /* Portable 64x64->high64: split into 32-bit halves. Avoids depending on
+diff --git a/src/hid_core/frontend/emulated_controller.cpp b/src/hid_core/frontend/emulated_controller.cpp
+index 1b328796c9..a5bf25a9bd 100644
+--- a/src/hid_core/frontend/emulated_controller.cpp
++++ b/src/hid_core/frontend/emulated_controller.cpp
+@@ -9,6 +9,7 @@
+ #include <common/scope_exit.h>
+ 
+ #include <ranges>
++#include "common/kart_overlay.h"
+ #include "common/thread.h"
+ #include "common/assert.h"
+ #include "hid_core/frontend/emulated_controller.h"
+@@ -832,10 +833,16 @@ void EmulatedController::SetButton(const Common::Input::CallbackStatus& callback
+         controller.npad_button_state.a.Assign(current_status.value);
+         controller.debug_pad_button_state.a.Assign(current_status.value);
+         break;
+-    case Settings::NativeButton::B:
+-        controller.npad_button_state.b.Assign(current_status.value);
+-        controller.debug_pad_button_state.b.Assign(current_status.value);
++    case Settings::NativeButton::B: {
++        // kart-recomp: on the title screen B is kept from the game (it would open the main menu); holding it 5 s quits instead.
++        const u32 bit = 1u << (player_index & 31);
++        if (current_status.value) KartOverlay::TitleBHeld().fetch_or(bit);
++        else KartOverlay::TitleBHeld().fetch_and(~bit);
++        const bool b = current_status.value && !KartOverlay::BlockTitleB().load(std::memory_order_relaxed);
++        controller.npad_button_state.b.Assign(b);
++        controller.debug_pad_button_state.b.Assign(b);
+         break;
++    }
+     case Settings::NativeButton::X:
+         controller.npad_button_state.x.Assign(current_status.value);
+         controller.debug_pad_button_state.x.Assign(current_status.value);
+@@ -915,6 +922,12 @@ void EmulatedController::SetButton(const Common::Input::CallbackStatus& callback
+         controller.capture_button_state.capture.Assign(current_status.value);
+         break;
+     }
++    // kart-recomp: A or L+R leaves the title screen; from then on B goes to the game again (seen here, at the press, so a quick tap
++    // is never missed).
++    if (KartOverlay::BlockTitleB().load(std::memory_order_relaxed) &&
++        (controller.npad_button_state.a || (controller.npad_button_state.l && controller.npad_button_state.r))) {
++        KartOverlay::BlockTitleB().store(false);
++    }
+ 
+     if (!is_connected) {
+         if (npad_type == NpadStyleIndex::Handheld) {
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 index 8fd46dffa7..1870c99abe 100644
 --- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
