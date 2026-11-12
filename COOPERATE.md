@@ -45,6 +45,9 @@ Engine (`patches/suyu/0001`, `0002`):
   engine (`core/loader/nso.cpp`) makes the same change to the loaded code. Setup page checkbox; changing it rebuilds one piece.
   Windows: make sure the exporter in the zip is the new one (`--patch` is accepted) and test the checkbox once (4-player race:
   the log says "split-screen views per frame ... 4:600").
+- **Zip check**: `data\mk8d-3.0.4\ui_cmn_hashes.txt` must be in the zip (menu mods on 4.0.1 need it; the Linux AppImage script had
+  copied only `hot_blocks.txt` and failed with "The menu merge data ... is missing"). `assemble.ps1` copies whole data folders, so it
+  should be there; check once.
 
 Launcher (`app/`):
 - **Mii editor** (Miis tab, `mii_db.*`, `mii_editor.*`), "Open saves folder" (Play tab), "Open Miis folder".
