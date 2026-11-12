@@ -147,3 +147,40 @@ one-time setup calls, and the service's own per-tick update (it still fills shar
 Direction (user, 2026-11-12): the goal is a true recomp (no emulation left), not speed. Steps are judged by what emulation they
 remove. For the OS primitives (`nn::os` locks, events, threads) the plan is a small native kernel at the system-call level rather
 than SDK hooks: the SDK's own code uses the same lock words and cannot be hooked, so both sides must go through one implementation.
+
+## IPC: what still goes through the emulated kernel (2026-11-12)
+
+Tool: `KARTRECOMP_IPC_TRACE=1` (`core/hle/service/service.cpp`): every service command, `<log dir>/ipc_trace.txt` every 10 s
+(total, last 10 s, "service: command"). 1P race on 4.0.1 with native hid on (`local/exp/runs/ipc_trace-401.txt`, 137 commands):
+
+| per second in the race | service: command | what it is |
+|---|---|---|
+| 192 + 120 | hid: SendVibrationValues, GetActualVibrationValue | rumble, sent by the SDK's vibration mixer |
+| 141 | IAudioRenderer: RequestUpdate | audio renderer frame (voices, mixes, effects) |
+| 120 + 120 | nvdrv: Ioctl, Ioctl2 | the game's NVN driver (subsdk0) talking to the GPU service: channel submits, syncpoints |
+| 120 | IHOSBinderDriver: TransactParcelAuto | the display queue (dequeue/queue buffer), two per frame |
+| 2 + 2 | ISystemClock: GetCurrentTime, ITimeZoneService: ToCalendarTime | the clock |
+
+Everything else (IStorage reads of the RomFS, fs, acc, am, aoc, prepo, mii database, audren setup, sm) happens at boot or loading.
+
+The SDK sends these from inside the sdk module, so they cannot be answered at the SDK API (an internal call reaches the dispatcher
+once, then the generated code calls it directly). They are answered at the system-call level instead, which is the native kernel:
+
+## The native kernel (design)
+
+1. **SendSyncRequest without the emulated transport**: the SVC handler decodes the request in the calling thread's TLS command
+   buffer and calls a native handler for that service and command synchronously (no KServerSession, no service threads, no
+   HLERequestContext). Handlers return plain data or native handles. Start with the per-frame list above (vibration, audio
+   RequestUpdate, nvdrv, binder, clock), reusing the existing HLE service code where it is real logic (audio_core's renderer,
+   nvdrv's syncpoint/channel code), behind `KARTRECOMP_NATIVE_IPC=<services>`.
+2. **Native handle table and objects**: events (readable/writable), threads, shared and transfer memory, sessions to native
+   services; `WaitSynchronization`, `ResetSignal`, `CloseHandle` on them.
+3. **Native threads**: one host thread per guest thread running the dispatcher (no fibers, no emulated scheduler); `CreateThread`,
+   `StartThread`, `ExitThread`, `SleepThread`, priorities as host hints, `GetCurrentProcessorNumber`.
+4. **Native synchronization**: `ArbitrateLock/Unlock`, `WaitProcessWideKeyAtomic/SignalProcessWideKey`, `WaitForAddress/
+   SignalToAddress` as futexes on the guest words (the SDK's own lock words, so the SDK and the game share one implementation).
+5. **Memory SVCs** (`SetHeapSize`, `MapMemory`, `QueryMemory`, `SetMemoryAttribute`, ...) on our own address-space map.
+6. Then the HLE kernel, service manager and `core/hle/service/*` are no longer used and go.
+
+Steps 1-2 can run on top of the emulated kernel (native services for some commands, the rest unchanged); steps 3-5 switch the
+whole process over at once (one kernel or the other), so they come after every service the game uses has a native handler.

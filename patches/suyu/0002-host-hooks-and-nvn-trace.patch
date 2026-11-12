@@ -3538,6 +3538,79 @@ index 8cb5a04b12..79f69b9401 100644
      // If any new buffers were acquired, we can present.
      if (has_acquired_buffer && !composition_stack.empty()) {
          // Sort back-to-front: lower z first, higher z last so top-most draws last (on top).
+diff --git a/src/core/hle/service/service.cpp b/src/core/hle/service/service.cpp
+index 8b6d05a8dc..b50e5673d5 100644
+--- a/src/core/hle/service/service.cpp
++++ b/src/core/hle/service/service.cpp
+@@ -4,7 +4,15 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <vector>
++#include <mutex>
++#include <map>
++#include <fstream>
++#include <cstdlib>
++#include <chrono>
++#include <algorithm>
+ #include <fmt/ranges.h>
++#include "common/fs/path_util.h"
+ #include "common/assert.h"
+ #include "common/logging.h"
+ #include "common/settings.h"
+@@ -84,9 +92,44 @@ void ServiceFrameworkBase::ReportUnimplementedFunction(HLERequestContext& ctx,
+     }
+ }
+ 
++namespace {
++// kart-recomp: IPC tracer (KARTRECOMP_IPC_TRACE=1), for the native-engine plan (docs/NATIVE_ENGINE.md): which service commands the
++// game sends and how often. <log dir>/ipc_trace.txt every 10 s: total, last 10 s, "service: command".
++struct IpcCount {
++    u64 total = 0, reported = 0;
++};
++bool IpcTraceEnabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_IPC_TRACE");
++        return v && *v == '1';
++    }();
++    return on;
++}
++void IpcTraceCount(std::string_view service, const char* command) {
++    static std::mutex lock;
++    static std::map<std::string, IpcCount> counts;
++    static auto last = std::chrono::steady_clock::now();
++    std::scoped_lock guard{lock};
++    ++counts[std::string{service} + ": " + (command ? command : "(unimplemented)")].total;
++    const auto now = std::chrono::steady_clock::now();
++    if (now - last < std::chrono::seconds(10)) return;
++    last = now;
++    std::vector<std::pair<std::string, IpcCount*>> rows;
++    for (auto& [k, v] : counts) rows.emplace_back(k, &v);
++    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second->total > b.second->total; });
++    std::ofstream out(Common::FS::GetSuyuPath(Common::FS::SuyuPath::LogDir) / "ipc_trace.txt", std::ios::trunc);
++    out << "# total last_10s service: command\n";
++    for (auto& [k, v] : rows) {
++        out << v->total << ' ' << (v->total - v->reported) << ' ' << k << '\n';
++        v->reported = v->total;
++    }
++}
++} // namespace
++
+ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
+     auto it = handlers.find(ctx.GetCommand());
+     FunctionInfoBase const* info = it == handlers.end() ? nullptr : &it->second;
++    if (IpcTraceEnabled()) IpcTraceCount(GetServiceName(), info ? info->name : nullptr);
+     if (info == nullptr || info->handler_callback == nullptr)
+         return ReportUnimplementedFunction(ctx, info);
+ 
+@@ -97,6 +140,7 @@ void ServiceFrameworkBase::InvokeRequest(HLERequestContext& ctx) {
+ void ServiceFrameworkBase::InvokeRequestTipc(HLERequestContext& ctx) {
+     auto it = handlers_tipc.find(ctx.GetCommand());
+     FunctionInfoBase const* info = it == handlers_tipc.end() ? nullptr : &it->second;
++    if (IpcTraceEnabled()) IpcTraceCount(GetServiceName(), info ? info->name : nullptr);
+     if (info == nullptr || info->handler_callback == nullptr)
+         return ReportUnimplementedFunction(ctx, info);
+ 
 diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
 index ae07565196..3cd1665b8a 100644
 --- a/src/core/hle/service/set/system_settings_server.cpp
