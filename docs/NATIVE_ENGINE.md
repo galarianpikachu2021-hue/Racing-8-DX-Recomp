@@ -238,3 +238,28 @@ blocks on a host condition variable after the scheduler lock is released (`KSche
 5. Termination and suspension (`KThread::RequestTerminate`, process pause) reach the host thread through the same interrupt check.
 Then the display queue can join `KARTRECOMP_NATIVE_IPC` (a blocking wait only blocks its own thread), and the kernel's remaining
 pieces (handle table, synchronisation objects, memory map) are moved into `kart_runtime` one by one.
+
+## Native threads, part 2: done (2026-11-12) - `KARTRECOMP_NATIVE_THREADS=1`, off by default
+
+`core/hle/kernel/native_threads.{h,cpp}` (the suyu adapter) + `kart_runtime/core_scheduler.h`. Every game thread and every service
+thread that was a fiber on an emulated core (`KThread::InitializeUserThread` / `InitializeServiceThread`) is a host thread
+("KartThread" / "KartService"); the four `CPUCore_N` threads are not started and no fibers are created.
+- Start: the first time a thread becomes runnable (`KScheduler::OnThreadStateChanged`) its host thread is spawned.
+- Running: the host thread takes its virtual core from `CoreScheduler` and uses that core's `PhysicalCore` and CPU interface
+  (registers loaded/saved with `LoadContext/SaveContext`), so everything keyed by core index works unchanged
+  (`KernelCore::CurrentPhysicalCoreIndex` answers the held core).
+- Waiting: the kernel's dummy-thread path (`KThread::DummyThreadBeginWait`): save registers, release the core, block on the host,
+  then take a core again. A thread suspended by another thread waits the same way (it is interrupted first).
+- Not in the emulated cores' priority queue; priority and core changes go to `CoreScheduler`; `SleepThread(0/-1/-2)` = `Yield`;
+  a better-priority waiter interrupts the running thread (`SetPreemptCallback` -> `PhysicalCore::Interrupt`).
+- Exit: the host thread releases its core and parks (thread objects are recycled, so it must not touch its KThread again - the
+  first version parked on the object's own wait variable and froze the game at the first race load). TODO: end the host thread.
+
+Checked (4.0.1): 1P and 4P races, alone and together with native hid + native IPC: 59.9 / 59.5-59.6 fps, the same 12 log errors
+as the emulated path, fully static, clean exit. CPU: 79.8 k samples on game threads vs ~79 k on the emulated cores (1P), 104 k vs
+106 k (4P): the same within noise. Default path (switch off) unchanged. Not yet checked: 3.0.4, mods, long sessions, Windows.
+Known gaps: no core migration for threads allowed on several cores (the console moves a waiting thread to an idle core), no
+round-robin time slice for priority 59; debug switch `KARTRECOMP_ALLOW_PTRACE=1` lets gdb attach to a test run.
+
+Next: the display queue onto `KARTRECOMP_NATIVE_IPC` (its blocking wait now only stalls one virtual core), then moving kernel
+pieces (handle table, synchronisation objects, memory map) into `kart_runtime`, and the play test before any of this is default.

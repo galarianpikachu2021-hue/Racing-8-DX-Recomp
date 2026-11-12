@@ -741,7 +741,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..4a0118ce65 100644
+index 408daa6839..663bb22f05 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,22 @@ add_library(core STATIC
@@ -776,7 +776,16 @@ index 408daa6839..4a0118ce65 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -1051,6 +1069,8 @@ add_library(core STATIC
+@@ -339,6 +357,8 @@ add_library(core STATIC
+     hle/kernel/k_system_resource.cpp
+     hle/kernel/k_system_resource.h
+     hle/kernel/k_thread.cpp
++    hle/kernel/native_threads.cpp
++    hle/kernel/native_threads.h
+     hle/kernel/k_thread.h
+     hle/kernel/k_thread_local_page.cpp
+     hle/kernel/k_thread_local_page.h
+@@ -1051,6 +1071,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -785,7 +794,7 @@ index 408daa6839..4a0118ce65 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1246,7 @@ else()
+@@ -1226,7 +1248,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -2881,7 +2890,7 @@ index 0000000000..49a539dcf1
 +
 +} // namespace Core::SdkTrace
 diff --git a/src/core/cpu_manager.cpp b/src/core/cpu_manager.cpp
-index 315b273ae8..e4feebcffc 100644
+index 315b273ae8..5179cd2bb9 100644
 --- a/src/core/cpu_manager.cpp
 +++ b/src/core/cpu_manager.cpp
 @@ -4,6 +4,12 @@
@@ -2897,7 +2906,28 @@ index 315b273ae8..e4feebcffc 100644
  #include "common/logging/log.h"
  #include "common/fiber.h"
  #include "common/scope_exit.h"
-@@ -176,6 +182,29 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
+@@ -16,6 +22,7 @@
+ #include "core/hle/kernel/k_scheduler.h"
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_threads.h"
+ #include "core/hle/kernel/physical_core.h"
+ #include "video_core/gpu.h"
+ 
+@@ -26,6 +33,12 @@ CpuManager::~CpuManager() = default;
+ 
+ void CpuManager::Initialize() {
+     num_cores = is_multicore ? Core::Hardware::NUM_CPU_CORES : 1;
++    if (Kernel::NativeThreads::Enabled()) {
++        // kart-recomp: game threads are host threads of their own (hle/kernel/native_threads.h): no emulated-core threads.
++        num_cores = 0;
++        gpu_barrier.emplace(1);
++        return;
++    }
+     gpu_barrier.emplace(num_cores + 1);
+     for (std::size_t core = 0; core < num_cores; core++)
+         core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
+@@ -176,6 +189,29 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
      std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};
      Common::SetCurrentThreadName(name.c_str());
      Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
@@ -3355,6 +3385,523 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/k_scheduler.cpp b/src/core/hle/kernel/k_scheduler.cpp
+index c1b0dcd033..06e7f29e62 100644
+--- a/src/core/hle/kernel/k_scheduler.cpp
++++ b/src/core/hle/kernel/k_scheduler.cpp
+@@ -17,6 +17,7 @@
+ #include "core/hle/kernel/k_interrupt_manager.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/k_scheduler.h"
++#include "core/hle/kernel/native_threads.h"
+ #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/kernel/kernel.h"
+@@ -316,7 +317,7 @@ u64 KScheduler::UpdateHighestPriorityThreadsImpl(KernelCore& kernel) {
+     // HACK: if we are a dummy thread, and we need to go sleep, indicate
+     // that for when the lock is released.
+     KThread* const cur_thread = GetCurrentThreadPointer(kernel);
+-    if (cur_thread->IsDummyThread() && cur_thread->GetState() != ThreadState::Runnable) {
++    if (cur_thread->IsHostBlocking() && cur_thread->GetState() != ThreadState::Runnable) {
+         cur_thread->RequestDummyThreadWait(kernel);
+     }
+ 
+@@ -522,24 +523,29 @@ void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, Threa
+     // Check if the state has changed, because if it hasn't there's nothing to do.
+     if (const ThreadState cur_state = thread->GetRawState(); cur_state != old_state) {
+         // Update the priority queues.
++        // kart-recomp: native host threads are not scheduled on the emulated cores (no priority queue); they block and wake on
++        // the host like dummy threads, and KartRuntime::CoreScheduler orders them.
++        const bool native = thread->IsNativeHost();
+         if (old_state == ThreadState::Runnable) {
+             // If we were previously runnable, then we're not runnable now, and we should remove.
+-            GetPriorityQueue(kernel).Remove(thread);
++            if (!native) GetPriorityQueue(kernel).Remove(thread);
+             IncrementScheduledCount(thread);
+             SetSchedulerUpdateNeeded(kernel);
+             // HACK: if this is a dummy thread, it should no longer wake up when the
+             // scheduler lock is released.
+-            if (thread->IsDummyThread())
++            if (thread->IsHostBlocking())
+                 kernel.GlobalSchedulerContext().UnregisterDummyThreadForWakeup(thread);
++            if (native && thread != GetCurrentThreadPointer(kernel)) NativeThreads::OnStoppedByOther(kernel, thread);
+         } else if (cur_state == ThreadState::Runnable) {
+             // If we're now runnable, then we weren't previously, and we should add.
+-            GetPriorityQueue(kernel).PushBack(thread);
++            if (!native) GetPriorityQueue(kernel).PushBack(thread);
+             IncrementScheduledCount(thread);
+             SetSchedulerUpdateNeeded(kernel);
+             // HACK: if this is a dummy thread, it should wake up when the scheduler
+             // lock is released.
+-            if (thread->IsDummyThread())
++            if (thread->IsHostBlocking())
+                 kernel.GlobalSchedulerContext().RegisterDummyThreadForWakeup(thread);
++            if (native) NativeThreads::OnRunnable(kernel.System(), thread);
+         }
+     }
+ }
+@@ -547,6 +553,10 @@ void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, Threa
+ void KScheduler::OnThreadPriorityChanged(KernelCore& kernel, KThread* thread, s32 old_priority) {
+     ASSERT(IsSchedulerLockedByCurrentThread(kernel));
+ 
++    if (thread->IsNativeHost()) {
++        NativeThreads::OnPriorityChanged(thread);
++        return;
++    }
+     // If the thread is runnable, we want to change its priority in the queue.
+     if (thread->GetRawState() == ThreadState::Runnable) {
+         GetPriorityQueue(kernel).ChangePriority(old_priority,
+@@ -560,6 +570,10 @@ void KScheduler::OnThreadAffinityMaskChanged(KernelCore& kernel, KThread* thread
+                                              const KAffinityMask& old_affinity, s32 old_core) {
+     ASSERT(IsSchedulerLockedByCurrentThread(kernel));
+ 
++    if (thread->IsNativeHost()) {
++        NativeThreads::OnCoreChanged(thread);
++        return;
++    }
+     // If the thread is runnable, we want to change its affinity in the queue.
+     if (thread->GetRawState() == ThreadState::Runnable) {
+         GetPriorityQueue(kernel).ChangeAffinityMask(old_core, old_affinity, thread);
+@@ -667,6 +681,10 @@ void KScheduler::RotateScheduledQueue(KernelCore& kernel, s32 core_id, s32 prior
+ }
+ 
+ void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
++    if (KThread& self = GetCurrentThread(kernel); self.IsNativeHost()) {
++        NativeThreads::Yield(kernel, &self); // kart-recomp: other threads of this core with the same or a better priority go first
++        return;
++    }
+     // Validate preconditions.
+     ASSERT(CanSchedule(kernel));
+     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
+@@ -706,6 +724,10 @@ void KScheduler::YieldWithoutCoreMigration(KernelCore& kernel) {
+ }
+ 
+ void KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
++    if (KThread& self = GetCurrentThread(kernel); self.IsNativeHost()) {
++        NativeThreads::Yield(kernel, &self); // kart-recomp: other threads of this core with the same or a better priority go first
++        return;
++    }
+     // Validate preconditions.
+     ASSERT(CanSchedule(kernel));
+     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
+@@ -794,6 +816,10 @@ void KScheduler::YieldWithCoreMigration(KernelCore& kernel) {
+ }
+ 
+ void KScheduler::YieldToAnyThread(KernelCore& kernel) {
++    if (KThread& self = GetCurrentThread(kernel); self.IsNativeHost()) {
++        NativeThreads::Yield(kernel, &self); // kart-recomp: other threads of this core with the same or a better priority go first
++        return;
++    }
+     // Validate preconditions.
+     ASSERT(CanSchedule(kernel));
+     ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
+diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
+index b0f33b44c7..9d4440d101 100644
+--- a/src/core/hle/kernel/k_thread.cpp
++++ b/src/core/hle/kernel/k_thread.cpp
+@@ -33,6 +33,7 @@
+ #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
+ #include "core/hle/kernel/k_system_control.h"
+ #include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/native_threads.h"
+ #include "core/hle/kernel/k_thread_queue.h"
+ #include "core/hle/kernel/k_worker_task_manager.h"
+ #include "core/hle/kernel/kernel.h"
+@@ -270,6 +271,13 @@ namespace Kernel {
+         // Initialize the thread.
+         R_TRY(thread->Initialize(kernel, func, arg, user_stack_top, prio, core, owner, type));
+ 
++        // kart-recomp: game and service threads as host threads (no fiber): remember how to start it.
++        if (NativeThreads::Enabled() && (type == ThreadType::User || type == ThreadType::HighPriority) && owner != nullptr) {
++            thread->m_native_host = true;
++            NativeThreads::Prepare(thread, type == ThreadType::User ? std::function<void()>{} : std::move(init_func));
++            R_SUCCEED();
++        }
++
+         // Initialize emulation parameters.
+         thread->m_host_context = std::make_shared<Common::Fiber>(std::move(init_func));
+ 
+@@ -307,7 +315,11 @@ namespace Kernel {
+         system.Kernel().GlobalSchedulerContext().AddThread(thread);
+         std::function<void()> func2{[&system, func_{std::move(func)}] {
+             // Similar to UserModeThreadStarter.
+-            system.Kernel().CurrentScheduler()->OnThreadStart(system.Kernel());
++            if (auto* scheduler = system.Kernel().CurrentScheduler()) {
++                scheduler->OnThreadStart(system.Kernel());
++            } else {
++                GetCurrentThread(system.Kernel()).EnableDispatch(system.Kernel()); // a native host thread
++            }
+ 
+             // Run the guest function.
+             func_();
+@@ -1318,7 +1330,7 @@ namespace Kernel {
+ 
+     void KThread::RequestDummyThreadWait(KernelCore& kernel) {
+         ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+-        ASSERT(this->IsDummyThread());
++        ASSERT(this->IsHostBlocking());
+ 
+         // We will block when the scheduler lock is released.
+         std::scoped_lock lock{m_dummy_thread_mutex};
+@@ -1326,6 +1338,26 @@ namespace Kernel {
+     }
+ 
+     void KThread::DummyThreadBeginWait(KernelCore& kernel) {
++        if (m_native_host) {
++            // kart-recomp: a native host thread gives its virtual core up while it waits and takes one again afterwards.
++            if (this->GetState() == ThreadState::Terminated) {
++                NativeThreads::ExitCurrent(kernel, this); // this object may be recycled: never touch it again
++            }
++            {
++                // Suspended by another thread while it ran (no wait was requested for it): it waits here as well. A resume sets
++                // the flag again under this mutex after it made the thread runnable, so no wake-up is lost.
++                std::scoped_lock lock{m_dummy_thread_mutex};
++                if (this->GetState() != ThreadState::Runnable) m_dummy_thread_runnable = false;
++                if (m_dummy_thread_runnable) return;
++            }
++            NativeThreads::BeforeBlock(kernel, this);
++            {
++                std::unique_lock lock{m_dummy_thread_mutex};
++                m_dummy_thread_cv.wait(lock, [this] { return m_dummy_thread_runnable; });
++            }
++            NativeThreads::AfterBlock(kernel, this);
++            return;
++        }
+         if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
+             // Occurs in single core mode.
+             return;
+@@ -1338,7 +1370,7 @@ namespace Kernel {
+ 
+     void KThread::DummyThreadEndWait(KernelCore& kernel) {
+         ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
+-        ASSERT(this->IsDummyThread());
++        ASSERT(this->IsHostBlocking());
+ 
+         // Wake up the waiting thread.
+         {
+diff --git a/src/core/hle/kernel/k_thread.h b/src/core/hle/kernel/k_thread.h
+index 87e5112a20..aee595e2ea 100644
+--- a/src/core/hle/kernel/k_thread.h
++++ b/src/core/hle/kernel/k_thread.h
+@@ -579,6 +579,15 @@ public:
+         return m_thread_type;
+     }
+ 
++    /// kart-recomp: a game or service thread running as its own host thread (KARTRECOMP_NATIVE_THREADS).
++    bool IsNativeHost() const {
++        return m_native_host;
++    }
++    /// Blocks on the host when the kernel makes it wait: suyu's dummy threads and native host threads.
++    bool IsHostBlocking() const {
++        return this->IsDummyThread() || m_native_host;
++    }
++
+     bool IsDummyThread() const {
+         return this->GetThreadType() == ThreadType::Dummy;
+     }
+@@ -926,6 +935,7 @@ private:
+     std::shared_ptr<Common::Fiber> m_host_context{};
+     ThreadType m_thread_type{};
+     StepState m_step_state{};
++    bool m_native_host{}; ///< kart-recomp: runs as its own host thread (hle/kernel/native_threads.h)
+     bool m_dummy_thread_runnable{true};
+     std::mutex m_dummy_thread_mutex{};
+     std::condition_variable m_dummy_thread_cv{};
+diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
+index 6363a9e0ab..b613a6512a 100644
+--- a/src/core/hle/kernel/kernel.cpp
++++ b/src/core/hle/kernel/kernel.cpp
+@@ -42,6 +42,7 @@
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/kernel/k_worker_task_manager.h"
+ #include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_threads.h"
+ #include "core/hle/kernel/physical_core.h"
+ #include "core/hle/result.h"
+ #include "core/hle/service/server_manager.h"
+@@ -924,6 +925,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
+ }
+ 
+ size_t KernelCore::CurrentPhysicalCoreIndex() const {
++    if (const int native = NativeThreads::CurrentCore(); native >= 0) return static_cast<size_t>(native); // a native host thread's virtual core
+     const u32 core_id = impl->GetCurrentHostThreadID();
+     if (core_id >= Core::Hardware::NUM_CPU_CORES) {
+         return Core::Hardware::NUM_CPU_CORES - 1;
+diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
+new file mode 100644
+index 0000000000..02fae3372b
+--- /dev/null
++++ b/src/core/hle/kernel/native_threads.cpp
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_threads.h"
++
++#include <atomic>
++#include <condition_variable>
++#include <cstdlib>
++#include <vector>
++#include <memory>
++#include <mutex>
++#include <thread>
++#include <unordered_map>
++
++#include "common/logging/log.h"
++#include "common/thread.h"
++#include "core/core.h"
++#include "core/hardware_properties.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_scheduler.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/physical_core.h"
++#include "kart_runtime/core_scheduler.h"
++
++namespace Kernel::NativeThreads {
++namespace {
++
++using KartRuntime::CoreScheduler;
++
++struct Entry {
++    std::unique_ptr<CoreScheduler::Thread> sched;
++    std::function<void()> entry; ///< service threads; empty = a game thread (runs the CPU interface)
++    bool started = false;
++};
++
++std::mutex g_lock;
++std::unordered_map<KThread*, Entry> g_threads;
++std::vector<std::unique_ptr<CoreScheduler::Thread>> g_retired; ///< handles of exited threads (their host threads are parked)
++std::atomic<int> g_parked{0};
++thread_local int t_core = -1;
++thread_local CoreScheduler::Thread* t_sched = nullptr;
++KernelCore* g_kernel = nullptr;
++
++CoreScheduler& Scheduler() {
++    static CoreScheduler scheduler{static_cast<int>(Core::Hardware::NUM_CPU_CORES)};
++    return scheduler;
++}
++
++int CoreOf(const KThread* thread) {
++    const s32 core = thread->GetActiveCore();
++    return core >= 0 && core < static_cast<s32>(Core::Hardware::NUM_CPU_CORES) ? core : 0;
++}
++
++/// Takes the thread's virtual core and puts its registers into that core's CPU interface.
++void Enter(KernelCore& kernel, KThread* thread) {
++    Scheduler().Acquire(t_sched);
++    t_core = t_sched->Core();
++    thread->SetCurrentCore(t_core);
++    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).LoadContext(thread);
++}
++
++/// Saves the registers and gives the core up.
++void Leave(KernelCore& kernel, KThread* thread) {
++    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).SaveContext(thread);
++    t_core = -1;
++    Scheduler().Release(t_sched);
++}
++
++void GuestLoop(KernelCore& kernel, KThread* thread) {
++    thread->EnableDispatch(kernel); // KScheduler::OnThreadStart
++    for (;;) {
++        auto& core = kernel.PhysicalCore(static_cast<std::size_t>(t_core));
++        core.RunThread(kernel, thread); // returns after a system call or an interrupt
++        if (core.IsInterrupted()) core.ClearInterrupt();
++        // Suspended by another thread while it ran: wait like any kernel wait (the lock's release blocks this thread).
++        while (thread->GetState() != ThreadState::Runnable) {
++            KScopedSchedulerLock sl{kernel};
++            if (thread->GetState() != ThreadState::Runnable) thread->RequestDummyThreadWait(kernel);
++        }
++        if (Scheduler().PreemptRequested(t_sched)) Yield(kernel, thread);
++    }
++}
++
++void HostMain(Core::System& system, KThread* thread, CoreScheduler::Thread* sched, std::function<void()> entry) {
++    auto& kernel = system.Kernel();
++    Common::SetCurrentThreadName(entry ? "KartService" : "KartThread");
++    kernel.RegisterHostThread(thread);
++    SetCurrentThread(kernel, thread);
++    t_sched = sched;
++    Enter(kernel, thread);
++    if (entry) {
++        entry(); // enables dispatch, runs the service loop, exits the thread (never returns)
++    } else {
++        GuestLoop(kernel, thread);
++    }
++}
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_THREADS");
++        return v && *v == '1';
++    }();
++    return on;
++}
++
++int CurrentCore() {
++    return t_core;
++}
++
++void Prepare(KThread* thread, std::function<void()>&& entry) {
++    std::scoped_lock lk{g_lock};
++    // Thread objects are recycled: one that exited leaves its entry (and its parked host thread's scheduler handle) behind.
++    if (const auto it = g_threads.find(thread); it != g_threads.end()) {
++        if (it->second.sched) g_retired.push_back(std::move(it->second.sched));
++        g_threads.erase(it);
++    }
++    g_threads[thread].entry = std::move(entry);
++}
++
++[[noreturn]] void ExitCurrent(KernelCore& kernel, KThread* thread) {
++    // The thread has terminated inside the kernel. Its object may be reused at any time, so nothing of it is touched again:
++    // give the core up and park this host thread for good. (TODO: end the host thread properly instead of parking it.)
++    if (t_core >= 0) Leave(kernel, thread);
++    g_parked.fetch_add(1, std::memory_order_relaxed);
++    std::mutex never;
++    std::condition_variable forever;
++    std::unique_lock lk{never};
++    for (;;) forever.wait(lk);
++}
++
++void OnRunnable(Core::System& system, KThread* thread) {
++    CoreScheduler::Thread* sched = nullptr;
++    std::function<void()> entry;
++    {
++        std::scoped_lock lk{g_lock};
++        const auto it = g_threads.find(thread);
++        if (it == g_threads.end() || it->second.started) return;
++        it->second.started = true;
++        it->second.sched = Scheduler().Create(CoreOf(thread), thread->GetPriority());
++        sched = it->second.sched.get();
++        entry = std::move(it->second.entry);
++        if (!g_kernel) {
++            g_kernel = &system.Kernel();
++            // A better-priority thread waits for a core: interrupt whatever runs there so it yields at once.
++            Scheduler().SetPreemptCallback([](CoreScheduler::Thread* t) {
++                g_kernel->PhysicalCore(static_cast<std::size_t>(t->Core())).Interrupt();
++            });
++            LOG_INFO(Kernel, "native threads: game and service threads run as host threads (KARTRECOMP_NATIVE_THREADS=1)");
++        }
++    }
++    std::thread(HostMain, std::ref(system), thread, sched, std::move(entry)).detach();
++}
++
++void BeforeBlock(KernelCore& kernel, KThread* thread) {
++    if (t_core >= 0) Leave(kernel, thread);
++}
++
++void AfterBlock(KernelCore& kernel, KThread* thread) {
++    if (t_sched && t_core < 0) Enter(kernel, thread);
++}
++
++void Yield(KernelCore& kernel, KThread* thread) {
++    if (!t_sched || t_core < 0) return;
++    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).SaveContext(thread);
++    Scheduler().Yield(t_sched);
++    t_core = t_sched->Core();
++    thread->SetCurrentCore(t_core);
++    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).LoadContext(thread);
++}
++
++void OnPriorityChanged(KThread* thread) {
++    std::scoped_lock lk{g_lock};
++    if (const auto it = g_threads.find(thread); it != g_threads.end() && it->second.sched)
++        Scheduler().SetPriority(it->second.sched.get(), thread->GetPriority());
++}
++
++void OnCoreChanged(KThread* thread) {
++    std::scoped_lock lk{g_lock};
++    if (const auto it = g_threads.find(thread); it != g_threads.end() && it->second.sched)
++        Scheduler().SetCore(it->second.sched.get(), CoreOf(thread));
++}
++
++void OnStoppedByOther(KernelCore& kernel, KThread* thread) {
++    int core = -1;
++    {
++        std::scoped_lock lk{g_lock};
++        if (const auto it = g_threads.find(thread); it != g_threads.end() && it->second.sched) core = it->second.sched->Core();
++    }
++    if (core >= 0) kernel.PhysicalCore(static_cast<std::size_t>(core)).Interrupt();
++}
++
++} // namespace Kernel::NativeThreads
+diff --git a/src/core/hle/kernel/native_threads.h b/src/core/hle/kernel/native_threads.h
+new file mode 100644
+index 0000000000..4faef890e8
+--- /dev/null
++++ b/src/core/hle/kernel/native_threads.h
+@@ -0,0 +1,48 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native threads (KARTRECOMP_NATIVE_THREADS=1), the suyu-side adapter of kart_runtime/core_scheduler.h
++// (docs/NATIVE_ENGINE.md, "native threads").
++//
++// Every game thread and every service thread that used to be a fiber on one of four emulated-core host threads is a real host
++// thread. The kernel's objects and waits are unchanged: when the kernel makes such a thread wait, its host thread blocks (the path
++// suyu already uses for its "dummy" host threads) and gives its virtual core to the next thread; KartRuntime::CoreScheduler keeps
++// the console's rules (one running thread per core, best priority first). While a thread runs it uses that core's CPU interface
++// and PhysicalCore, as a fiber did. The four CPUCore_N host threads and the fibers are not used.
++#pragma once
++
++#include <functional>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Kernel {
++class KernelCore;
++class KThread;
++} // namespace Kernel
++
++namespace Kernel::NativeThreads {
++
++bool Enabled();
++
++/// The virtual core the calling host thread currently holds, or -1 (not a native thread, or it is waiting).
++int CurrentCore();
++
++/// A thread that will run as a host thread: remembers how to start it (a service thread's function; empty for a game thread).
++void Prepare(KThread* thread, std::function<void()>&& entry);
++/// The thread became runnable: starts its host thread the first time.
++void OnRunnable(Core::System& system, KThread* thread);
++/// The calling thread is about to block in the kernel / may run again.
++void BeforeBlock(KernelCore& kernel, KThread* thread);
++void AfterBlock(KernelCore& kernel, KThread* thread);
++/// svcSleepThread's yield variants for the calling thread.
++void Yield(KernelCore& kernel, KThread* thread);
++void OnPriorityChanged(KThread* thread);
++void OnCoreChanged(KThread* thread);
++/// Another thread made `thread` stop being runnable (suspension): interrupt it if it is executing game code.
++void OnStoppedByOther(KernelCore& kernel, KThread* thread);
++/// The calling thread has terminated: releases its core and never returns.
++[[noreturn]] void ExitCurrent(KernelCore& kernel, KThread* thread);
++
++} // namespace Kernel::NativeThreads
+diff --git a/src/core/hle/kernel/svc/svc_info.cpp b/src/core/hle/kernel/svc/svc_info.cpp
+index c2e1195d03..864d1d69db 100644
+--- a/src/core/hle/kernel/svc/svc_info.cpp
++++ b/src/core/hle/kernel/svc/svc_info.cpp
+@@ -212,7 +212,7 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle
+         }
+ 
+         const auto& core_timing = system.CoreTiming();
+-        const auto& scheduler = *system.Kernel().CurrentScheduler();
++        const auto& scheduler = system.Kernel().Scheduler(system.Kernel().CurrentPhysicalCoreIndex());
+         const auto* const current_thread = GetCurrentThreadPointer(system.Kernel());
+         const bool same_thread = current_thread == thread.GetPointerUnsafe();
+ 
+@@ -240,7 +240,7 @@ Result GetInfo(Core::System& system, u64* result, InfoType info_id_type, Handle
+         R_UNLESS(core_valid, ResultInvalidCombination);
+ 
+         // Get the idle tick count.
+-        *result = system.Kernel().CurrentScheduler()->GetIdleThread()->GetCpuTime();
++        *result = system.Kernel().Scheduler(system.Kernel().CurrentPhysicalCoreIndex()).GetIdleThread()->GetCpuTime();
+         R_SUCCEED();
+     }
+     case InfoType::MesosphereCurrentProcess: {
 diff --git a/src/core/hle/kernel/svc/svc_ipc.cpp b/src/core/hle/kernel/svc/svc_ipc.cpp
 index 94638e61ad..a55aa0a363 100644
 --- a/src/core/hle/kernel/svc/svc_ipc.cpp
@@ -6407,10 +6954,10 @@ index 0000000000..683620653f
 +| `core_scheduler.h` | Host threads sharing virtual CPU cores the way the console's threads do: one running thread per core, strict priority, FIFO among equals, a preemption request for the running thread. Replaces fibers and emulated-core threads. |
 diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
 new file mode 100644
-index 0000000000..ec34a3c3fc
+index 0000000000..fc5364b0f8
 --- /dev/null
 +++ b/src/kart_runtime/core_scheduler.h
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,201 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart_runtime: virtual CPU cores for host threads.
 +//
@@ -6430,6 +6977,7 @@ index 0000000000..ec34a3c3fc
 +#include <atomic>
 +#include <condition_variable>
 +#include <cstdint>
++#include <functional>
 +#include <memory>
 +#include <mutex>
 +#include <vector>
@@ -6455,6 +7003,10 @@ index 0000000000..ec34a3c3fc
 +    };
 +
 +    explicit CoreScheduler(int core_count) : cores(static_cast<std::size_t>(core_count)) {}
++
++    /// Called (with the scheduler's lock held: keep it short, do not call back in) when a running thread is asked to yield, so
++    /// the owner can interrupt whatever that thread is executing. Optional.
++    void SetPreemptCallback(std::function<void(Thread*)> fn) { on_preempt = std::move(fn); }
 +
 +    /// A new thread for `core` with `priority` (lower = runs first). Not running yet.
 +    std::unique_ptr<Thread> Create(int core, int priority) {
@@ -6512,7 +7064,7 @@ index 0000000000..ec34a3c3fc
 +            t->granted = false;
 +            t->core = core;
 +            Enqueue(t);
-+            t->preempt.store(true, std::memory_order_relaxed);
++            RequestPreempt(t);
 +            Dispatch(old);
 +            Dispatch(core);
 +        } else {
@@ -6580,7 +7132,12 @@ index 0000000000..ec34a3c3fc
 +            best = Best(c);
 +            if (!best) return;
 +        }
-+        if (best->priority < c.running->priority) c.running->preempt.store(true, std::memory_order_relaxed);
++        if (best->priority < c.running->priority) RequestPreempt(c.running);
++    }
++
++    void RequestPreempt(Thread* t) {
++        if (t->preempt.exchange(true, std::memory_order_relaxed)) return;
++        if (on_preempt) on_preempt(t);
 +    }
 +
 +    void ReleaseLocked(Thread* t) {
@@ -6598,6 +7155,7 @@ index 0000000000..ec34a3c3fc
 +    std::mutex lock;
 +    std::vector<CoreState> cores;
 +    std::uint64_t arrivals = 0;
++    std::function<void(Thread*)> on_preempt;
 +};
 +
 +} // namespace KartRuntime
