@@ -103,6 +103,16 @@ ABI change. Everything else in steps 1-2 compiled on MSVC as it was; ctest 12/12
      same or better. `mi_collect` was not needed: mimalloc's purge delay already returns freed memory. The ~1.8 GB still private is live
      data. The 4 GB guest RAM section is still created with `SEC_COMMIT`, so its commit charge stays (resident memory does not).
 
+4. **Timing thread (patch 0002, `common/thread.cpp`, Windows only; commit after e9939a4).** `HostTiming` (CoreTiming) sat at 100% of a
+   logical core, at AboveNormal: `Event::WaitFor` uses UMWAIT/MWAITX, which Windows counts as running time. CoreTiming runs about
+   2,800 events a second (HID pad 1,000/s because `npad_update_ns` is 1 ms, hardware timer ~500/s, touch/default 250/s each, motion
+   200/s, preemption 100/s, composition 60/s), so every wait is under 1 ms and the old "sleep on the condition variable for waits over
+   3 ms" idea never applies. With 8 or fewer logical CPUs the wait is now short high-resolution timer sleeps (WaitableTimer, at most
+   0.5 ms, the flag checked between them, the last 0.25 ms still UMWAIT). Measured, 1P race: 4 cores 68% on time / 8-9% over 20 ms
+   -> 76% / 4-5%; 8 threads equal; 16 threads 3 points *worse*, so there the instruction stays (on by default only at <= 8 logical
+   CPUs; `KARTRECOMP_TIMING_WAIT=1/0` forces). Process CPU in a 4-player race: 394% -> 294% of one core when forced on. Linux
+   (futex-based `condvar.wait_for`) does not have this problem. Idea if you want it on every PC: merge the HID events into one 4 ms tick.
+
 **Tested on the final zip** (i9-12900K, NVIDIA RTX A4500, 1440p 60 Hz SDR monitor, keyboard only, firmware 23.0.1 and matching keys, mods off):
 - Setup builds a 4.0.1 game from scratch (about 4 min) and its test boot passes.
 - 4.0.1 race: 83% on time / 4% over 20 ms with a warm pipeline cache. The very first race (cold cache) is 77% / 6%, from pipeline builds.
@@ -114,8 +124,22 @@ ABI change. Everything else in steps 1-2 compiled on MSVC as it was; ctest 12/12
 - `-nolauncher -f` reaches the engine as `-f`. Holding B on the title quits. Saves go to `userdata\data\kartrecomp\saves` and the
   Mii database to `...\miis`; nothing new in the NAND user-save folder. The launcher's "Open saves folder" points at the same place.
 
-**Not tested:** 2P/4P split-screen (the "4:600" split60 log line and the HDR + FSR 3 views); HDR (SDR monitor); an AMD GPU; the
-Controllers tab and F10 Controls (no gamepad on this PC); Miis tab editing; Vector mod on 4.0.1 (not on this PC).
+**Added later the same day (4.0.1 built with `--patch split60`, 1440p, mods off unless stated):**
+- **4-player Grand Prix** (menu: Down, Right, Right at the top menu, 4 players `connected=true` in `sdl2-config.ini`, TAS
+  `script0-1..4.txt`): all four views drawn, HUD and minimap right, no crash. About 27-31 fps: the render thread is the limit, `record`
+  15-21 ms per frame of which `draws` 11-15 ms is "index+vertex setup" (10-14 ms) and descriptors+textures 8-12 ms. The code patch is
+  loaded (`code patch split60 at main+afece8`) but I never saw the "split-screen views per frame ... 4:600" line in the log. Not 60 fps.
+  That is the next thing to look at for 4 players: the native renderer's per-draw CPU cost, not the game threads (three CPUCore threads
+  at 62-81%, NativeRender 61%).
+- **Mods from the USB** (Vector, Tux, kirby, Shiny, Sonic Runner, Trump, bob-omb at `userdata\data\kartrecomp\mods\<tid>\<name>`):
+  `--nolauncher` builds `!Merged menus`, the game starts, and a single-player Grand Prix reaches the race with no freeze at the flag screen.
+- **Xbox One controller (wired, SDL guid ...ff02)**: found by `--input-capture devices`, `names` and `defaults` give the right Xbox button
+  names and the Nintendo-style A/B/X/Y swap in the defaults. Pressing buttons myself is not possible from here; the maintainer's hands
+  are needed for the Controllers tab, Change/rebind and F10 Controls.
+- The Controller applet fallback (`DefaultControllerApplet`) connects only `min_players` pads (2 for the multiplayer menu), so players
+  3 and 4 only exist when the top menu's player count (Down, Right, Right) is raised, as in the 2026-10-22 note.
+
+**Not tested:** HDR (SDR monitor); an AMD GPU; the Controllers tab and F10 Controls (needs a human at the pad); Miis tab editing.
 
 For your information: the engine finds `plugins\` relative to its working directory. The launcher sets that directory correctly; a
 script that starts `mk8d-engine.exe` from elsewhere gets no upscalers.

@@ -5550,3 +5550,63 @@ index af26bfff5b..6a098a7bbd 100644
      ASSERT(VirtualFree(base, 0, MEM_RELEASE));
  #else
      ASSERT(munmap(base, size) == 0);
+diff --git a/src/common/thread.cpp b/src/common/thread.cpp
+index 5617a93b91..849d89f383 100644
+--- a/src/common/thread.cpp
++++ b/src/common/thread.cpp
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <chrono>
++#include <cstdlib>
+ #include <limits>
+ #include <string>
+ #include <thread>
+@@ -196,6 +197,47 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
+     auto const start = Common::X64::FencedRDTSC();
+     auto const& caps = Common::g_cpu_caps;
+     [[maybe_unused]] auto const end = start + Common::g_wall_clock.NsToTicks(time);
++    // kart-recomp (Windows): a UMWAIT/MWAITX wait counts as running time, so the HostTiming thread (about 2,800 timed events a second,
++    // mostly input polling, each wait under 1 ms) held one logical core at 100%. On a PC with few cores that core is taken from the
++    // guest and render threads. With 8 or fewer logical CPUs the wait is now spent in short high-resolution timer sleeps (4 cores:
++    // frames on time 68% -> 76%, over 20 ms 9% -> 4%; 8 threads: equal; 16 threads: 3 points worse, so the instruction stays there).
++    // KARTRECOMP_TIMING_WAIT=1 forces the sleeps, =0 the old behaviour.
++    static const bool coarse_wait = [] {
++        const char* v = std::getenv("KARTRECOMP_TIMING_WAIT");
++        if (v && v[0] == '0') return false;
++        if (v && v[0] == '1') return true;
++        DWORD_PTR process_mask = 0, system_mask = 0;
++        if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) return false;
++        int logical = 0;
++        for (; process_mask; process_mask &= process_mask - 1) ++logical;
++        return logical <= 8;
++    }();
++    // (CPUs without MWAITX/UMWAIT already sleep in the last branch below.)
++    if (coarse_wait && (caps.monitorx || caps.waitpkg) && time > std::chrono::microseconds(300)) {
++        // High-resolution timer sleeps of at most 0.5 ms, looking at the flag between them (a Set() is seen within about 0.5 ms).
++        static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
++        if (timer) {
++            const s64 tick_hz = static_cast<s64>(Common::g_wall_clock.NsToTicks(std::chrono::seconds(1)));
++            for (;;) {
++                bool expected = true;
++                if (is_set.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
++                    return true;
++                }
++                const s64 left = static_cast<s64>(end) - static_cast<s64>(Common::X64::FencedRDTSC());
++                const s64 left_ns = left * 1000000000LL / (tick_hz > 0 ? tick_hz : 1);
++                if (left_ns < 250000) {
++                    break; // the last quarter millisecond is waited out precisely below
++                }
++                const s64 sleep_ns = std::min<s64>(left_ns - 150000, 500000);
++                LARGE_INTEGER due;
++                due.QuadPart = -(sleep_ns / 100);
++                if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
++                    break;
++                }
++                WaitForSingleObject(timer, INFINITE);
++            }
++        }
++    }
+     if (caps.monitorx) {
+         while (true) {
+             // Armed monitor, as per manual, MWAITX must be conditional if the condition isn't satisfied
