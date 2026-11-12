@@ -123,7 +123,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(scrolled(buildFrameRateTab()), tr("Frame rate"));
     tabs->addTab(scrolled(buildEnhancementsTab()), tr("Enhancements"));
     tabs->addTab(scrolled(buildControllersTab()), tr("Controllers"));
-    tabs->addTab(buildMiiTab(), tr("Miis"));
+    tabs->addTab(buildMiiTab(), tr("Miis (experimental)"));
     tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
     tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
     setCentralWidget(tabs);

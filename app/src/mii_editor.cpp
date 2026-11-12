@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mii_editor.h"
-#include "mii_preview.h"
 
 #include <QComboBox>
 #include <QDir>
@@ -26,9 +25,10 @@ const char* const kFavoriteColors[] = {"Red", "Orange", "Yellow", "Light green",
 
 MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
     auto* outer = new QVBoxLayout(this);
-    auto* note = new QLabel(tr("Miis you make here show up in the game's character select (Mii racer). Values are the game's own "
-                               "numbers (the same ones the console's Mii Maker uses). The picture is a sketch of where each part sits, how big it is and "
-                               "its colour; the exact eye, mouth and hair styles show in the game. Close the game before saving."));
+    auto* note = new QLabel(tr("<b>Experimental.</b> Keep a copy of your Miis folder before saving (Open Miis folder). "
+                               "Miis you make here show up in the game's character select (Mii racer). Values are the game's own "
+                               "numbers (the same ones the console's Mii Maker uses), so try a value and look in the game; there is "
+                               "no face preview here yet. Close the game before saving."));
     note->setWordWrap(true);
     outer->addWidget(note);
 
@@ -84,15 +84,12 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
         spins[f.key] = spin;
         connect(spin, &QSpinBox::valueChanged, this, [this] {
             if (!loading) setDirty(true);
-            updatePreview();
         });
     }
     fl->addStretch();
     auto* scroll = new QScrollArea;
     scroll->setWidget(form);
     scroll->setWidgetResizable(true);
-    preview = new MiiPreview;
-    body->addWidget(preview);
     body->addWidget(scroll, 1);
 
     auto* bottom = new QHBoxLayout;
@@ -112,8 +109,8 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
     outer->addLayout(bottom);
 
     connect(name, &QLineEdit::textEdited, this, [this] { setDirty(true); });
-    connect(gender, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); updatePreview(); });
-    connect(favorite, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); updatePreview(); });
+    connect(gender, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); });
+    connect(favorite, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); });
     connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
         storeEdits();
         showMii(row);
@@ -225,17 +222,6 @@ void MiiEditor::showMii(int row) {
     favorite->setCurrentIndex(d.Get("favorite_color"));
     for (auto& [key, spin] : spins) spin->setValue(d.Get(key.c_str()));
     loading = false;
-    updatePreview();
-}
-
-void MiiEditor::updatePreview() {
-    if (loading || !preview) return;
-    std::map<std::string, int> values;
-    for (const auto& [key, spin] : spins) values[key] = spin->value();
-    values["gender"] = gender->currentIndex();
-    values["favorite_color"] = favorite->currentIndex();
-    preview->setValues(values);
-    preview->setVisible(current >= 0);
 }
 
 void MiiEditor::storeEdits() {

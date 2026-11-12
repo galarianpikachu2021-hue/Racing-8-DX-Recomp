@@ -29,8 +29,6 @@ qt_add_executable(kartrecomp
     src/setup_page.h
     src/mii_editor.cpp
     src/mii_editor.h
-    src/mii_preview.cpp
-    src/mii_preview.h
     src/overlay_settings.cpp
     src/overlay_settings.h
     src/zip_archive.h
