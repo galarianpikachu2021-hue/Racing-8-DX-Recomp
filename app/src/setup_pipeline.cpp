@@ -60,7 +60,9 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QProcess ex;
         ex.setProcessChannelMode(QProcess::SeparateChannels);
         BuildRunner::DieWithParent(ex);
-        ex.start(paths.exporter, {"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"});
+        QStringList args{"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"};
+        for (const QString& p : in.patches) args << "--patch" << p;
+        ex.start(paths.exporter, args);
         if (!ex.waitForStarted()) return {false, QStringLiteral("Cannot start the exporter (%1).").arg(paths.exporter)};
         while (!ex.waitForFinished(200)) {
             if (Cancelled(cancel)) { ex.kill(); ex.waitForFinished(); return {false, QStringLiteral("Cancelled.")}; }
@@ -82,11 +84,20 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     plan.outDir = layout.moduleDir();
     plan.hotList = hotList;
     plan.jobs = jobs;
+    {
+        QFile list(QDir(layout.exportDir()).filePath("code_patches.txt"));
+        if (list.open(QIODevice::ReadOnly)) plan.codePatches = list.readAll();
+    }
     plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + "|hot-O3";
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QStringLiteral("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);
     if (!built.ok) return {false, built.message};
+
+    // The engine makes the same changes to the loaded code (the code guard compares it with the translation).
+    QFile::remove(QDir(layout.moduleDir()).filePath("code_patches.txt"));
+    if (!plan.codePatches.isEmpty() && !QFile::copy(QDir(layout.exportDir()).filePath("code_patches.txt"), QDir(layout.moduleDir()).filePath("code_patches.txt")))
+        return {false, QStringLiteral("Cannot write the code patch list into %1.").arg(layout.moduleDir())};
 
     report(950, QStringLiteral("Testing the game"));
     const VerifyResult verdict = VerifyBuild(paths.engine, layout, 150, cancel);

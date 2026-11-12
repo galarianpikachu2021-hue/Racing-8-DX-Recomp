@@ -32,6 +32,7 @@ struct BuildPlan {
     void useToolchain(const QString& toolchainDir);
     QStringList linkLibs = {"-lm", "-lc"}; // after the objects; Windows (mingw) has no libc to name
     QString stamp;   // identifies what the work folder was built with (engine, toolchain, hot list); a different stamp wipes it
+    QByteArray codePatches; // the export's code_patches.txt: when it differs from the last build's, the pieces holding a changed address are compiled again
     int jobs = 1;
 };
 

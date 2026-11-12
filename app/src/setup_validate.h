@@ -24,6 +24,7 @@ QString HotListFor(const QString& list304, const QString& updateName);
 struct SetupInputs {
     QString base, update, keys, firmware;
     QStringList dlc;
+    QStringList patches; ///< optional game changes built in (kartrecomp-export --patch), e.g. "split60"
 };
 
 QString ValidateBase(const NspInfo& info);

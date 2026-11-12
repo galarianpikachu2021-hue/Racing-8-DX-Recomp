@@ -275,6 +275,37 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
 
     for (Module& m : modules)
         for (CompileJob& j : m.jobs) j.args = plan.compileArgs + j.args;
+    // Optional game changes (code_patches.txt) alter a few blocks of main: when the set differs from the last build's, only the pieces
+    // holding a changed address are compiled again (each block names its last instruction's address, "0x<offset>ULL").
+    {
+        const QString listFile = QDir(plan.workDir).filePath("CODE_PATCHES");
+        QFile old(listFile);
+        const QByteArray before = old.open(QIODevice::ReadOnly) ? old.readAll() : QByteArray();
+        old.close();
+        if (before != plan.codePatches) {
+            QList<QByteArray> needles;
+            for (const QByteArray& line : (before + "\n" + plan.codePatches).split('\n')) {
+                const QList<QByteArray> f = line.simplified().split(' ');
+                if (f.size() >= 2 && f[0] == "main") needles << "0x" + f[1].toLower() + "ULL";
+            }
+            for (Module& m : modules) {
+                if (m.dir != QLatin1String("main") || needles.isEmpty()) continue;
+                for (const CompileJob& j : m.jobs) {
+                    QFile src(j.source);
+                    if (!src.open(QIODevice::ReadOnly)) continue;
+                    const QByteArray text = src.readAll();
+                    for (const QByteArray& n : needles) {
+                        if (text.contains(n)) {
+                            QFile::remove(j.marker);
+                            break;
+                        }
+                    }
+                }
+            }
+            QFile fresh(listFile);
+            if (fresh.open(QIODevice::WriteOnly)) fresh.write(plan.codePatches);
+        }
+    }
     QList<const CompileJob*> pending;
     int total = 0, done = 0;
     for (const Module& m : modules) {

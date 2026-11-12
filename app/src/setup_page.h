@@ -11,6 +11,7 @@
 #include "setup_paths.h"
 #include "setup_validate.h"
 
+class QCheckBox;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
@@ -54,6 +55,7 @@ private:
     Row base, update, keys, firmware, dlcRow;
     QStringList dlc;
     QPushButton *buildButton, *cancelButton, *playButton;
+    QCheckBox* split60 = nullptr;
     QProgressBar* bar;
     QLabel* message;
     std::thread worker;

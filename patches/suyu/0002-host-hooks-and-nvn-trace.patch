@@ -182,6 +182,73 @@ index 0ae108d9c1..3867111256 100644
      std::memset(backing_base + physical_offset, fill_value, length);
  }
  
+diff --git a/src/common/kart_code_patches.h b/src/common/kart_code_patches.h
+new file mode 100644
+index 0000000000..7d4a017150
+--- /dev/null
++++ b/src/common/kart_code_patches.h
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: optional game changes made when the game is built, never at run time (no JIT). The exporter
++// (`kartrecomp-export --patch <name>`) changes the instruction before translating the user's own code and lists what it changed in
++// <export>/code_patches.txt; the launcher copies that list into the module folder, and the engine makes the same change to the
++// loaded code (core/loader/nso.cpp), so the code guard's expected words and the game's memory agree. Each entry is tied to one game
++// build (first 8 bytes of main's NSO build ID) and checks the original word before it changes anything.
++#pragma once
++
++#include <cstdint>
++#include <cstdio>
++#include <fstream>
++#include <string>
++#include <vector>
++
++namespace KartCodePatches {
++
++struct Patch {
++    const char* name;
++    uint64_t build;    ///< first 8 bytes of main's NSO build ID
++    uint64_t offset;   ///< in main
++    uint32_t old_word; ///< what must be there
++    uint32_t new_word;
++};
++
++// split60: 60 fps split-screen in 3-4 player races. Once per frame the game gives each view a mode from its group count (byte
++// +0x19 of the view list): fewer than 2 groups = every view drawn every frame (as in 1-2 player races); otherwise only one group
++// is drawn per frame and the others show a kept copy (30 fps per view). The branch "cmp w10,#2; b.lo <mode 0>" becomes "b <mode 0>".
++// The 4.0.1 counterpart of the 3.0.3 "60FPS in Split Screen" patch (bne -> b at main+0xbc0b1c). See docs/FRAMERATE.md.
++inline constexpr Patch kPatches[] = {
++    {"split60", 0x158c0c7399aabd7bULL, 0xafece8, 0x540001a3, 0x1400000d}, // 4.0.1: b.lo 0xafed1c -> b 0xafed1c
++    {"split60", 0x2452c49bc26ec159ULL, 0xafa2b0, 0x540001a3, 0x1400000d}, // 3.0.4: b.lo 0xafa2e4 -> b 0xafa2e4
++};
++
++inline uint64_t BuildPrefix(const uint8_t* build_id) {
++    uint64_t id = 0;
++    for (int i = 0; i < 8; ++i) id = (id << 8) | build_id[i];
++    return id;
++}
++
++/// One line of code_patches.txt: "<module> <offset hex> <old hex> <new hex> <name>".
++struct Applied {
++    std::string module;
++    uint64_t offset;
++    uint32_t old_word, new_word;
++    std::string name;
++};
++
++inline std::vector<Applied> ReadList(const std::string& path) {
++    std::vector<Applied> out;
++    std::ifstream in(path);
++    for (std::string line; std::getline(in, line);) {
++        char module[32]{}, name[64]{};
++        unsigned long long offset = 0;
++        unsigned old_word = 0, new_word = 0;
++        if (std::sscanf(line.c_str(), "%31s %llx %x %x %63s", module, &offset, &old_word, &new_word, name) == 5)
++            out.push_back({module, offset, old_word, new_word, name});
++    }
++    return out;
++}
++
++} // namespace KartCodePatches
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
 index 0000000000..0345e00158
@@ -2705,10 +2772,22 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..772c0471e1 100644
+index 3cc84acfdf..61c8a39b8c 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
-@@ -23,6 +23,8 @@
+@@ -6,9 +6,11 @@
+ 
+ #include <algorithm>
+ #include <cinttypes>
++#include <cstdlib>
+ #include <cstring>
+ #include <vector>
+ 
++#include "common/kart_code_patches.h"
+ #include "common/common_funcs.h"
+ #include "common/hex_util.h"
+ #include "common/logging.h"
+@@ -23,6 +25,8 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
@@ -2717,7 +2796,7 @@ index 3cc84acfdf..772c0471e1 100644
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +219,15 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +221,34 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
@@ -2727,6 +2806,25 @@ index 3cc84acfdf..772c0471e1 100644
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
 +
++    // kart-recomp: optional game changes the game was built with (common/kart_code_patches.h): the loaded code must say the same as
++    // the translation, or the code guard stops the game.
++    if (const char* dir = std::getenv("KARTRECOMP_MODULE_DIR"); dir && *dir && name == "main") {
++        const u64 build = KartCodePatches::BuildPrefix(nso_header.build_id.data());
++        for (const auto& p : KartCodePatches::ReadList(std::string{dir} + "/code_patches.txt")) {
++            bool known = false;
++            for (const auto& k : KartCodePatches::kPatches)
++                known = known || (k.build == build && k.offset == p.offset && k.old_word == p.old_word && k.new_word == p.new_word);
++            const size_t at = module_start + p.offset;
++            u32 word = 0;
++            if (known && at + 4 <= codeset.memory.size()) std::memcpy(&word, codeset.memory.data() + at, 4);
++            if (!known || word != p.old_word) {
++                LOG_CRITICAL(Loader, "code patch {} does not fit this game ({:x}): rebuild the game", p.name, p.offset);
++                continue;
++            }
++            std::memcpy(codeset.memory.data() + at, &p.new_word, 4);
++            LOG_INFO(Loader, "code patch {} at main+{:x}", p.name, p.offset);
++        }
++    }
 +    Core::KartHookTrace::NoteBuildId(name, nso_header.build_id.data());
 +    Core::KartHookTrace::NoteModule(system, name, load_base);
 +

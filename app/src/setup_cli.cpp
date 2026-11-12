@@ -17,10 +17,11 @@ int main(int argc, char** argv) {
         else if (a[i] == "--keys") in.keys = a[i + 1];
         else if (a[i] == "--firmware") in.firmware = a[i + 1];
         else if (a[i] == "--dlc") in.dlc << a[i + 1];
+        else if (a[i] == "--patch") in.patches << a[i + 1];
         else { std::fprintf(stderr, "unknown argument %s\n", qPrintable(a[i])); return 1; }
     }
     if (in.base.isEmpty() || in.update.isEmpty() || in.keys.isEmpty() || in.firmware.isEmpty()) {
-        std::fprintf(stderr, "usage: kartrecomp-setup --base <base.nsp> --update <update.nsp> --keys <prod.keys> --firmware <dir|zip> [--dlc <x.nsp>]...\n");
+        std::fprintf(stderr, "usage: kartrecomp-setup --base <base.nsp> --update <update.nsp> --keys <prod.keys> --firmware <dir|zip> [--dlc <x.nsp>]... [--patch split60]\n");
         return 1;
     }
     const auto result = RunSetupPipeline(in, DataLayout::Default(), BuilderPaths::Detect(), [](int permille, const QString& text) {

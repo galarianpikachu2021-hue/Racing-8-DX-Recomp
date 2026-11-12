@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "setup_page.h"
 
+#include <QCheckBox>
 #include <QDir>
 #include <QGuiApplication>
 #include <QThread>
@@ -44,6 +45,10 @@ SetupPage::SetupPage(QWidget* parent)
         if (!dir.isEmpty()) { firmware.edit->setText(dir); revalidate(); return; }
         pick(firmware, false, tr("Select the firmware zip"), tr("Zip files (*.zip)"));
     });
+    split60 = new QCheckBox(tr("60 fps split-screen in 3-4 player races (the game's own is 30 fps per player). Needs a fast CPU: when the PC can't keep 60, the race slows down. "
+                               "Changing it needs Rebuild game, which only rebuilds the part that changes."));
+    split60->setToolTip(tr("Built into the game when it is compiled (no JIT): every player's view is drawn every frame."));
+    top->addWidget(split60);
     auto* buttons = new QHBoxLayout;
     buildButton = new QPushButton(tr("Build game"));
     cancelButton = new QPushButton(tr("Cancel"));
@@ -71,6 +76,7 @@ SetupPage::SetupPage(QWidget* parent)
     keys.edit->setText(s.value("setup/keys").toString());
     firmware.edit->setText(s.value("setup/firmware").toString());
     dlc = s.value("setup/dlc").toStringList();
+    split60->setChecked(s.value("setup/split60", false).toBool());
     dlcRow.edit->setText(dlc.join("; "));
     QString missing;
     if (!paths.complete(&missing)) message->setText(missing);
@@ -124,7 +130,11 @@ void SetupPage::pickDlc() {
     revalidate();
 }
 
-SetupInputs SetupPage::inputs() const { return {base.edit->text(), update.edit->text(), keys.edit->text(), firmware.edit->text(), dlc}; }
+SetupInputs SetupPage::inputs() const {
+    SetupInputs in{base.edit->text(), update.edit->text(), keys.edit->text(), firmware.edit->text(), dlc, {}};
+    if (split60->isChecked()) in.patches << QStringLiteral("split60");
+    return in;
+}
 
 // Once a game file has been moved into the data folder, the original path is gone: follow the file to where it now lives.
 void SetupPage::adoptInstalled() {
@@ -239,4 +249,5 @@ void SetupPage::saveInputs() const {
     s.setValue("setup/keys", keys.edit->text());
     s.setValue("setup/firmware", firmware.edit->text());
     s.setValue("setup/dlc", dlc);
+    s.setValue("setup/split60", split60->isChecked());
 }

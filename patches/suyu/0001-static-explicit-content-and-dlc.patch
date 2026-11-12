@@ -1720,16 +1720,16 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..5d64901042
+index 0000000000..2e07fabb2d
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,430 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
 +// no NAND profile.
 +//
-+//   kartrecomp-export --base <base.nsp> --update <update-3.0.4.nsp> --keys <prod.keys> --out <dir> [--progress-fd <n>]
++//   kartrecomp-export --base <base.nsp> --update <update-3.0.4.nsp> --keys <prod.keys> --out <dir> [--progress-fd <n>] [--patch <name>]...
 +//
 +// Exit codes: 0 ok, 2 bad input (reason on stderr), 3 export failed. Progress lines "PROGRESS <0-100> <text>" go to --progress-fd.
 +// Nothing derived from the game is written anywhere but --out.
@@ -1749,6 +1749,7 @@ index 0000000000..5d64901042
 +#include <unistd.h>
 +#endif
 +
++#include "common/kart_code_patches.h"
 +#include "common/common_types.h"
 +#include "common/fs/path_util.h"
 +#include "common/lz4_compression.h"
@@ -1790,6 +1791,7 @@ index 0000000000..5d64901042
 +    std::vector<u8> text, rodata, data;
 +    u64 rodata_vaddr{};
 +    u64 data_vaddr{};
++    u64 build{}; ///< first 8 bytes of the NSO build ID
 +};
 +
 +u32 FindNsoEntryOffset(const std::vector<u8>& text) {
@@ -1915,6 +1917,7 @@ index 0000000000..5d64901042
 +    m.rodata = Segment(f, h, 1);
 +    m.data = Segment(f, h, 2);
 +    m.entry_vaddr = m.text_vaddr + FindNsoEntryOffset(m.text);
++    m.build = KartCodePatches::BuildPrefix(h.build_id.data());
 +    return true;
 +}
 +
@@ -1980,6 +1983,7 @@ index 0000000000..5d64901042
 +
 +int main(int argc, char** argv) {
 +    fs::path base, update, keys, out, info;
++    std::vector<std::string> patches; // --patch <name>: optional game changes (common/kart_code_patches.h)
 +    for (int i = 1; i < argc; ++i) {
 +        const std::string a = argv[i];
 +        const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string{}; };
@@ -1990,6 +1994,7 @@ index 0000000000..5d64901042
 +        else if (a == "--info") info = next();
 +        else if (a == "--progress-fd") g_progress_fd = std::atoi(next().c_str());
 +        else if (a == "--native-calls") suyu::recomp::g_native_calls = true;
++        else if (a == "--patch") patches.push_back(next());
 +        else return Fail(2, "unknown argument: " + a);
 +    }
 +    if (!info.empty()) {
@@ -2083,6 +2088,32 @@ index 0000000000..5d64901042
 +        if (LoadModule(f, m)) modules.push_back(std::move(m));
 +    }
 +    if (modules.empty()) return Fail(2, "the update's ExeFS holds no NSO modules");
++
++    // Optional game changes, made to the code before it is translated; the list goes beside the export for the engine.
++    {
++        std::ofstream list(out / "code_patches.txt", std::ios::trunc);
++        for (const std::string& want : patches) {
++            bool done = false;
++            for (auto& m : modules) {
++                if (m.name != "main") continue;
++                for (const auto& p : KartCodePatches::kPatches) {
++                    if (want != p.name || p.build != m.build) continue;
++                    const u64 at = p.offset - m.text_vaddr;
++                    u32 word = 0;
++                    if (at + 4 > m.text.size()) return Fail(2, "patch " + want + " is outside main");
++                    std::memcpy(&word, m.text.data() + at, 4);
++                    if (word != p.old_word) return Fail(2, "patch " + want + ": main is not the expected code (another update?)");
++                    std::memcpy(m.text.data() + at, &p.new_word, 4);
++                    char line[160];
++                    std::snprintf(line, sizeof line, "main %llx %08x %08x %s\n", static_cast<unsigned long long>(p.offset), p.old_word,
++                                  p.new_word, p.name);
++                    list << line;
++                    done = true;
++                }
++            }
++            if (!done) return Fail(2, "patch " + want + " is not available for this update");
++        }
++    }
 +
 +    u64 total_bytes = 0, done_bytes = 0;
 +    for (const auto& m : modules) total_bytes += m.text.size();
