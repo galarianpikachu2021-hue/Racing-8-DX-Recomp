@@ -129,3 +129,17 @@ The C library was cheap to begin with (the 300 k calls/s are mostly tiny copies)
 Lesson for the plan: replacing SDK functions one call at a time through the dispatcher hook is a way to *remove emulation*, not a
 speed-up; frame-time gains need fewer dispatches (codegen) or less work per access (memory model), as NATIVE_PERF.md found.
 Next native steps (nn::os sync/TLS, hid, fs) should be judged by what they remove (kernel, IPC, services, fibers), not by fps.
+
+## Phase 2, step 1: native controller reads (2026-11-12) - works, off by default
+
+`KARTRECOMP_NATIVE_HID=1` (`core/arm/recomp/native_hid.{h,cpp}`): `nn::hid::GetNpadStyleSet` and the five `GetNpadState` overloads
+(full key, handheld, Joy-Con dual/left/right) are answered straight from the controller objects (hid_core `EmulatedController`: SDL
+pads, keyboard, controller profiles, TAS, the overlay's input block), with the hid service's state layout, button masks and
+connection attributes (npad.cpp). The game no longer reads its buttons and sticks through the emulated hid service's shared memory.
+Checked: scripted 1P and 4P races (every player's input drives the menus and the race), 60 fps, same pictures as the emulated path.
+Still on the emulated service: motion (`GetSixAxisSensorStates`), touch, vibration output, and the service itself (it still runs and
+fills shared memory nobody reads). Next for hid: those three, then the hid service is not needed at run time.
+
+Direction (user, 2026-11-12): the goal is a true recomp (no emulation left), not speed. Steps are judged by what emulation they
+remove. For the OS primitives (`nn::os` locks, events, threads) the plan is a small native kernel at the system-call level rather
+than SDK hooks: the SDK's own code uses the same lock words and cannot be hooked, so both sides must go through one implementation.

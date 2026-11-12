@@ -741,10 +741,10 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..770f1aecf7 100644
+index 408daa6839..a66b9a4f1a 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,20 @@ add_library(core STATIC
+@@ -12,6 +12,22 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
@@ -753,6 +753,8 @@ index 408daa6839..770f1aecf7 100644
 +    arm/recomp/kart_hook_trace.cpp
 +    arm/recomp/kart_hook_trace.h
 +    arm/recomp/nvn_trace.cpp
++    arm/recomp/native_hid.cpp
++    arm/recomp/native_hid.h
 +    arm/recomp/native_libc.cpp
 +    arm/recomp/native_libc.h
 +    arm/recomp/sdk_trace.cpp
@@ -765,7 +767,7 @@ index 408daa6839..770f1aecf7 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +150,8 @@ add_library(core STATIC
+@@ -136,6 +152,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -774,7 +776,7 @@ index 408daa6839..770f1aecf7 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -1226,7 +1242,7 @@ else()
+@@ -1226,7 +1244,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -1738,6 +1740,200 @@ index 0000000000..11a6dabdf0
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base);
 +
 +} // namespace Core::KartHookTrace
+diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
+new file mode 100644
+index 0000000000..72bfb56740
+--- /dev/null
++++ b/src/core/arm/recomp/native_hid.cpp
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/arm/recomp/native_hid.h"
++
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <string>
++
++#include "common/logging/log.h"
++#include "core/arm/recomp/host_hooks.h"
++#include "core/arm/recomp/sdk_trace.h"
++#include "core/core.h"
++#include "core/memory.h"
++#include "hid_core/frontend/emulated_controller.h"
++#include "hid_core/hid_core.h"
++#include "hid_core/hid_types.h"
++
++namespace Core::NativeHid {
++namespace {
++
++using Core::HID::NpadButton;
++using Core::HID::NpadStyleIndex;
++
++/// nn::hid::NpadFullKeyState and its siblings (NpadHandheldState, NpadJoyDualState, ...): the hid service's NPadGenericState.
++struct NpadState {
++    s64 sampling_number;
++    u64 buttons;
++    s32 l_x, l_y, r_x, r_y;
++    u32 attributes; ///< bit 0 connected, bit 1 wired, bit 2 left Joy-Con connected, bit 3 left wired, bit 4/5 right
++    u32 reserved;
++};
++static_assert(sizeof(NpadState) == 0x28);
++
++/// nn::hid::NpadStyleTag bit for a controller type (hid_types.h NpadStyleTag).
++u32 StyleBit(NpadStyleIndex type) {
++    switch (type) {
++    case NpadStyleIndex::Fullkey: return 1u << 0;
++    case NpadStyleIndex::Handheld: return 1u << 1;
++    case NpadStyleIndex::JoyconDual: return 1u << 2;
++    case NpadStyleIndex::JoyconLeft: return 1u << 3;
++    case NpadStyleIndex::JoyconRight: return 1u << 4;
++    case NpadStyleIndex::GameCube: return 1u << 5;
++    default: return 0;
++    }
++}
++
++/// The controller object behind an npad id (Player1..8 = 0..7, Handheld = 0x20, Other = 0x10), or null.
++Core::HID::EmulatedController* Controller(Core::System& system, u32 id) {
++    if (id > 7 && id != 0x10 && id != 0x20) return nullptr;
++    return system.HIDCore().GetEmulatedController(static_cast<Core::HID::NpadIdType>(id));
++}
++
++/// The state the hid service would publish for this controller (npad.cpp RequestPadStateUpdate + OnUpdate), for a read of
++/// `wanted` (the style of the GetNpadState overload): zeroed with no attributes when the controller has another style.
++NpadState Read(Core::HID::EmulatedController* c, NpadStyleIndex wanted) {
++    NpadState s{};
++    // The service's sampling counter advances every update (about every 4 ms); a time-based count behaves the same for the game.
++    static const auto start = std::chrono::steady_clock::now();
++    s.sampling_number = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() / 4000;
++    if (!c || !c->IsConnected()) return s;
++    const NpadStyleIndex type = c->GetNpadStyleIndex();
++    if (type != wanted) return s;
++    const auto buttons = c->GetNpadButtons();
++    const auto sticks = c->GetSticks();
++    constexpr u64 right_mask = static_cast<u64>(NpadButton::A | NpadButton::B | NpadButton::X | NpadButton::Y | NpadButton::StickR |
++                                                NpadButton::R | NpadButton::ZR | NpadButton::Plus | NpadButton::StickRLeft |
++                                                NpadButton::StickRUp | NpadButton::StickRRight | NpadButton::StickRDown);
++    constexpr u64 left_mask = static_cast<u64>(NpadButton::Left | NpadButton::Up | NpadButton::Right | NpadButton::Down |
++                                               NpadButton::StickL | NpadButton::L | NpadButton::ZL | NpadButton::Minus |
++                                               NpadButton::StickLLeft | NpadButton::StickLUp | NpadButton::StickLRight |
++                                               NpadButton::StickLDown);
++    const u64 raw = static_cast<u64>(buttons.raw);
++    if (type != NpadStyleIndex::JoyconLeft) {
++        s.buttons |= raw & right_mask;
++        s.r_x = sticks.right.x;
++        s.r_y = sticks.right.y;
++    }
++    if (type != NpadStyleIndex::JoyconRight) {
++        s.buttons |= raw & left_mask;
++        s.l_x = sticks.left.x;
++        s.l_y = sticks.left.y;
++    }
++    if (type == NpadStyleIndex::JoyconLeft || type == NpadStyleIndex::JoyconDual) {
++        s.buttons |= raw & static_cast<u64>(NpadButton::LeftSL | NpadButton::LeftSR);
++    }
++    if (type == NpadStyleIndex::JoyconRight || type == NpadStyleIndex::JoyconDual) {
++        s.buttons |= raw & static_cast<u64>(NpadButton::RightSL | NpadButton::RightSR);
++    }
++    // Connection attributes as the service sets them per style (npad.cpp OnUpdate).
++    switch (type) {
++    case NpadStyleIndex::Fullkey: s.attributes = 0b11; break;           // connected, wired
++    case NpadStyleIndex::Handheld: s.attributes = 0b11'1111; break;     // connected, wired, both Joy-Cons connected and wired
++    case NpadStyleIndex::JoyconDual: s.attributes = 0b01'0101; break;   // connected, left and right connected
++    case NpadStyleIndex::JoyconLeft: s.attributes = 0b00'0101; break;   // connected, left connected
++    case NpadStyleIndex::JoyconRight: s.attributes = 0b01'0001; break;  // connected, right connected
++    default: s.attributes = 0b1; break;
++    }
++    return s;
++}
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_HID");
++        return v && *v == '1';
++    }();
++    return on;
++}
++
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
++    if (!Enabled() || name != "sdk") return;
++    std::map<std::string, u64> exports;
++    for (const auto& [fn, offset] : SdkTrace::ExportedFunctions(image)) exports.emplace(fn, load_base + offset);
++    Core::System* sys = &system;
++    int installed = 0;
++
++    if (const auto it = exports.find("_ZN2nn3hid15GetNpadStyleSetERKj"); it != exports.end()) {
++        RecompHooks::Install(it->second, [sys](RecompHooks::HookContext& ctx) {
++            auto& mem = sys->ApplicationMemory();
++            const u32 id = mem.Read32(ctx.x[0]);
++            const auto* c = Controller(*sys, id);
++            ctx.x[0] = c && c->IsConnected() ? StyleBit(c->GetNpadStyleIndex()) : 0;
++            ctx.pc = ctx.x[30];
++            return true;
++        });
++        ++installed;
++    }
++    const std::pair<const char*, NpadStyleIndex> reads[] = {
++        {"_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", NpadStyleIndex::Fullkey},
++        {"_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", NpadStyleIndex::Handheld},
++        {"_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", NpadStyleIndex::JoyconDual},
++        {"_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", NpadStyleIndex::JoyconLeft},
++        {"_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", NpadStyleIndex::JoyconRight},
++    };
++    for (const auto& [symbol, style] : reads) {
++        const auto it = exports.find(symbol);
++        if (it == exports.end()) continue;
++        RecompHooks::Install(it->second, [sys, style](RecompHooks::HookContext& ctx) {
++            auto& mem = sys->ApplicationMemory();
++            const u64 out = ctx.x[0];
++            const u32 id = mem.Read32(ctx.x[1]);
++            const NpadState s = Read(Controller(*sys, id), style);
++            mem.WriteBlock(out, &s, sizeof(s));
++            ctx.pc = ctx.x[30];
++            return true;
++        });
++        ++installed;
++    }
++    LOG_INFO(Core_ARM, "native hid: {} nn::hid read functions answered from the controller objects (KARTRECOMP_NATIVE_HID=1)", installed);
++}
++
++} // namespace Core::NativeHid
+diff --git a/src/core/arm/recomp/native_hid.h b/src/core/arm/recomp/native_hid.h
+new file mode 100644
+index 0000000000..bf85c754dc
+--- /dev/null
++++ b/src/core/arm/recomp/native_hid.h
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native controller input for the game (native-engine plan, phase 2; docs/NATIVE_ENGINE.md).
++//
++// The game reads its controllers through nn::hid::GetNpadStyleSet and nn::hid::GetNpadState (once or twice a frame per player). On
++// the console those read the hid service's shared memory, which the emulated hid service fills from our controller objects
++// (hid_core EmulatedController: SDL pads, keyboard, controller profiles, TAS, the overlay's input block). With
++// KARTRECOMP_NATIVE_HID=1 the two calls are answered from those controller objects directly, with the same state layout and button
++// masks as the hid service, so the game no longer reads input through the emulated service.
++#pragma once
++
++#include <span>
++#include <string_view>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::NativeHid {
++
++bool Enabled();
++
++/// Called by the NSO loader with each module's image before it is mapped; hooks the nn::hid read functions of "sdk".
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
++
++} // namespace Core::NativeHid
 diff --git a/src/core/arm/recomp/native_libc.cpp b/src/core/arm/recomp/native_libc.cpp
 new file mode 100644
 index 0000000000..4d2941f78a
@@ -3435,7 +3631,7 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..117ab22786 100644
+index 3cc84acfdf..74a38ac4f7 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -6,9 +6,11 @@
@@ -3450,18 +3646,19 @@ index 3cc84acfdf..117ab22786 100644
  #include "common/common_funcs.h"
  #include "common/hex_util.h"
  #include "common/logging.h"
-@@ -23,6 +25,10 @@
+@@ -23,6 +25,11 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/arm/recomp/native_hid.h"
 +#include "core/arm/recomp/native_libc.h"
 +#include "core/arm/recomp/sdk_trace.h"
 +#include "core/arm/recomp/nvn_trace.h"
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +223,46 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +224,52 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
@@ -3473,6 +3670,12 @@ index 3cc84acfdf..117ab22786 100644
 +
 +    // kart-recomp: native C library for the game's calls into the sdk (KARTRECOMP_NATIVE_LIBC=1).
 +    Core::NativeLibc::NoteModuleImage(
++        system,
++        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
++        load_base + module_start, name);
++
++    // kart-recomp: native controller input for the game's nn::hid reads (KARTRECOMP_NATIVE_HID=1).
++    Core::NativeHid::NoteModuleImage(
 +        system,
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
