@@ -1,8 +1,13 @@
 # Windows session: build and test v0.2.4 on this PC
 
+> **v0.2.4 is released (2026-11-12)** with your Windows zip (SHA-256 8a54f640...) and the Linux AppImage. Your seven `windows-port`
+> commits are merged into `main` (push descriptors were also checked on Linux/AMD: correct picture, render thread lighter, 60 fps in
+> 1P and 4P). Next Linux work: the native-engine plan (replacing the emulated OS layer subsystem by subsystem, `docs/NATIVE_ENGINE.md`
+> once written). The 4-player Windows numbers (27-31 fps, render thread) are noted as a known issue.
+
 You are the Claude Code session on the maintainer's **Windows PC**. The Linux session pushed the work done since v0.2.3 to `main`.
-Your job: **build it on Windows, make the Windows-only parts work, test it, and report.** This is not a release yet: no tag, no
-GitHub release, no Actions run (minutes may be billed).
+Your job: **build it on Windows, make the Windows-only parts work, test it, and report.** No tag, GitHub release or Actions run
+without the maintainer asking (minutes may be billed).
 
 ## Hard rules
 
