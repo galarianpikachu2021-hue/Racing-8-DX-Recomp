@@ -2151,10 +2151,10 @@ index 0000000000..2e07fabb2d
 +}
 diff --git a/src/suyu_cmd/kr_platform.h b/src/suyu_cmd/kr_platform.h
 new file mode 100644
-index 0000000000..06f5ebe6e5
+index 0000000000..b92bf4189b
 --- /dev/null
 +++ b/src/suyu_cmd/kr_platform.h
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,233 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Small portability layer for the Racing 8 DX engine: plugin loading, low-priority threads, restarting the process.
 +#pragma once
@@ -2163,6 +2163,7 @@ index 0000000000..06f5ebe6e5
 +#include <cstdlib>
 +#include <filesystem>
 +#include <string>
++#include <string_view>
 +#include <vector>
 +
 +#ifdef _WIN32
@@ -2304,6 +2305,18 @@ index 0000000000..06f5ebe6e5
 +    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 +#else
 +    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
++#endif
++}
++
++// The render and frame-generation present threads, on Windows: the guest CPU threads run at TIME_CRITICAL and the engine has many
++// normal-priority helper threads, and Windows schedules strictly by priority, so on a PC with few spare cores the render thread
++// waited behind them (4 cores, no hyper-threading: on-time frames 65-70% -> 77%, record time 11 -> 8 ms with this).
++// Linux's scheduler shares the CPU fairly and needs no change. KARTRECOMP_RENDER_PRIORITY=0 keeps the old normal priority.
++inline void CurrentThreadRenderPriority() {
++#ifdef _WIN32
++    const char* v = std::getenv("KARTRECOMP_RENDER_PRIORITY");
++    if (v && std::string_view{v} == "0") return;
++    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 +#endif
 +}
 +
@@ -15798,10 +15811,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..f9726b7e09
+index 0000000000..05e078882c
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8267 @@
+@@ -0,0 +1,8269 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -16420,6 +16433,7 @@ index 0000000000..f9726b7e09
 +        }
 +        thread = std::thread([this] {
 +            KrPlatform::SetCurrentThreadName("NativeRender");
++            KrPlatform::CurrentThreadRenderPriority();
 +            // KARTRECOMP_PIN_RENDER=<cpu> keeps the render thread off the guest cores' CPUs.
 +            if (const char* cpu = std::getenv("KARTRECOMP_PIN_RENDER")) {
 +                KrPlatform::PinCurrentThreadToCpu(std::atoi(cpu));
@@ -22480,6 +22494,7 @@ index 0000000000..f9726b7e09
 +
 +    void FgPresentThread() {
 +        KrPlatform::SetCurrentThreadName("FrameGenPresent");
++        KrPlatform::CurrentThreadRenderPriority(); // wakes on time to present the generated frame
 +        std::unique_lock lk{fg_mx};
 +        while (true) {
 +            fg_cv.wait(lk, [&] { return !fg_queue.empty() || fg_stop; });
