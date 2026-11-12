@@ -15811,10 +15811,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..05e078882c
+index 0000000000..4452473804
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8269 @@
+@@ -0,0 +1,8299 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -15924,6 +15924,7 @@ index 0000000000..05e078882c
 +struct Vk {
 +    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
 +    PFN_vkCreateInstance vkCreateInstance = nullptr;
++    PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR = nullptr; ///< VK_KHR_push_descriptor, when the device has it
 +    KR_VK_INSTANCE_FNS(KR_DECLARE)
 +    KR_VK_DEVICE_FNS(KR_DECLARE)
 +};
@@ -16364,6 +16365,7 @@ index 0000000000..05e078882c
 +    std::vector<DescriptorRef> descriptors;
 +    VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
 +    VkPipelineLayout layout = VK_NULL_HANDLE;
++    bool push = false; ///< kart-recomp: set_layout is a push-descriptor layout (descriptors written into the command buffer per draw)
 +    bool unsupported_resources = false;
 +    /// Built at load time (nvnProgramSetShaders) with no textures bound, so every
 +    /// texture the translator asked about was assumed 2D. Checked at first use.
@@ -16944,6 +16946,20 @@ index 0000000000..05e078882c
 +        if (dynamic_rendering_ext) {
 +            vk.vkCmdBeginRendering = reinterpret_cast<PFN_vkCmdBeginRendering>(vk.vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR"));
 +            vk.vkCmdEndRendering = reinterpret_cast<PFN_vkCmdEndRendering>(vk.vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR"));
++        }
++        // kart-recomp: push descriptors for the per-draw descriptor set (no allocation, key string or hash lookup per draw; the sets were
++        // almost never reused because every draw's uniform data sits at a new ring offset). KARTRECOMP_PUSH_DESC=0 turns it off.
++        if (std::any_of(dev_exts.begin(), dev_exts.end(), [](const char* e) { return std::strcmp(e, "VK_KHR_push_descriptor") == 0; })) {
++            const char* env = std::getenv("KARTRECOMP_PUSH_DESC");
++            vk.vkCmdPushDescriptorSetKHR = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(vk.vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
++            if (vk.vkCmdPushDescriptorSetKHR && vk.vkGetPhysicalDeviceProperties2 && !(env && env[0] == '0')) {
++                VkPhysicalDevicePushDescriptorPropertiesKHR pdp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
++                VkPhysicalDeviceProperties2 pp2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
++                pp2.pNext = &pdp;
++                vk.vkGetPhysicalDeviceProperties2(physical, &pp2);
++                push_desc_max = pdp.maxPushDescriptors;
++            }
++            LOG_INFO(Frontend, "nvn-host vulkan: push descriptors for draws: {} (limit {} descriptors)", push_desc_max ? "on" : "off", push_desc_max);
 +        }
 +        vk.vkGetDeviceQueue(device, family, 0, &queue_handle);
 +        VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -18524,6 +18540,14 @@ index 0000000000..05e078882c
 +        VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 +        dslci.bindingCount = static_cast<u32>(bindings.size());
 +        dslci.pBindings = bindings.data();
++        {
++            u32 total = 0;
++            for (const auto& b : bindings) total += b.descriptorCount;
++            if (push_desc_max && total <= push_desc_max) {
++                dslci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
++                entry.push = true;
++            }
++        }
 +        vk.vkCreateDescriptorSetLayout(device, &dslci, nullptr, &entry.set_layout);
 +        const VkPushConstantRange push{VK_SHADER_STAGE_ALL_GRAPHICS, 0, kPushSize};
 +        VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -19432,7 +19456,7 @@ index 0000000000..05e078882c
 +            }
 +            writes.push_back(w);
 +        }
-+        {
++        if (!prog->push) {
 +            std::string& key = draw_descriptor_key;
 +            key.clear();
 +            const auto put = [&key](const void* p, size_t n) { key.append(static_cast<const char*>(p), n); };
@@ -19479,8 +19503,13 @@ index 0000000000..05e078882c
 +        }
 +
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-+        vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, 1, &set, 0,
-+                                   nullptr);
++        if (prog->push) {
++            vk.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, static_cast<u32>(writes.size()),
++                                         writes.data());
++        } else {
++            vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, 1, &set, 0,
++                                       nullptr);
++        }
 +        std::array<u8, kPushSize> push{};
 +        // Resolution scaling (suyu's rescaling pass in the shaders): which textures
 +        // are scaled images, and the scale of the pass being rendered.
@@ -24046,6 +24075,7 @@ index 0000000000..05e078882c
 +    std::atomic<u64> throttle_ns{0};
 +    u64 commands_seen = 0;
 +    u64 ubo_align = 256, ssbo_align = 256;
++    u32 push_desc_max = 0; ///< maxPushDescriptors when push descriptors are used for draws, else 0
 +    VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
 +    VkSampler sampler = VK_NULL_HANDLE, shadow_sampler = VK_NULL_HANDLE;
 +    Image dummy_2d, dummy_2d_array, dummy_cube, dummy_cube_array, dummy_3d, dummy_depth;

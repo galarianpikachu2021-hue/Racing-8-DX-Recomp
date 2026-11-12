@@ -139,6 +139,20 @@ ABI change. Everything else in steps 1-2 compiled on MSVC as it was; ctest 12/12
 - The Controller applet fallback (`DefaultControllerApplet`) connects only `min_players` pads (2 for the multiplayer menu), so players
   3 and 4 only exist when the top menu's player count (Down, Right, Right) is raised, as in the 2026-10-22 note.
 
+**4-player 60 fps on Windows, what I found (maintainer asked for the Windows side of split60):** the split60 code patch works (loaded,
+all four views drawn every frame) but this PC (i9-12900K) holds only about 31-36 fps in a 4-player race, so the race runs slow. Profiling
+(sampling the threads): the three CPUCore threads sit at 62-82% and CPUCore_0 spends about 42% of its samples in `recompiled_image.dll`
+(the game's own code, with one spin loop at one address taking about 23%) and 40% in ntdll waits; the engine itself is only about 11%.
+NativeRender is at 60-70% (record 14-19 ms of a 30 ms frame). So the frame time is the game's code running twice the 3D work per frame,
+not the renderer; the renderer cannot be made fast enough to matter alone. What I did on the Windows side anyway (patch 0001,
+`vk_shadow_backend.cpp`): **push descriptors for draws** (VK_KHR_push_descriptor, already enabled on the device but unused). The per-draw
+descriptor set was almost never reused (`descriptor set reuse 0` in the log: every draw's uniform data sits at a new ring offset), so each
+draw built a key string, missed the hash map, allocated a set and called vkUpdateDescriptorSets. Programs with at most
+`maxPushDescriptors` (32 on NVIDIA) descriptors now push their descriptors into the command buffer instead; others keep the old path.
+1P race: record 7.9 -> 7.1 ms, pacing unchanged (79% on time); 4P record 14-19 -> 12-14 ms; 4P fps unchanged (31-36). Screenshots of 1P and
+4P races are correct, no failed pipelines. `KARTRECOMP_PUSH_DESC=0` turns it off (the log says "push descriptors for draws: on/off").
+Not tried on AMD or Intel GPUs. If you can make the recompiled code's hot spin in the 4P frame go away, that is where 60 fps is.
+
 **Not tested:** HDR (SDR monitor); an AMD GPU; the Controllers tab and F10 Controls (needs a human at the pad); Miis tab editing.
 
 For your information: the engine finds `plugins\` relative to its working directory. The launcher sets that directory correctly; a
