@@ -489,6 +489,7 @@ void MainWindow::reloadPackage() {
     const QString problems = package.problems();
     status_label->setText(problems.isEmpty() ? tr("Ready.") : problems);
     play_button->setEnabled(problems.isEmpty() && game.state() == QProcess::NotRunning);
+    ModAddon::SetConfigFile(package.configFile()); // the disabled-mods list lives in the game's config, wherever this layout keeps it
     loadSettings();
     refreshDlc();
     refreshControllers();

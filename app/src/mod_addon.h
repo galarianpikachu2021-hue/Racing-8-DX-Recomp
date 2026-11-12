@@ -58,6 +58,9 @@ bool SetModEnabled(const QString& root, const QString& name, bool enabled, QStri
 bool RemoveMod(const QString& root, const QString& name, QString* error);
 
 /// Enabled mod folders (CTGP DX included, the merged-text mod excluded) in the order the game loads them: the first wins a conflict.
+/// The game's config file (sdl2-config.ini), which holds the disabled-mods list. Without it: <root>/user/config/sdl2-config.ini
+/// (a game folder from the old layout). The installed layout (AppImage, Windows zip) keeps the config elsewhere: set it.
+void SetConfigFile(const QString& path);
 QStringList EnabledModDirs(const QString& root);
 /// True when two enabled mods replace the same message file, so a merged copy is needed.
 bool NeedsTextMerge(const QString& root);

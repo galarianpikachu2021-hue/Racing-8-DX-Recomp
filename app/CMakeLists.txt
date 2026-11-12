@@ -9,7 +9,8 @@ qt_standard_project_setup()
 
 # The build pipeline (unit splitting, compile scheduling), shared by the launcher and the tests.
 add_library(kartrecomp_build STATIC src/unit_split.cpp src/unit_split.h src/build_runner.cpp src/build_runner.h
-    src/nsp_info.cpp src/nsp_info.h src/keys_check.cpp src/keys_check.h src/setup_validate.cpp src/setup_validate.h src/setup_paths.cpp src/setup_paths.h src/zip_archive.cpp src/zip_archive.h src/verify_build.cpp src/verify_build.h src/game_package.cpp src/game_package.h src/ini_file.cpp src/ini_file.h src/setup_pipeline.cpp src/setup_pipeline.h src/mii_db.cpp src/mii_db.h src/menu_merge.cpp src/menu_merge.h)
+    src/nsp_info.cpp src/nsp_info.h src/keys_check.cpp src/keys_check.h src/setup_validate.cpp src/setup_validate.h src/setup_paths.cpp src/setup_paths.h src/zip_archive.cpp src/zip_archive.h src/verify_build.cpp src/verify_build.h src/game_package.cpp src/game_package.h src/ini_file.cpp src/ini_file.h src/setup_pipeline.cpp src/setup_pipeline.h src/mii_db.cpp src/mii_db.h src/menu_merge.cpp src/menu_merge.h
+    src/mod_addon.cpp src/mod_addon.h src/text_merge.cpp src/text_merge.h src/ctgp_convert.cpp src/ctgp_convert.h)
 find_package(ZLIB REQUIRED)
 target_link_libraries(kartrecomp_build PUBLIC Qt6::Core ZLIB::ZLIB)
 target_include_directories(kartrecomp_build PUBLIC src)
@@ -26,14 +27,8 @@ qt_add_executable(kartrecomp
     src/main_window.h
     src/setup_page.cpp
     src/setup_page.h
-    src/ctgp_convert.cpp
-    src/ctgp_convert.h
-    src/mod_addon.cpp
     src/mii_editor.cpp
     src/mii_editor.h
-    src/text_merge.cpp
-    src/text_merge.h
-    src/mod_addon.h
     src/overlay_settings.cpp
     src/overlay_settings.h
     src/zip_archive.h

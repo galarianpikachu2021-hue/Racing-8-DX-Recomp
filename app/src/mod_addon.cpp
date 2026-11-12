@@ -31,7 +31,10 @@ QString EnabledDir(const QString& root) { return QDir(root).filePath(QStringLite
 const QString kDisabledSection = QStringLiteral("DisabledAddOns");
 const QString kTitleDecimal = QStringLiteral("72080821221203968"); // 0x0100152000022000
 
-QString ConfigPath(const QString& root) { return QDir(root).filePath(QStringLiteral("user/config/sdl2-config.ini")); }
+QString g_config_file; // SetConfigFile: the installed layout (AppImage, Windows zip) keeps the config outside the game folder
+QString ConfigPath(const QString& root) {
+    return g_config_file.isEmpty() ? QDir(root).filePath(QStringLiteral("user/config/sdl2-config.ini")) : g_config_file;
+}
 
 int FindEntry(const IniFile& ini) {
     const int size = ini.intValue(kDisabledSection, QStringLiteral("size"), 0);
@@ -317,6 +320,8 @@ bool ImportModZip(const QString& zip_path, const QString& root, QString* error, 
     return true;
 }
 
+void SetConfigFile(const QString& path) { g_config_file = path; }
+
 QStringList EnabledModDirs(const QString& root) {
     const QDir dir(TitleModsDir(root));
     const QStringList disabled = ReadDisabled(root);
@@ -424,8 +429,14 @@ bool NeedsMenuMerge(const QString& root) {
 
 bool UpdateMenuMerge(const QString& root, const QString& vanilla_ui_dir, const QString& baseline, QString* error, QStringList* report) {
     const QString out = MenuMergedDir(root);
+    if (!MenuMergeWanted(root)) {
+        QDir(out).removeRecursively(); // nothing to merge any more: a merged copy left over is stale
+        return true;
+    }
+    // Called without the game's own menus = clean-up only (syncTextMerge after every change): a merge that is still wanted stays.
+    // (It used to be deleted here, right after it was made, so 4.0.1 loaded the mods' 3.0.x menus and froze at the flag screen.)
+    if (vanilla_ui_dir.isEmpty()) return true;
     QDir(out).removeRecursively();
-    if (!MenuMergeWanted(root)) return true;
     MenuMerge::Baseline base;
     if (!base.load(baseline)) {
         if (error) *error = QStringLiteral("The menu merge data (%1) is missing.").arg(baseline);
