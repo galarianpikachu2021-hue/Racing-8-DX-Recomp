@@ -113,7 +113,7 @@ index 88bf023008..7044ca660e 100644
              eden_path_cache = eden_path / CACHE_DIR;
              eden_path_config = eden_path / CONFIG_DIR;
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index 0ae108d9c1..3867111256 100644
+index 0ae108d9c1..5017e4a72d 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -50,6 +50,7 @@
@@ -124,7 +124,66 @@ index 0ae108d9c1..3867111256 100644
  #include <mutex>
  #include <random>
  
-@@ -516,6 +517,17 @@ static int shm_open_anon(int flags, mode_t mode) {
+@@ -228,6 +229,16 @@ public:
+         UNREACHABLE();
+     }
+ 
++    /// kart-recomp (Windows): releases whole pages of the backing section instead of writing zeros into them. On Windows about
++    /// 75% of the game's resident guest memory (2.4 of 3.2 GB in a 4.0.1 race) was pages the kernel had zero-filled and the
++    /// game never wrote; writing those zeros made each page resident. A discarded section page reads back as zeros through
++    /// every view (checked once at start, see DiscardReadsZero). False when the discard is not available or not used.
++    bool DiscardZeroPages(size_t offset, size_t length) {
++        static const auto discard = DiscardFunction();
++        if (!discard) return false;
++        return discard(backing_base + offset, length) == ERROR_SUCCESS;
++    }
++
+     const size_t backing_size; ///< Size of the backing memory in bytes
+     const size_t virtual_size; ///< Size of the virtual address placeholder in bytes
+ 
+@@ -235,6 +246,41 @@ public:
+     u8* virtual_base{};
+ 
+ private:
++    using DiscardFn = DWORD(WINAPI*)(PVOID, SIZE_T);
++
++    /// DiscardVirtualMemory (Windows 8.1+) if a self-test shows that a discarded page of a pagefile-backed section reads back
++    /// as zeros through two views of it (the backing view and the fastmem view share the pages). Otherwise null: zeros are
++    /// written as before. KARTRECOMP_DISCARD_ZERO=0 turns it off.
++    static DiscardFn DiscardFunction() {
++        if (const char* v = std::getenv("KARTRECOMP_DISCARD_ZERO"); v && v[0] == '0') {
++            LOG_INFO(HW_Memory, "Zero-filled guest pages are written (KARTRECOMP_DISCARD_ZERO=0)");
++            return nullptr;
++        }
++        const auto fn = reinterpret_cast<DiscardFn>(
++            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "DiscardVirtualMemory")));
++        if (!fn) return nullptr;
++        constexpr size_t test_size = 64 * 1024;
++        bool ok = false;
++        if (HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(test_size), nullptr)) {
++            auto* a = static_cast<volatile u8*>(MapViewOfFile(m, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, test_size));
++            auto* b = static_cast<volatile u8*>(MapViewOfFile(m, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, test_size));
++            if (a && b) {
++                for (size_t i = 0; i < test_size; i += 256) a[i] = 0x5A;
++                u8 seen = 0;
++                for (size_t i = 0; i < test_size; i += 4096) seen |= b[i];
++                if (seen == 0x5A && fn(const_cast<u8*>(a), test_size) == ERROR_SUCCESS) {
++                    ok = true;
++                    for (size_t i = 0; i < test_size && ok; i += 256) ok = a[i] == 0 && b[i] == 0;
++                }
++            }
++            if (a) UnmapViewOfFile(const_cast<u8*>(a));
++            if (b) UnmapViewOfFile(const_cast<u8*>(b));
++            CloseHandle(m);
++        }
++        LOG_INFO(HW_Memory, "Zero-filled guest pages are {}", ok ? "released (DiscardVirtualMemory)" : "written (discard self-test failed)");
++        return ok ? fn : nullptr;
++    }
++
+     /// Release all resources in the object
+     void Release() {
+         if (!placeholders.empty()) {
+@@ -516,6 +562,17 @@ static int shm_open_anon(int flags, mode_t mode) {
  
  class HostMemory::Impl {
  public:
@@ -142,7 +201,7 @@ index 0ae108d9c1..3867111256 100644
      explicit Impl(size_t backing_size_, size_t virtual_size_)
          : backing_size{backing_size_}
          , virtual_size{virtual_size_}
-@@ -573,6 +585,19 @@ public:
+@@ -573,6 +630,19 @@ public:
              LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
              return false;
          }
@@ -162,7 +221,7 @@ index 0ae108d9c1..3867111256 100644
  
          // Virtual memory initialization
          virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
-@@ -784,6 +809,19 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
+@@ -784,6 +854,30 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
  }
  
  void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
@@ -173,6 +232,17 @@ index 0ae108d9c1..3867111256 100644
 +        const size_t begin = Common::AlignUp(physical_offset, PageAlignment);
 +        const size_t end = Common::AlignDown(physical_offset + length, PageAlignment);
 +        if (end > begin && impl->PunchHole(begin, end - begin)) {
++            std::memset(backing_base + physical_offset, 0, begin - physical_offset);
++            std::memset(backing_base + end, 0, physical_offset + length - end);
++            return;
++        }
++    }
++#elif defined(_WIN32)
++    // kart-recomp: the same on Windows, with DiscardVirtualMemory on the backing section (see Impl::DiscardZeroPages).
++    if (fill_value == 0 && impl && length >= PageAlignment) {
++        const size_t begin = Common::AlignUp(physical_offset, PageAlignment);
++        const size_t end = Common::AlignDown(physical_offset + length, PageAlignment);
++        if (end > begin && impl->DiscardZeroPages(begin, end - begin)) {
 +            std::memset(backing_base + physical_offset, 0, begin - physical_offset);
 +            std::memset(backing_base + end, 0, physical_offset + length - end);
 +            return;
@@ -5371,3 +5441,112 @@ index 9c31896bde..6e59ab40b1 100644
          const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
          if (!shader_info) {
              const u32 start_address{shader_config.offset};
+diff --git a/src/common/virtual_buffer.cpp b/src/common/virtual_buffer.cpp
+index af26bfff5b..6a098a7bbd 100644
+--- a/src/common/virtual_buffer.cpp
++++ b/src/common/virtual_buffer.cpp
+@@ -6,6 +6,12 @@
+ 
+ #ifdef _WIN32
+ #include <windows.h>
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstdlib>
++#include <mutex>
+ #else
+ #include <sys/mman.h>
+ #endif
+@@ -15,9 +21,82 @@
+ 
+ namespace Common {
+ 
++#ifdef _WIN32
++namespace {
++// kart-recomp (Windows): large buffers are reserved and committed page by page on first touch, like an mmap on Linux. The guest page
++// table alone is 4 GB (39-bit address space), of which a race touches about 25 MB; committing it all up front charged 4 GB against
++// the system's commit limit (RAM + page file), which an 8 GB PC with a small page file can run out of. A vectored exception handler
++// commits 64 KB around a first access inside a registered range and resumes; anything else passes on. KARTRECOMP_LAZY_COMMIT=0 off.
++constexpr std::size_t kLazyMinimum = std::size_t{256} << 20;
++constexpr std::uintptr_t kCommitChunk = 0x10000;
++struct LazyRange {
++    std::atomic<std::uintptr_t> begin{0};
++    std::atomic<std::uintptr_t> end{0};
++};
++std::array<LazyRange, 16> lazy_ranges;
++std::mutex lazy_mutex;
++
++LONG CALLBACK CommitOnFirstTouch(EXCEPTION_POINTERS* info) {
++    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
++    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || rec->NumberParameters < 2) {
++        return EXCEPTION_CONTINUE_SEARCH;
++    }
++    const auto addr = static_cast<std::uintptr_t>(rec->ExceptionInformation[1]);
++    for (const LazyRange& r : lazy_ranges) {
++        const std::uintptr_t begin = r.begin.load(std::memory_order_acquire);
++        const std::uintptr_t end = r.end.load(std::memory_order_acquire);
++        if (begin != 0 && addr >= begin && addr < end) {
++            const std::uintptr_t chunk = std::max(begin, addr & ~(kCommitChunk - 1));
++            const std::size_t length = static_cast<std::size_t>(std::min(end, chunk + kCommitChunk) - chunk);
++            return VirtualAlloc(reinterpret_cast<void*>(chunk), length, MEM_COMMIT, PAGE_READWRITE) ? EXCEPTION_CONTINUE_EXECUTION
++                                                                                                       : EXCEPTION_CONTINUE_SEARCH;
++        }
++    }
++    return EXCEPTION_CONTINUE_SEARCH;
++}
++
++bool LazyCommitEnabled() {
++    static const bool enabled = [] {
++        const char* v = std::getenv("KARTRECOMP_LAZY_COMMIT");
++        return !(v && v[0] == '0');
++    }();
++    return enabled;
++}
++
++/// Reserves `size` bytes to be committed on first touch; null when no range slot is free (the caller commits everything instead).
++void* ReserveLazy(std::size_t size) {
++    std::scoped_lock lock{lazy_mutex};
++    static const bool installed = AddVectoredExceptionHandler(1, CommitOnFirstTouch) != nullptr;
++    if (!installed) return nullptr;
++    for (LazyRange& r : lazy_ranges) {
++        if (r.begin.load(std::memory_order_relaxed) != 0) continue;
++        void* base = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_READWRITE);
++        if (!base) return nullptr;
++        r.end.store(reinterpret_cast<std::uintptr_t>(base) + size, std::memory_order_release);
++        r.begin.store(reinterpret_cast<std::uintptr_t>(base), std::memory_order_release);
++        return base;
++    }
++    return nullptr;
++}
++
++void ForgetLazy(void* base) {
++    std::scoped_lock lock{lazy_mutex};
++    for (LazyRange& r : lazy_ranges) {
++        if (r.begin.load(std::memory_order_relaxed) == reinterpret_cast<std::uintptr_t>(base)) {
++            r.begin.store(0, std::memory_order_release);
++            r.end.store(0, std::memory_order_release);
++        }
++    }
++}
++} // namespace
++#endif
++
+ void* AllocateMemoryPages(std::size_t size) noexcept {
+ #ifdef _WIN32
+-    void* base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++    void* base = (size >= kLazyMinimum && LazyCommitEnabled()) ? ReserveLazy(size) : nullptr;
++    if (!base) {
++        base = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
++    }
+ #else
+     void* base = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     if (base == MAP_FAILED)
+@@ -33,6 +112,7 @@ void FreeMemoryPages(void* base, [[maybe_unused]] std::size_t size) noexcept {
+     if (!base)
+         return;
+ #ifdef _WIN32
++    ForgetLazy(base);
+     ASSERT(VirtualFree(base, 0, MEM_RELEASE));
+ #else
+     ASSERT(munmap(base, size) == 0);
