@@ -24,7 +24,7 @@ if (Test-Path "$Engine\mimalloc-LICENSE.txt") { Copy-Item "$Engine\mimalloc-LICE
 Get-ChildItem $Engine -Filter *.dll | ForEach-Object { Copy-Item $_.FullName "$Out\engine"; Copy-Item $_.FullName "$Out\tools" }
 if ($Plugins -and (Test-Path $Plugins)) { Copy-Item "$Plugins\*" "$Out\engine\plugins" -Recurse }
 Copy-Item $Toolchain "$Out\toolchain" -Recurse
-Get-ChildItem "$repo\data" -Directory -Filter "mk8d-*" | ForEach-Object { New-Item -ItemType Directory -Force -Path "$Out\data\$($_.Name)" | Out-Null; Copy-Item "$($_.FullName)\hot_blocks.txt" "$Out\data\$($_.Name)\" }
+Get-ChildItem "$repo\data" -Directory -Filter "mk8d-*" | ForEach-Object { New-Item -ItemType Directory -Force -Path "$Out\data\$($_.Name)" | Out-Null; Copy-Item "$($_.FullName)\hot_blocks.txt" "$Out\data\$($_.Name)\"; if (Test-Path "$($_.FullName)\ui_cmn_hashes.txt") { Copy-Item "$($_.FullName)\ui_cmn_hashes.txt" "$Out\data\$($_.Name)\" } }  # ui_cmn_hashes.txt: the launcher's menu-mod merge for 4.0.1 reads it beside the hot list
 foreach ($f in 'LEGAL.md', 'LICENSE') { if (Test-Path "$repo\$f") { Copy-Item "$repo\$f" $Out } }
 Copy-Item "$repo\packaging\windows\README-WINDOWS.txt", "$repo\packaging\windows\Collect-Logs.cmd", "$repo\packaging\windows\Diagnose-System.ps1" $Out
 Write-Host "assembled $Out"
