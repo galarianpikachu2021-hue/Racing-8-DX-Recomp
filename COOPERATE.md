@@ -1,4 +1,4 @@
-# Windows session: build and test the post-0.2.3 changes on this PC
+# Windows session: build and test v0.2.4 on this PC
 
 You are the Claude Code session on the maintainer's **Windows PC**. The Linux session pushed the work done since v0.2.3 to `main`.
 Your job: **build it on Windows, make the Windows-only parts work, test it, and report.** This is not a release yet: no tag, no
@@ -40,6 +40,11 @@ Engine (`patches/suyu/0001`, `0002`):
 - **Quit**: in-game menu "Quit game"; holding B 5 s on the "press L+R" title screen closes the game.
 - Game hooks are tied to the game build (NSO build ID): the 3.0.4 ones are no longer installed on 4.0.1 (they pointed at unrelated code).
 - `kartrecomp-export` research switch `KARTRECOMP_EXPORT_NSO_ONLY=1` (writes the update's ExeFS to `<out>\nso` and stops).
+- **60 fps split-screen** (v0.2.4): `kartrecomp-export --patch split60` changes one instruction before translating (table in
+  `common/kart_code_patches.h`, 4.0.1 and 3.0.4) and writes `code_patches.txt`; the launcher copies it into the module folder and the
+  engine (`core/loader/nso.cpp`) makes the same change to the loaded code. Setup page checkbox; changing it rebuilds one piece.
+  Windows: make sure the exporter in the zip is the new one (`--patch` is accepted) and test the checkbox once (4-player race:
+  the log says "split-screen views per frame ... 4:600").
 
 Launcher (`app/`):
 - **Mii editor** (Miis tab, `mii_db.*`, `mii_editor.*`), "Open saves folder" (Play tab), "Open Miis folder".
