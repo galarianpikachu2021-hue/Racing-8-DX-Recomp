@@ -13,6 +13,8 @@ int main(int argc, char** argv) {
     // --nolauncher (or --play): start the built game straight away with the saved settings, without showing the launcher, and
     // quit when the game exits. For playing from a TV or Steam (issue #17); the in-game menu (F10, L3+R3) has the settings.
     const QStringList args = QCoreApplication::arguments();
+    // -f / --fullscreen: the game starts fullscreen (with or without --nolauncher), like the engine's own -f.
+    if (args.contains(QStringLiteral("-f")) || args.contains(QStringLiteral("--fullscreen"))) window.forceFullscreen();
     if (args.contains(QStringLiteral("--nolauncher")) || args.contains(QStringLiteral("--play"))) {
         if (!window.launchWithoutWindow()) return 1;
         return app.exec();

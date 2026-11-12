@@ -12,6 +12,8 @@ Downloads: **Linux** `Racing_8_DX_Recomp-x86_64.AppImage`, **Windows** `KartReco
   in-game X" and takes your next press. **Swap A/B and X/Y** for Xbox/PlayStation layouts, **Standard layout**, and "Give controllers to
   players automatically" (on by default). Layouts belong to the controller: each one keeps its own, whichever player gets it.
 - **In-game Controls page** (F10 or L3+R3, then Controls): pick a player, see every button, rebind by pressing, swap A/B-X/Y.
+- **`-f` / `--fullscreen`** on the command line starts the game fullscreen, with or without `--nolauncher`
+  (e.g. `Racing_8_DX_Recomp-x86_64.AppImage --nolauncher -f`, or `kartrecomp.exe --nolauncher --fullscreen` for Steam).
 - **Quit**: "Quit game" in the in-game menu; holding B for 5 seconds on the "press L+R" title screen closes the game.
 - **60 fps split-screen** (Setup page option, off by default): in 3-4 player races the game normally draws half of the views each frame
   (30 fps per player); with the option every view is drawn every frame. Built into the game when it is compiled (no JIT); switching it

@@ -665,7 +665,7 @@ void MainWindow::launch() {
     auto env = launchEnvironment();
     game.setProcessEnvironment(env);
     game.setProcessChannelMode(QProcess::MergedChannels);
-    game.start(package.executable(), package.launchArguments(fullscreen_check->isChecked()));
+    game.start(package.executable(), package.launchArguments(force_fullscreen || fullscreen_check->isChecked()));
     status_label->setText(tr("Running…"));
 }
 

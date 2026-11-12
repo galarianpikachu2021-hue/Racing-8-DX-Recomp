@@ -31,6 +31,8 @@ public:
     /// Starts the game with the saved settings without showing this window; the app quits with the game's exit code. False
     /// (after telling the user why) when the game cannot start.
     bool launchWithoutWindow();
+    /// -f / --fullscreen on the command line: this run starts the game fullscreen whatever the saved setting says.
+    void forceFullscreen() { force_fullscreen = true; }
     ~MainWindow() override;
 
 signals:
@@ -79,6 +81,7 @@ private:
     QLineEdit* home_edit = nullptr;
     QLabel* status_label = nullptr;
     QCheckBox* fullscreen_check = nullptr;
+    bool force_fullscreen = false;
     QCheckBox* nvn_capture_check = nullptr;
     QComboBox* renderer_combo = nullptr;
     QComboBox* native_res_combo = nullptr;
