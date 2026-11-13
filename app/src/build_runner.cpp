@@ -37,7 +37,9 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
 #endif
     // Hot pieces at -O3: measured 2% less game-thread CPU than -O2 (4.0.1, 4 races each), same compile time and size. Cold pieces
     // are compiled cheaply.
-    a << (hot ? "-O3" : "-O0");
+    // KARTRECOMP_COLD_OPT=<flag> (e.g. -O1): what the cold pieces are compiled with, for measuring; the default is -O0.
+    const QString cold = qEnvironmentVariable("KARTRECOMP_COLD_OPT", QStringLiteral("-O0"));
+    a << (hot ? QStringLiteral("-O3") : cold);
     // Fast code (docs/NATIVE_ENGINE.md "Direct memory"): game memory is read in place instead of through a helper call, and the
     // blocks leave their own code check to one check of the whole module at start.
     if (BuildRunner::FastCode()) a << "-DRECOMP_DIRECT_MEM=1" << "-DRECOMP_GUARD_WHOLE=1";

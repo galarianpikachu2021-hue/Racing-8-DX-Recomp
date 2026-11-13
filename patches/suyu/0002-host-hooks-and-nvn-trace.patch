@@ -2276,12 +2276,16 @@ index 0000000000..bf85c754dc
 +} // namespace Core::NativeHid
 diff --git a/src/core/arm/recomp/native_libc.cpp b/src/core/arm/recomp/native_libc.cpp
 new file mode 100644
-index 0000000000..4d2941f78a
+index 0000000000..83d2c202ce
 --- /dev/null
 +++ b/src/core/arm/recomp/native_libc.cpp
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,247 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_libc.h"
++#if defined(__linux__)
++#include <sys/mman.h>
++#endif
++#include <atomic>
 +
 +#include <algorithm>
 +#include <atomic>
@@ -2382,8 +2386,58 @@ index 0000000000..4d2941f78a
 +    return on;
 +}
 +
++/// Zero punch (on; KARTRECOMP_ZERO_PUNCH=0 turns it off): a memset of a large range to zero gives the whole pages inside it back
++/// to the system instead of writing zeros into them (the game's memory file reads as zeros where it has no pages). The game
++/// clears hundreds of megabytes of heap it then leaves untouched: in a race 865 MB of its 1696 MB were all-zero pages, and the
++/// engine's memory use went from 3.5 GB to 2.5 GB with this, at no measurable CPU cost.
++static bool ZeroPunch() {
++    static const bool on = [] {
++#if defined(__linux__)
++        const char* v = std::getenv("KARTRECOMP_ZERO_PUNCH");
++        return !(v && *v == '0');
++#else
++        return false;
++#endif
++    }();
++    return on;
++}
++
++#if defined(__linux__)
++/// Zero-fills [dst, dst+n): whole pages are released (MADV_REMOVE on the shared memory file), the edges are written.
++static void ZeroFill(Guest& g, u64 dst, u64 n) {
++    static std::atomic<u64> released{0}, reported{0};
++    u8* run = nullptr;
++    u64 run_len = 0;
++    const auto flush = [&] {
++        if (run_len && madvise(run, run_len, MADV_REMOVE) != 0) std::memset(run, 0, run_len);
++        else released.fetch_add(run_len, std::memory_order_relaxed);
++        run = nullptr;
++        run_len = 0;
++    };
++    g.Pieces(dst, n, [&](u8* p, u64, u64 len) {
++        if (len != kPage) { // a partial page at either end
++            flush();
++            std::memset(p, 0, len);
++            return;
++        }
++        if (run && run + run_len == p) run_len += kPage;
++        else {
++            flush();
++            run = p;
++            run_len = kPage;
++        }
++    });
++    flush();
++    const u64 total = released.load(std::memory_order_relaxed);
++    if (total - reported.load(std::memory_order_relaxed) >= (256ull << 20)) {
++        reported.store(total, std::memory_order_relaxed);
++        LOG_INFO(Core_ARM, "zero punch: {} MB of zero-filled game memory released so far", total >> 20);
++    }
++}
++#endif
++
 +void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
-+    if (!Enabled() || name != "sdk") return;
++    if ((!Enabled() && !ZeroPunch()) || name != "sdk") return;
 +    std::map<std::string, u64> exports;
 +    for (const auto& [fn, offset] : SdkTrace::ExportedFunctions(image)) exports.emplace(fn, load_base + offset);
 +    int installed = 0;
@@ -2394,6 +2448,21 @@ index 0000000000..4d2941f78a
 +        ++installed;
 +    };
 +    Core::System* sys = &system;
++#if defined(__linux__)
++    if (ZeroPunch() && !Enabled()) {
++        // Only large zero fills are taken over; every other memset runs the game's own code.
++        hook("memset", [sys](RecompHooks::HookContext& ctx) {
++            const u64 dst = ctx.x[0], n = ctx.x[2];
++            if ((ctx.x[1] & 0xFF) != 0 || n < (256u << 10)) return false;
++            Guest g{sys->ApplicationMemory()};
++            if (!g.Mapped(dst, n)) return false;
++            ZeroFill(g, dst, n);
++            return Return(ctx, dst);
++        });
++        LOG_INFO(Core_ARM, "zero punch: large zero fills release their pages ({} hook)", installed);
++        return;
++    }
++#endif
 +
 +    const auto memcpy_hook = [sys](RecompHooks::HookContext& ctx) {
 +        Guest g{sys->ApplicationMemory()};
@@ -7059,15 +7128,32 @@ index 0000000000..c36de3728b
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..3b5b26b402 100644
+index 699980238b..01db125f03 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
-@@ -350,17 +350,20 @@ inline constexpr int kChainBudget = 256;
+@@ -349,18 +349,37 @@ inline constexpr int kChainBudget = 256;
+ // the same runs. It also pushed JIT transitions from 69,008 to 88,983 and more
  // than doubled lookup misses, which is unexplained and worth understanding
  // before trying this again.
++// kart-recomp (exporter --fast-entry): every block is two functions. blk_X_f(c, entry) is the body; entry 0 starts at the first
++// instruction, and chained branches and native calls call it with 0. blk_X(c) is what the block index holds: it works the entry
++// out from c->pc (the dispatcher and indirect branches can enter in the middle of a block) and calls the body. A chained edge
++// then pays neither the entry check (three loads and a compare) nor the store of c->pc: the pc is only written on the paths
++// that go back to the dispatcher.
++inline bool g_fast_entry = false;
  inline std::string ChainTo(u64 t) {
 -    char b[256];
 +    char b[384];
++    if (g_fast_entry && g_chain_blocks && g_chain_mod && g_chain_blocks->count(t)) {
++        char nm[64];
++        FuncNameTo(nm, g_chain_mod, t);
++        snprintf(b, sizeof b,
++                 "{ void %s_f(GuestContext*,unsigned); "
++                 "if (c->halted || c->pending_svc != ~UINT64_C(0) || --c->chain_budget <= 0) { c->pc=g_module_base+0x%llxULL; return; } "
++                 "RECOMP_TAIL return %s_f(c,0U); }",
++                 nm, (unsigned long long)t, nm);
++        return b;
++    }
      if (g_chain_blocks && g_chain_mod && g_chain_blocks->count(t)) {
          char nm[64];
          FuncNameTo(nm, g_chain_mod, t);
@@ -7088,7 +7174,7 @@ index 699980238b..3b5b26b402 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -369,6 +372,77 @@ inline std::string ChainTo(u64 t) {
+@@ -369,6 +388,92 @@ inline std::string ChainTo(u64 t) {
      return b;
  }
  
@@ -7120,6 +7206,7 @@ index 699980238b..3b5b26b402 100644
 +    if (g_chain_blocks && g_chain_mod && g_chain_blocks->count(next)) {
 +        char nn[64];
 +        FuncNameTo(nn, g_chain_mod, next);
++        if (g_fast_entry) return std::string{"{ void "} + nn + "_f(GuestContext*,unsigned); RECOMP_TAIL return " + nn + "_f(c,0U); }";
 +        return std::string{"{ void "} + nn + "(GuestContext*); RECOMP_TAIL return " + nn + "(c); }";
 +    }
 +    return "return;";
@@ -7136,8 +7223,9 @@ index 699980238b..3b5b26b402 100644
 +             "if (c->fm_reserved < %uu) { c->fm_reserved++; _f(c); c->fm_reserved--; "
 +             "if (c->pc != g_module_base+0x%llxULL || c->halted || c->pending_svc != ~UINT64_C(0) || "
 +             "--c->chain_budget <= 0) return; %s } "
-+             "RECOMP_TAIL return _f(c); } } /* BLR */",
-+             rn, (unsigned long long)next, kNativeCallDepth, (unsigned long long)next, after.c_str());
++             "%s } } /* BLR */",
++             rn, (unsigned long long)next, kNativeCallDepth, (unsigned long long)next, after.c_str(),
++             g_fast_entry ? "_f(c); return;" : "RECOMP_TAIL return _f(c);");
 +    return b;
 +}
 +inline std::string NativeCallTo(u64 t, u64 next) {
@@ -7146,6 +7234,19 @@ index 699980238b..3b5b26b402 100644
 +    }
 +    char nm[64], nn[64];
 +    FuncNameTo(nm, g_chain_mod, t);
++    if (g_fast_entry) {
++        const std::string after_fast = AfterNativeCall(next);
++        char f[1024];
++        snprintf(f, sizeof f,
++                 "{ void %s_f(GuestContext*,unsigned); "
++                 "if (c->halted || c->pending_svc != ~UINT64_C(0) || --c->chain_budget <= 0) { c->pc=g_module_base+0x%llxULL; return; } "
++                 "if (c->fm_reserved < %uu) { c->fm_reserved++; %s_f(c,0U); c->fm_reserved--; "
++                 "if (c->pc != g_module_base+0x%llxULL || c->halted || c->pending_svc != ~UINT64_C(0) || "
++                 "--c->chain_budget <= 0) return; %s } "
++                 "RECOMP_TAIL return %s_f(c,0U); }",
++                 nm, (unsigned long long)t, kNativeCallDepth, nm, (unsigned long long)next, after_fast.c_str(), nm);
++        return f;
++    }
 +    std::string after = "return;";
 +    if (g_chain_blocks->count(next)) {
 +        FuncNameTo(nn, g_chain_mod, next);
@@ -7166,7 +7267,7 @@ index 699980238b..3b5b26b402 100644
  // The same for a computed target. A chain of blocks otherwise ends at the first
  // BR, BLR or RET, and every one of those is a round trip out to the host
  // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
-@@ -946,8 +1020,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -946,8 +1051,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -7176,7 +7277,7 @@ index 699980238b..3b5b26b402 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1188,16 +1261,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,16 +1292,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
@@ -7200,7 +7301,7 @@ index 699980238b..3b5b26b402 100644
          snprintf(buf, sizeof buf,
                   "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; "
                   "c->pc=_target; return; } /* BLR */",
-@@ -1209,16 +1286,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1209,16 +1317,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          const s64 off = ((s32)((i >> 5) << 13) >> 13);
          const u64 tt = pc + off * 4;
          const u32 cond = i & 15;
@@ -7220,7 +7321,7 @@ index 699980238b..3b5b26b402 100644
      if ((i & 0xFFE0001F) == 0xD4000001) { u32 imm = (i >> 5) & 0xFFFF; snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; c->pending_svc=%uULL; recomp_svc(c,%u); return;", (unsigned long long)next, imm, imm); put(buf); return false; }
      if ((i & 0xFFE0001F) == 0xD4200000) {
          const u32 imm = (i >> 5) & 0xFFFF;
-@@ -5100,7 +5172,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5100,7 +5203,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -7231,16 +7332,16 @@ index 699980238b..3b5b26b402 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5231,7 +5305,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5231,7 +5336,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          FuncNameTo(namebuf, mod.c_str(), b.vaddr);
          rcu += "void ";
          rcu += namebuf;
 -        rcu += "(GuestContext* c){\n";
-+        rcu += "(GuestContext* RECOMP_RESTRICT c){\n";
++        rcu += g_fast_entry ? "_f(GuestContext* RECOMP_RESTRICT c, unsigned _e){\n" : "(GuestContext* RECOMP_RESTRICT c){\n";
          const u32 first = (u32)((b.vaddr - base) / 4);
          rcu += "    static const uint32_t _expected[]={";
          if (EmitGuardGen()) {
-@@ -5257,6 +5331,17 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5257,12 +5362,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -7258,7 +7359,27 @@ index 699980238b..3b5b26b402 100644
          // Lookup indexes every emitted instruction, not only block starts. An
          // indirect transfer can therefore enter the middle of this function.
          // Direct chains publish their exact target PC before calling, so any
-@@ -5321,10 +5406,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+         // address outside this block is an invariant violation, never a request
+         // to start silently at the first instruction.
+-        {
++        if (g_fast_entry) {
++            // The body: entry 0 is the first instruction; any other entry comes from the index function below.
++            if (b.count > 1) {
++                rcu += "    if(__builtin_expect(_e!=0U,0)){ switch(_e){\n";
++                for (u32 k = 1; k < b.count; ++k) {
++                    char entry[96];
++                    snprintf(entry, sizeof entry, "      case %uU: goto _recomp_entry_%u;\n", k, k);
++                    rcu += entry;
++                }
++                rcu += "      default: recomp_unhandled(c,0U,c->pc); return;\n    } }\n";
++            } else {
++                rcu += "    (void)_e;\n";
++            }
++        } else {
+             char addr[32];
+             rcu += "    { uint64_t _entry=c->pc-g_module_base; if(_entry!=0x";
+             snprintf(addr, sizeof addr, "%llx", (unsigned long long)b.vaddr);
+@@ -5321,12 +5450,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -7269,8 +7390,20 @@ index 699980238b..3b5b26b402 100644
 +            rcu += "    " + ChainTo(b.vaddr + b.size) + "\n";
          }
          rcu += "}\n\n";
++        if (g_fast_entry) {
++            // The index function: entered with c->pc anywhere inside the block.
++            char wrap[512];
++            snprintf(wrap, sizeof wrap,
++                     "void %s(GuestContext* c){ void %s_f(GuestContext*,unsigned); uint64_t _entry=c->pc-g_module_base-0x%llxULL; "
++                     "if(_entry>0x%llxULL || (_entry&3ULL)!=0){ recomp_unhandled(c,0U,c->pc); return; } "
++                     "%s_f(c,(unsigned)(_entry>>2)); }\n\n",
++                     namebuf, namebuf, (unsigned long long)b.vaddr, (unsigned long long)((u64)(b.count - 1) * 4), namebuf);
++            rcu += wrap;
++        }
          flush_unit(unit, false);
-@@ -5566,7 +5648,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+     }
+     emit_seg(cur_unit);
+@@ -5566,7 +5702,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -7279,7 +7412,7 @@ index 699980238b..3b5b26b402 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5746,6 +5828,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5746,6 +5882,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
  
      std::ostringstream ex;
      ex << "/* auto-generated by suyu static recompiler - DO NOT EDIT */\n"
@@ -7287,7 +7420,7 @@ index 699980238b..3b5b26b402 100644
            "#include \"recomp_runtime.h\"\n\n"
            "/* The one symbol suyu resolves out of a recompiled image. Named\n"
            "   distinctly from the internal recomp_lookup so the export is\n"
-@@ -5758,7 +5841,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5758,7 +5895,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -7297,7 +7430,7 @@ index 699980238b..3b5b26b402 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5799,13 +5883,61 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5799,13 +5937,61 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                "  return &g_recomp_gg_word;\n"
                "}\n";
      }
@@ -7360,7 +7493,7 @@ index 699980238b..3b5b26b402 100644
                "RECOMP_API unsigned recomp_image_fastmem_v1(uint32_t page_bits, uint32_t stride_log2,\n"
                "                                            uint64_t ptr_mask, uint32_t off_table,\n"
                "                                            uint32_t off_limit){\n"
-@@ -5838,12 +5970,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +6024,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -7388,7 +7521,7 @@ index 699980238b..3b5b26b402 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +6010,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +6064,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -7398,7 +7531,7 @@ index 699980238b..3b5b26b402 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6368,6 +6514,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
+@@ -6368,6 +6568,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
  )RT";
  }
  
@@ -7469,7 +7602,7 @@ index 699980238b..3b5b26b402 100644
  // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
  // Kept under MSVC's 16380-byte limit per string literal.
  inline const char* FpxAbiH() {
-@@ -6888,10 +7098,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,10 +7152,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -7496,7 +7629,7 @@ index 699980238b..3b5b26b402 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -6960,6 +7186,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6960,6 +7240,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
          text.replace(text.find(abi5_line), abi5_line.size(),
                       std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
      }
@@ -7511,7 +7644,7 @@ index 699980238b..3b5b26b402 100644
      if (fpx) {
          // After GuestContext, before the include guard closes.
          static constexpr std::string_view guard_end = "#endif\n";
-@@ -7241,7 +7475,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+@@ -7241,7 +7529,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
      // than being a single literal. Adjacent-literal concatenation would not
      // help: the limit applies to the result as well. The memory helpers are a
      // piece of their own because ABI 6 reuses their exact text as its slow path.
@@ -7521,7 +7654,7 @@ index 699980238b..3b5b26b402 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -7580,6 +7815,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +7869,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif

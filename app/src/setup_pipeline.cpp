@@ -63,7 +63,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QStringList args{"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"};
         if (in.decrypted()) args = {"--exefs", layout.decryptedExefs(), "--out", layout.exportDir(), "--progress-fd", "1"};
         for (const QString& p : in.patches) args << "--patch" << p;
-        if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond";
+        if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond"; // --fast-entry (two functions per block) measured no gain and 9% bigger modules: off
         ex.start(paths.exporter, args);
         if (!ex.waitForStarted()) return {false, QStringLiteral("Cannot start the exporter (%1).").arg(paths.exporter)};
         while (!ex.waitForFinished(200)) {

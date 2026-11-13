@@ -74,7 +74,10 @@ QList<Piece> Split(const QString& unitPath, const QString& outDir, const QSet<QB
         i = j;
     }
     QList<const Func*> cold, hot_funcs;
-    for (const Func& f : funcs) (hot.contains(f.name) ? hot_funcs : cold).append(&f);
+    // A block can be two functions (exporter --fast-entry): blk_X_f, its body, and blk_X, the index entry. Both follow blk_X's
+    // place in the hot list.
+    const auto is_hot = [&](const QByteArray& name) { return hot.contains(name.endsWith("_f") ? name.chopped(2) : name); };
+    for (const Func& f : funcs) (is_hot(f.name) ? hot_funcs : cold).append(&f);
     const qsizetype per = std::max<qsizetype>(1, (cold.size() + parts - 1) / parts);
     struct Group { QString name; bool hot; QList<const Func*> funcs; };
     QList<Group> groups;
@@ -97,7 +100,7 @@ QList<Piece> Split(const QString& unitPath, const QString& outDir, const QSet<QB
         QList<QByteArray> text = h;
         for (const Func* f : groups[k].funcs) text += f->lines;
         if (k == groups.size() - 1) {
-            for (const Func& f : funcs) text.append("void " + f.name + "(GuestContext*);");
+            for (const Func& f : funcs) text.append("void " + f.name + (f.name.endsWith("_f") ? "(GuestContext*,unsigned);" : "(GuestContext*);"));
             text += tail;
         }
         QFile out(QDir(outDir).filePath(groups[k].name));

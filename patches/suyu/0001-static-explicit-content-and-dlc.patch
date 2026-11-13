@@ -1715,10 +1715,10 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..bc37b96047
+index 0000000000..4ce02c420f
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,443 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -1991,6 +1991,7 @@ index 0000000000..bc37b96047
 +        else if (a == "--progress-fd") g_progress_fd = std::atoi(next().c_str());
 +        else if (a == "--native-calls") suyu::recomp::g_native_calls = true;
 +        else if (a == "--chain-cond") suyu::recomp::g_chain_cond = true;
++        else if (a == "--fast-entry") suyu::recomp::g_fast_entry = true;
 +        else if (a == "--patch") patches.push_back(next());
 +        else return Fail(2, "unknown argument: " + a);
 +    }
@@ -2154,7 +2155,8 @@ index 0000000000..bc37b96047
 +        o << "{ \"modules\": " << modules.size() << ", \"blocks\": " << blocks
 +          << ", \"image_abi\": " << (suyu::recomp::g_emit_fastmem ? 6 : 5)
 +          << ", \"native_calls\": " << (suyu::recomp::g_native_calls ? "true" : "false")
-+          << ", \"chain_cond\": " << (suyu::recomp::g_chain_cond ? "true" : "false") << " }\n";
++          << ", \"chain_cond\": " << (suyu::recomp::g_chain_cond ? "true" : "false")
++          << ", \"fast_entry\": " << (suyu::recomp::g_fast_entry ? "true" : "false") << " }\n";
 +    }
 +    fs::remove_all(fs::absolute(out) / ".export-home", ec);
 +    Progress(100, "Done");
@@ -15822,10 +15824,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..4452473804
+index 0000000000..a1fd9c9440
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8299 @@
+@@ -0,0 +1,8313 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
@@ -21044,6 +21046,20 @@ index 0000000000..4452473804
 +        // scan, and every frame with a scene is treated as a race, as before. KARTRECOMP_MENU_SCALE=1 turns the menu rule off.
 +        static const bool menu_scaled = [] { const char* v = std::getenv("KARTRECOMP_MENU_SCALE"); return v && *v == '1'; }();
 +        const bool race_frame = menu_scaled || !cam_wanted || cam_prev_ok;
++        // Test switch KARTRECOMP_MENU_SPEED=<percent>: the game runs at this speed whenever the frame has no game camera (menus,
++        // title, loading), and at the normal speed limit in a race. Needs the camera scan (an upscaler or frame generation on).
++        {
++            static const int menu_speed = [] { const char* v = std::getenv("KARTRECOMP_MENU_SPEED"); return v ? std::atoi(v) : 0; }();
++            static int applied = -1;
++            if (menu_speed > 0 && cam_scan && overlay) {
++                const int wanted = cam_prev_ok ? overlay->SpeedLimitPercent() : menu_speed;
++                if (wanted != applied) {
++                    ApplySpeedLimit(wanted);
++                    LOG_INFO(Frontend, "menu speed test: {} at frame {}: speed {} %", cam_prev_ok ? "race" : "menu", frames, wanted);
++                    applied = wanted;
++                }
++            }
++        }
 +        frame_scene_scale = !split_mode ? out_scale : ((hud_cmd || frame_has_scene) && race_frame) ? scene_scale : out_scale;
 +        if (split_mode && (hud_cmd || frame_has_scene) && race_frame != race_logged && race_log_count < 40) {
 +            ++race_log_count;

@@ -352,3 +352,20 @@ Setup can take the game as already decrypted files instead of NSPs: a code folde
   code (`latest dropped write from <module>+<offset>`). Research aids: `KARTRECOMP_SYSARCHIVE_INFO=1` (files and headers of
   the system archives the game opens), `KARTRECOMP_ALLOW_PROBE=1` with `--content-probe --content-dump <dir>` (writes exefs and
   romfs.bin from the NSPs).
+
+## Memory: zero punch (2026-11-13), and two things that did not pay
+
+- **Zero punch (on by default on Linux, `KARTRECOMP_ZERO_PUNCH=0` off).** The game clears large heaps with `memset(…, 0, …)` and
+  never touches most of them: in a race 865 MB of the 1696 MB of game memory were pages holding only zeros. The engine now takes
+  over `memset` calls from `main` into the sdk when they fill at least 256 KB with zero, and releases the whole pages inside the
+  range (`MADV_REMOVE` on the memory file; they read as zeros and get a page again when written) instead of writing them
+  (`core/arm/recomp/native_libc.cpp`). Measured (effects race, native threads): resident memory 3.5 GB -> 2.5 GB, game memory
+  allocated 1696 -> 901 MB, CPU unchanged (82.5k main-thread samples against 81.6-83.6k), 4-player, 3.0.4 and a mods run clean.
+- **Cold code at -O1 instead of -O0** (`KARTRECOMP_COLD_OPT=-O1` at build time): modules 1.3 GB -> 0.7 GB on disk, resident
+  memory only -70 MB, CPU unchanged, build 9 min instead of 4. Left off.
+- **Two functions per block** (exporter `--fast-entry`: a body entered at instruction 0 by chained edges, and an index function
+  that works out the entry from the pc; no entry check and no pc store on chained edges): 80.9k and 82.8k main-thread samples
+  against 81.6-83.6k without, so no gain beyond run-to-run noise (about 3%), and modules 9% bigger. The option stays in the
+  exporter, the launcher does not use it.
+- `KARTRECOMP_MENU_SPEED=<percent>` (test switch): the game runs at that speed whenever a frame has no game camera (menus) and at
+  the normal speed in races. Made for a "do the menus look too fast" comparison; the user's menus turned out to be right.
