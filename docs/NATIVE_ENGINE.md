@@ -339,7 +339,7 @@ Setup can take the game as already decrypted files instead of NSPs: a code folde
   `kartrecomp-setup --exefs <dir> --romfs <dir|file>`. DLC (NSPs) is not available in this mode.
 - Verified: whole pipeline in a sandbox with no keys or firmware, 4 min 53 s, test boot passed; title screen reached from both a
   `romfs.bin` and a folder.
-- **Not solved: no firmware means no Mii data, and the game then destroys its own memory.** suyu's stand-in for the MiiModel
+- **Solved on 2026-11-13 (see "Stand-in Mii resources" below); what was wrong:** no firmware means no Mii data, and the game then destroyed its own memory. suyu's stand-in for the MiiModel
   system archive is six 16-byte files. The game treats them as real, ends up with a vertex buffer at address 0x1903c with a size of
   about 4 GB, and converts it in place (`main`+0x8e408c calling 0x8e53f0, 4.0.1): four billion stray writes that run over the
   game's own code and data. With the slow page-table path this took minutes; with direct memory it takes seconds, and the game
@@ -369,3 +369,20 @@ Setup can take the game as already decrypted files instead of NSPs: a code folde
   exporter, the launcher does not use it.
 - `KARTRECOMP_MENU_SPEED=<percent>` (test switch): the game runs at that speed whenever a frame has no game camera (menus) and at
   the normal speed in races. Made for a "do the menus look too fast" comparison; the user's menus turned out to be right.
+
+## Stand-in Mii resources: the game runs with no firmware (2026-11-13)
+
+`core/file_sys/system_archive/mii_model.cpp` now builds the six MiiModel files in their real layout with no parts in them:
+
+- texture files ("NFTR", four of them): magic, version 1, file size, 11 maximum part sizes, 11 alignments (0x200), padding to
+  0x160, then 318 part entries of 28 bytes (data offset, size, compressed size, zlib parameters, alignment, width/height, format
+  and mip count); data would start at 0x2428.
+- shape files ("NFSR", two): magic, version 1, file size, 12 maximum part sizes, 12 alignments (4), padding to 0xc4, then part
+  entries of 88 bytes and transform tables up to 0x14dd4.
+- An entry that is all zero is a part that does not exist (the real files have 115 such texture entries and about 300 shape
+  ones), so a file whose tables are all zero is valid and simply has no parts. The layout was read from a dump of the user's own
+  firmware (`KARTRECOMP_SYSARCHIVE_DUMP`); no data from it is in the stand-in.
+
+Result: the keyless "decrypted files" boot (no keys, no firmware, RomFS folder) runs menus and a scripted Grand Prix race for
+110 s at 60 fps with no stray memory accesses at all (before: 300,000 dropped writes a second and a crash after 25 s). Miis have
+no faces or bodies in this mode. Installs with firmware are unaffected: the stand-in is only used when the archive is missing.

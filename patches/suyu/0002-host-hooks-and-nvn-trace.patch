@@ -3664,6 +3664,89 @@ index 15dd4ec7de..e7cba305b5 100644
      Core::System& system;
      ProgramId program_id;
      VirtualDir dir;
+diff --git a/src/core/file_sys/system_archive/mii_model.cpp b/src/core/file_sys/system_archive/mii_model.cpp
+index a96cb2cd2e..18f4ccf606 100644
+--- a/src/core/file_sys/system_archive/mii_model.cpp
++++ b/src/core/file_sys/system_archive/mii_model.cpp
+@@ -1,37 +1,60 @@
+ // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstring>
++#include <vector>
++
+ #include "core/file_sys/system_archive/mii_model.h"
+ #include "core/file_sys/vfs/vfs_vector.h"
+ 
+ namespace FileSys::SystemArchive {
+ 
+-namespace MiiModelData {
++namespace {
++
++// kart-recomp: stand-in Mii resources for running without firmware ("decrypted files" mode).
++//
++// The stock stand-ins were the first 16 bytes of each file. The game reads a whole header and part tables from them, so it read
++// past the end, took what it got for real sizes and offsets, and ended up converting a 4 GB "vertex buffer" at address 0x1903c
++// in place, over its own code and data: a crash about 25 s after start.
++//
++// The layout below is the files' own (worked out from a firmware dump, no data taken from it): magic, version 1, file size,
++// one maximum part size per part type, one alignment per part type, padding, then the part tables. A part whose table entry is
++// all zero does not exist, which the format allows; here no part exists, so Mii heads have no shapes and no textures.
++//   texture file ("NFTR"): 11 part types, tables from 0x160, 318 entries of 28 bytes, data from 0x2428
++//   shape file   ("NFSR"): 12 part types, tables from 0xc4 up to 0x14dd4 (part entries of 88 bytes, then transform tables)
++std::vector<u8> EmptyResource(const char magic[4], u32 part_types, u32 alignment, u32 size) {
++    std::vector<u8> out(size, 0);
++    const auto put = [&](std::size_t offset, u32 value) { std::memcpy(out.data() + offset, &value, sizeof(value)); };
++    std::memcpy(out.data(), magic, 4);
++    put(4, 1);
++    put(8, size);
++    for (u32 i = 0; i < part_types; ++i) {
++        put(12 + i * 4, 0x1000);                      // the largest part of this type: none exist, any buffer will do
++        put(12 + (part_types + i) * 4, alignment);
++    }
++    return out;
++}
+ 
+-constexpr std::array<u8, 0x10> NFTR_STANDARD{'N',  'F',  'T',  'R',  0x01, 0x00, 0x00, 0x00,
+-                                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+-constexpr std::array<u8, 0x10> NFSR_STANDARD{'N',  'F',  'S',  'R',  0x01, 0x00, 0x00, 0x00,
+-                                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
++VirtualFile TextureFile(const char* name) {
++    return std::make_shared<VectorVfsFile>(EmptyResource("NFTR", 11, 0x200, 0x2428), name);
++}
+ 
+-constexpr auto TEXTURE_LOW_LINEAR = NFTR_STANDARD;
+-constexpr auto TEXTURE_LOW_SRGB = NFTR_STANDARD;
+-constexpr auto TEXTURE_MID_LINEAR = NFTR_STANDARD;
+-constexpr auto TEXTURE_MID_SRGB = NFTR_STANDARD;
+-constexpr auto SHAPE_HIGH = NFSR_STANDARD;
+-constexpr auto SHAPE_MID = NFSR_STANDARD;
++VirtualFile ShapeFile(const char* name) {
++    return std::make_shared<VectorVfsFile>(EmptyResource("NFSR", 12, 4, 0x14dd4), name);
++}
+ 
+-} // namespace MiiModelData
++} // namespace
+ 
+ VirtualDir MiiModel() {
+     auto out = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
+                                                     std::vector<VirtualDir>{}, "data");
+ 
+-    out->AddFile(MakeArrayFile(MiiModelData::TEXTURE_LOW_LINEAR, "NXTextureLowLinear.dat"));
+-    out->AddFile(MakeArrayFile(MiiModelData::TEXTURE_LOW_SRGB, "NXTextureLowSRGB.dat"));
+-    out->AddFile(MakeArrayFile(MiiModelData::TEXTURE_MID_LINEAR, "NXTextureMidLinear.dat"));
+-    out->AddFile(MakeArrayFile(MiiModelData::TEXTURE_MID_SRGB, "NXTextureMidSRGB.dat"));
+-    out->AddFile(MakeArrayFile(MiiModelData::SHAPE_HIGH, "ShapeHigh.dat"));
+-    out->AddFile(MakeArrayFile(MiiModelData::SHAPE_MID, "ShapeMid.dat"));
++    out->AddFile(TextureFile("NXTextureLowLinear.dat"));
++    out->AddFile(TextureFile("NXTextureLowSRGB.dat"));
++    out->AddFile(TextureFile("NXTextureMidLinear.dat"));
++    out->AddFile(TextureFile("NXTextureMidSRGB.dat"));
++    out->AddFile(ShapeFile("ShapeHigh.dat"));
++    out->AddFile(ShapeFile("ShapeMid.dat"));
+ 
+     return out;
+ }
 diff --git a/src/core/frontend/applets/error.cpp b/src/core/frontend/applets/error.cpp
 index 6ec13ff094..cbe24685e3 100644
 --- a/src/core/frontend/applets/error.cpp
@@ -4334,16 +4417,17 @@ index 79c6ac2079..c9ac4da74e 100644
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
 diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
-index 8b7a1b642e..c4d2d79a39 100644
+index 8b7a1b642e..0b3cbf15f9 100644
 --- a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
 +++ b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,6 @@
++#include <cstdio>
 +#include <cstdlib>
 +#include <algorithm>
  // SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
  // SPDX-License-Identifier: GPL-3.0-or-later
  
-@@ -504,6 +506,18 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
+@@ -504,6 +507,26 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
          R_RETURN(ResultUnknown);
      }
  
@@ -4355,6 +4439,14 @@ index 8b7a1b642e..c4d2d79a39 100644
 +                const auto head = f->ReadBytes(std::min<std::size_t>(f->GetSize(), 0x60));
 +                LOG_INFO(Service_FS, "system archive {:016X}: {} size {:#x} head {}", title_id, f->GetName(), f->GetSize(),
 +                         Common::HexToString(head));
++                // KARTRECOMP_SYSARCHIVE_DUMP=<folder>: also write the files there (local analysis of the user's own firmware).
++                if (const char* dump = std::getenv("KARTRECOMP_SYSARCHIVE_DUMP"); dump && *dump) {
++                    const auto bytes = f->ReadAllBytes();
++                    if (std::FILE* out = std::fopen(fmt::format("{}/{:016X}_{}", dump, title_id, f->GetName()).c_str(), "wb")) {
++                        std::fwrite(bytes.data(), 1, bytes.size(), out);
++                        std::fclose(out);
++                    }
++                }
 +            }
 +        }
 +    }

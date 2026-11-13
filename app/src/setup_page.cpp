@@ -63,8 +63,8 @@ SetupPage::SetupPage(QWidget* parent)
         pick(decFirmware, false, tr("Select the firmware zip"), tr("Zip files (*.zip)"));
     });
     auto* decNote = new QLabel(tr("The code and data are used where they are (nothing is copied or moved), so keep them there. DLC is not available "
-                                  "in this mode. Without keys and firmware the game has no Mii data, and at the moment it crashes soon after it "
-                                  "starts because of that: give both until that is fixed."));
+                                  "in this mode. Keys and firmware are optional: without them the game runs, but Miis have no faces or bodies "
+                                  "(Mii racers, the Mii screens and the Mii editor need the firmware)."));
     decNote->setWordWrap(true);
     dgrid->addWidget(decNote, 8, 0, 1, 3);
     base = addRow(grid, 0, tr("Base game"), tr("Mario Kart 8 Deluxe (.nsp)"), [this] { pick(base, false, tr("Select the base game"), tr("NSP files (*.nsp)")); });
