@@ -12,6 +12,7 @@
 #include "setup_validate.h"
 
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
@@ -53,6 +54,10 @@ private:
     BuilderPaths paths;
     DataLayout layout;
     Row base, update, keys, firmware, dlcRow;
+    Row exefs, romfs, decKeys, decFirmware; // decrypted-files mode (keys and firmware optional there)
+    QComboBox* mode = nullptr;   // NSP files, or decrypted files
+    QWidget* nspBox = nullptr;
+    QWidget* decBox = nullptr;
     QStringList dlc;
     QPushButton *buildButton, *cancelButton, *playButton;
     QCheckBox* split60 = nullptr;

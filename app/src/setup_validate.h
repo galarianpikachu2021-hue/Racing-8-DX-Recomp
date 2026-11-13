@@ -25,7 +25,16 @@ struct SetupInputs {
     QString base, update, keys, firmware;
     QStringList dlc;
     QStringList patches; ///< optional game changes built in (kartrecomp-export --patch), e.g. "split60"
+    /// "Decrypted files" instead of the NSPs, keys and firmware: the game's code folder (main, main.npdm, rtld, sdk, subsdk0, with
+    /// the update applied) and its data (a folder of the RomFS files, or a romfs.bin image). Used when `exefs` is set.
+    QString exefs, romfs;
+    bool decrypted() const { return !exefs.isEmpty(); }
 };
+
+/// Which supported update an ExeFS folder holds ("3.0.4", "4.0.1"), from the build id of its main; "" when it is neither.
+QString DecryptedUpdateName(const QString& exefsDir);
+QString ValidateExefs(const QString& dir);
+QString ValidateRomfs(const QString& path);
 
 QString ValidateBase(const NspInfo& info);
 QString ValidateUpdate(const NspInfo& info);

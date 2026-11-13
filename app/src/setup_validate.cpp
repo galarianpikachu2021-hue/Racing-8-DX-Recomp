@@ -2,6 +2,7 @@
 #include "setup_validate.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 
 #include "keys_check.h"
@@ -58,7 +59,54 @@ QString ValidateDlc(const QStringList& files) {
     return {};
 }
 
+namespace {
+// The first 8 bytes of main's build id (NSO header, offset 0x40), as hex.
+QString MainBuildId(const QString& exefsDir) {
+    QFile f(QDir(exefsDir).filePath("main"));
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    const QByteArray head = f.read(0x60);
+    if (head.size() < 0x48 || !head.startsWith("NSO0")) return {};
+    return QString::fromLatin1(head.mid(0x40, 8).toHex());
+}
+} // namespace
+
+QString DecryptedUpdateName(const QString& exefsDir) {
+    const QString id = MainBuildId(exefsDir);
+    if (id == QLatin1String("2452c49bc26ec159")) return QStringLiteral("3.0.4");
+    if (id == QLatin1String("158c0c7399aabd7b")) return QStringLiteral("4.0.1");
+    return {};
+}
+
+QString ValidateExefs(const QString& dir) {
+    if (!QFileInfo(dir).isDir()) return QStringLiteral("The game code folder was not found.");
+    for (const char* name : {"main", "main.npdm", "rtld", "sdk"})
+        if (!QFileInfo(QDir(dir).filePath(name)).isFile())
+            return QStringLiteral("This folder has no file named %1: pick the ExeFS folder (main, main.npdm, rtld, sdk, subsdk0).").arg(name);
+    const QString id = MainBuildId(dir);
+    if (id.isEmpty()) return QStringLiteral("The file main is not decrypted game code (it does not start with NSO0).");
+    if (DecryptedUpdateName(dir).isEmpty())
+        return QStringLiteral("This is not the code of update 3.0.4 or 4.0.1 (build id %1). Dump the game with the update applied.").arg(id);
+    return {};
+}
+
+QString ValidateRomfs(const QString& path) {
+    const QFileInfo fi(path);
+    if (!fi.exists()) return QStringLiteral("The game data was not found.");
+    if (fi.isFile()) return fi.size() > (1LL << 30) ? QString() : QStringLiteral("This file is too small to be the game's RomFS image.");
+    if (QDir(path).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty()) return QStringLiteral("This folder is empty.");
+    return {};
+}
+
 QString ValidateInputs(const SetupInputs& in, const std::function<NspInfo(const QString&)>& reader) {
+    if (in.decrypted()) {
+        if (const QString why = ValidateExefs(in.exefs); !why.isEmpty()) return why;
+        if (const QString why = ValidateRomfs(in.romfs); !why.isEmpty()) return why;
+        // Keys and firmware are optional here, and only useful together (the firmware files are encrypted).
+        if (in.keys.isEmpty() != in.firmware.isEmpty()) return QStringLiteral("Give both keys and firmware, or neither.");
+        if (in.keys.isEmpty()) return {};
+        if (const auto p = CheckKeys(in.keys); p != KeyProblem::None) return KeyProblemText(p, MissingKeyName(in.keys));
+        return ValidateFirmware(in.firmware);
+    }
     if (const auto p = CheckKeys(in.keys); p != KeyProblem::None) return KeyProblemText(p, MissingKeyName(in.keys));
     if (const QString why = ValidateBase(reader(in.base)); !why.isEmpty()) return why;
     if (const QString why = ValidateUpdate(reader(in.update)); !why.isEmpty()) return why;

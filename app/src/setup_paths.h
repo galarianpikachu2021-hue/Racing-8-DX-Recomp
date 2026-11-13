@@ -3,7 +3,9 @@
 // the user's data lives (the XDG folders), plus installing the user's picked files into that layout.
 #pragma once
 
+#include <QProcessEnvironment>
 #include <QString>
+#include <QStringList>
 
 #include "setup_validate.h"
 
@@ -25,6 +27,16 @@ struct DataLayout {
     QString installedKeys() const;
     QString installedFirmware() const;
     QStringList installedDlc() const;
+    // "Decrypted files" mode: content/decrypted.txt names the user's code folder and data (used where they are, not copied). When
+    // it exists the game runs from those and needs no keys or firmware.
+    QString decryptedFile() const { return content() + "/decrypted.txt"; }
+    QString decryptedExefs() const;
+    QString decryptedRomfs() const;
+    bool decrypted() const { return !decryptedExefs().isEmpty(); }
+    /// The engine arguments that name the game files (after --module-dir): the NSP pair, or the code folder's main.
+    QStringList contentArgs() const;
+    /// The environment the engine needs for the game files (decrypted mode: where the data is, and that no keys are needed).
+    void addContentEnv(QProcessEnvironment& env) const;
     QString moduleDir() const { return dataRoot + "/module"; }
     QString modsDir() const { return dataRoot + "/mods"; }
     QString pluginsDir() const { return dataRoot + "/plugins"; } // plugins built on this PC (DLSS); the engine looks here too

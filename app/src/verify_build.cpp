@@ -71,7 +71,9 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     BuildRunner::DieWithParent(p);
     p.setProcessEnvironment(env);
     p.setWorkingDirectory(QFileInfo(engine).absolutePath());
-    p.start(engine, {"--module-dir", layout.moduleDir(), "--content-base", layout.base(), "--content-update", layout.update()});
+    layout.addContentEnv(env);
+    p.setProcessEnvironment(env);
+    p.start(engine, QStringList{"--module-dir", layout.moduleDir()} + layout.contentArgs());
     if (!p.waitForStarted(10000)) return {false, QStringLiteral("Cannot start the game engine (%1).").arg(engine)};
     const auto stop = [&p] {
         p.kill();

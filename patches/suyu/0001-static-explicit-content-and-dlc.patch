@@ -1715,10 +1715,10 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..bd3db3e9fd
+index 0000000000..bc37b96047
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,441 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -1977,7 +1977,7 @@ index 0000000000..bd3db3e9fd
 +} // namespace
 +
 +int main(int argc, char** argv) {
-+    fs::path base, update, keys, out, info;
++    fs::path base, update, keys, out, info, exefs_dir; // --exefs <folder>: decrypted files (main, rtld, sdk, subsdk0, main.npdm), no keys
 +    std::vector<std::string> patches; // --patch <name>: optional game changes (common/kart_code_patches.h)
 +    for (int i = 1; i < argc; ++i) {
 +        const std::string a = argv[i];
@@ -1986,6 +1986,7 @@ index 0000000000..bd3db3e9fd
 +        else if (a == "--update") update = next();
 +        else if (a == "--keys") keys = next();
 +        else if (a == "--out") out = next();
++        else if (a == "--exefs") exefs_dir = next();
 +        else if (a == "--info") info = next();
 +        else if (a == "--progress-fd") g_progress_fd = std::atoi(next().c_str());
 +        else if (a == "--native-calls") suyu::recomp::g_native_calls = true;
@@ -2015,9 +2016,17 @@ index 0000000000..bd3db3e9fd
 +        if (made) fs::remove_all(scratch, ec);
 +        return rc;
 +    }
-+    if (update.empty() || out.empty() || keys.empty())
-+        return Fail(2, "usage: kartrecomp-export --base <base.nsp> --update <update.nsp> --keys <prod.keys> --out <dir>");
++    if (out.empty() || (exefs_dir.empty() && (update.empty() || keys.empty())))
++        return Fail(2, "usage: kartrecomp-export (--base <base.nsp> --update <update.nsp> --keys <prod.keys> | --exefs <folder>) --out <dir>");
 +    std::error_code ec;
++    static const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
++    FileSys::VirtualDir exefs;
++    if (!exefs_dir.empty()) {
++        fs::create_directories(out, ec);
++        Progress(1, "Opening the game code");
++        exefs = vfs->OpenDirectory(fs::absolute(exefs_dir).string(), FileSys::OpenMode::Read);
++        if (!exefs || !exefs->GetFile("main")) return Fail(2, "the ExeFS folder has no file named main: " + exefs_dir.string());
++    } else {
 +    if (!fs::is_regular_file(keys, ec)) return Fail(2, "prod.keys not found: " + keys.string());
 +    if (!fs::is_regular_file(update, ec)) return Fail(2, "update NSP not found: " + update.string());
 +    if (!base.empty() && !fs::is_regular_file(base, ec)) return Fail(2, "base NSP not found: " + base.string());
@@ -2033,13 +2042,12 @@ index 0000000000..bd3db3e9fd
 +    Common::FS::SetSuyuPath(Common::FS::SuyuPath::KeysDir, PrivateKeys(fs::absolute(keys), scratch));
 +
 +    Progress(1, "Opening the update");
-+    static const auto vfs = std::make_shared<FileSys::RealVfsFilesystem>();
 +    auto file = vfs->OpenFile(fs::absolute(update).string(), FileSys::OpenMode::Read);
 +    if (!file) return Fail(2, "cannot read the update NSP");
 +    auto nsp = std::make_shared<FileSys::NSP>(file);
 +    if (nsp->GetStatus() != Loader::ResultStatus::Success)
 +        return Fail(2, "the update NSP could not be opened: " + Loader::GetResultStatusString(nsp->GetStatus()));
-+    FileSys::VirtualDir exefs = nsp->GetExeFS();
++    exefs = nsp->GetExeFS();
 +    if (!exefs) {
 +        // An update NSP keeps its Program NCA under the Update title type, not the application one.
 +        for (const auto& [title_id, ncas] : nsp->GetNCAs()) {
@@ -2049,6 +2057,7 @@ index 0000000000..bd3db3e9fd
 +        }
 +    }
 +    if (!exefs) return Fail(2, "the update NSP has no program ExeFS (is this the game's update NSP?)");
++    } // NSP input
 +
 +    // Research aid: KARTRECOMP_EXPORT_NSO_ONLY=1 writes the update's ExeFS files to <out>/nso and stops (any update, 32-bit too).
 +    if (const char* only = std::getenv("KARTRECOMP_EXPORT_NSO_ONLY"); only && *only == '1') {
@@ -2147,7 +2156,7 @@ index 0000000000..bd3db3e9fd
 +          << ", \"native_calls\": " << (suyu::recomp::g_native_calls ? "true" : "false")
 +          << ", \"chain_cond\": " << (suyu::recomp::g_chain_cond ? "true" : "false") << " }\n";
 +    }
-+    fs::remove_all(scratch, ec);
++    fs::remove_all(fs::absolute(out) / ".export-home", ec);
 +    Progress(100, "Done");
 +    return 0;
 +}
@@ -24420,7 +24429,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..8a14de9826 100644
+index 03f738eb63..2f8cae982c 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -24957,7 +24966,7 @@ index 03f738eb63..8a14de9826 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1566,34 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1566,36 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -24965,7 +24974,9 @@ index 03f738eb63..8a14de9826 100644
 +    // mk8-recomp: a plain explicit base+update launch is allowed here. On Linux it is
 +    // the only path that boots MK8D 3.0.4 under suyu-cmd; the NAND-installed update
 +    // never presents a frame (local/NOTES.md). Probing stays CLI-only.
-+    if (explicit_content_probe) {
++    // kart-recomp: KARTRECOMP_ALLOW_PROBE=1 allows it here too (with --content-dump it writes the game's exefs and romfs folders,
++    // the test input for the "decrypted files" mode).
++    if (explicit_content_probe && !std::getenv("KARTRECOMP_ALLOW_PROBE")) {
          LOG_ERROR(Frontend, "Explicit content comparison is only supported by the ordinary CLI");
          return 2;
      }
@@ -24993,7 +25004,7 @@ index 03f738eb63..8a14de9826 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1679,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1681,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -25010,7 +25021,7 @@ index 03f738eb63..8a14de9826 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1733,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1735,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -25105,7 +25116,7 @@ index 03f738eb63..8a14de9826 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1900,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1902,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -25113,7 +25124,7 @@ index 03f738eb63..8a14de9826 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1934,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1936,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -25131,7 +25142,20 @@ index 03f738eb63..8a14de9826 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1783,7 +2009,20 @@ int main(int argc, char** argv) {
+@@ -1732,7 +1960,11 @@ int main(int argc, char** argv) {
+     // still reports keys that are present but unusable, handled further down.
+     const std::filesystem::path suyu_exe =
+         installed_nand.empty() ? std::filesystem::path{} : RecordedSuyuExecutable(export_user_root);
+-    if (!installed_nand.empty()) {
++    // kart-recomp, "decrypted files" (KARTRECOMP_DECRYPTED=1, set by the launcher): the game runs from an ExeFS folder and a
++    // RomFS folder, so nothing is decrypted and neither keys nor firmware are required (screens that need firmware data, the
++    // Mii ones, do not work).
++    const bool decrypted_files = std::getenv("KARTRECOMP_DECRYPTED") != nullptr;
++    if (!installed_nand.empty() && !decrypted_files) {
+         const auto keys_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir);
+         std::error_code keys_ec;
+         // The same two names KeyManager loads production keys from. There is no
+@@ -1783,7 +2015,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -25153,7 +25177,7 @@ index 03f738eb63..8a14de9826 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +2036,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2042,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -25182,7 +25206,7 @@ index 03f738eb63..8a14de9826 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2086,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2092,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25209,7 +25233,7 @@ index 03f738eb63..8a14de9826 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,6 +2138,19 @@ int main(int argc, char** argv) {
+@@ -1857,6 +2144,19 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25229,7 +25253,7 @@ index 03f738eb63..8a14de9826 100644
      system.GetUserChannel().clear();
  
      if (static_cast<u32>(load_parameters.applet_id)) {
-@@ -1925,6 +2219,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2225,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25239,7 +25263,7 @@ index 03f738eb63..8a14de9826 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2444,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2450,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25247,7 +25271,7 @@ index 03f738eb63..8a14de9826 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2469,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2475,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25278,7 +25302,7 @@ index 03f738eb63..8a14de9826 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2510,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2516,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25296,7 +25320,7 @@ index 03f738eb63..8a14de9826 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2541,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2547,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -25307,7 +25331,7 @@ index 03f738eb63..8a14de9826 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2569,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2575,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25319,7 +25343,7 @@ index 03f738eb63..8a14de9826 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2581,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2587,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());

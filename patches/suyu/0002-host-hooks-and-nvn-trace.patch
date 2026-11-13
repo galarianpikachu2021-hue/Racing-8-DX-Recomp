@@ -827,14 +827,17 @@ index 408daa6839..663bb22f05 100644
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..9ce6247b12 100644
+index 67a55424e9..d78cf6bf0c 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
-@@ -20,6 +20,12 @@
+@@ -20,6 +20,15 @@
  #include "common/string_util.h"
  #include "common/fs/path_util.h"
  #include "core/arm/recomp/arm_recomp.h"
 +#include "kart_runtime/direct_memory.h"
++#if defined(__linux__)
++#include <dlfcn.h>
++#endif
 +#include "core/device_memory.h"
 +#include "common/page_table.h"
 +#include "core/arm/recomp/host_hooks.h"
@@ -843,7 +846,7 @@ index 67a55424e9..9ce6247b12 100644
  #include "core/arm/recomp/guest_fp_env.h"
  #include "core/arm/recomp/recomp_gap_session.h"
  #include "core/arm/recomp/recomp_diagnostic_sampler.h"
-@@ -209,6 +215,8 @@ const int kChainBudgetOverride = [] {
+@@ -209,6 +218,8 @@ const int kChainBudgetOverride = [] {
  }();
  std::atomic<int> g_recomp_chain_budget{32};
  
@@ -852,7 +855,7 @@ index 67a55424e9..9ce6247b12 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -775,6 +783,124 @@ bool IsRecompFastmemReady() {
+@@ -775,6 +786,138 @@ bool IsRecompFastmemReady() {
      return g_fastmem_ready.load(std::memory_order_acquire);
  }
  
@@ -961,6 +964,10 @@ index 67a55424e9..9ce6247b12 100644
 +    g_dm_wanted.store(true, std::memory_order_release);
 +}
 +
++void RecompDirectMemFrame() {
++    if (g_dm_active.load(std::memory_order_acquire)) KartRuntime::DirectMemory::ZeroSinks();
++}
++
 +std::string TakeRecompDirectMemReport() {
 +    if (!g_dm_active.load(std::memory_order_acquire)) return {};
 +    auto& st = KartRuntime::DirectMemory::GetStats();
@@ -968,16 +975,26 @@ index 67a55424e9..9ce6247b12 100644
 +    const u64 r = st.unmapped_reads.load(), w = st.unmapped_writes.load(), o = st.opened_pages.load();
 +    if (r == seen_r && w == seen_w && o == seen_o) return {};
 +    std::string line = fmt::format("direct memory: {} unmapped pages read (as zeros), {} writes to unmapped memory dropped (latest "
-+                                   "address {:#x}), {} pages opened without permission (latest {:#x})",
-+                                   r - seen_r, w - seen_w, st.last_unmapped.load(), o - seen_o, st.last_opened.load());
++                                   "address {:#x}), {} pages opened without permission (latest {:#x}), {} sink pages in all",
++                                   r - seen_r, w - seen_w, st.last_unmapped.load(), o - seen_o, st.last_opened.load(),
++                                   st.sink_pages.load());
 +    seen_r = r, seen_w = w, seen_o = o;
++#if defined(__linux__)
++    // Which code wrote: the module file and the offset in it (resolve with nm on that file).
++    if (const u64 ip = st.last_write_ip.load(); ip != 0) {
++        Dl_info info{};
++        if (dladdr(reinterpret_cast<void*>(ip), &info) != 0 && info.dli_fname) {
++            line += fmt::format("; latest dropped write from {}+{:#x}", info.dli_fname, ip - reinterpret_cast<u64>(info.dli_fbase));
++        }
++    }
++#endif
 +    return line;
 +}
 +
  namespace {
  
  const char* PinCauseName(RecompGuardGen::PinCause cause) {
-@@ -1002,6 +1128,7 @@ struct ArmRecomp::Impl {
+@@ -1002,6 +1145,7 @@ struct ArmRecomp::Impl {
          bridge.page_bits = view.page_bits;
          bridge.pointer_mask = view.pointer_mask;
          bridge.address_space_max = view.address_space_max;
@@ -985,7 +1002,7 @@ index 67a55424e9..9ce6247b12 100644
          if (kSlowPathAbove != 0 && kSlowPathAbove < bridge.address_space_max &&
              TotalStaticBlocks() >= kSlowPathAfterBlocks) {
              bridge.address_space_max = kSlowPathAbove;
-@@ -1179,6 +1306,7 @@ struct ArmRecomp::Impl {
+@@ -1179,6 +1323,7 @@ struct ArmRecomp::Impl {
                      for (const auto& [module_base, name] : modules) {
                          setter(index++, name.c_str(), module_base);
                      }
@@ -993,7 +1010,7 @@ index 67a55424e9..9ce6247b12 100644
                  }
              }
          }
-@@ -1910,12 +2038,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1910,12 +2055,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      impl->interrupted.store(false, std::memory_order_relaxed);
      impl->ctx.halted = 0;
  
@@ -1014,7 +1031,7 @@ index 67a55424e9..9ce6247b12 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +2060,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2077,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -1022,7 +1039,7 @@ index 67a55424e9..9ce6247b12 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +2100,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +2117,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -1079,7 +1096,7 @@ index 67a55424e9..9ce6247b12 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2258,6 +2432,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2449,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -1089,7 +1106,7 @@ index 67a55424e9..9ce6247b12 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2714,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2731,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -1116,10 +1133,10 @@ index 67a55424e9..9ce6247b12 100644
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
-index a1671ea1e7..64d8ce8ac9 100644
+index a1671ea1e7..7ad45cbf93 100644
 --- a/src/core/arm/recomp/arm_recomp.h
 +++ b/src/core/arm/recomp/arm_recomp.h
-@@ -74,6 +74,19 @@ RecompFastmemLayout GetRecompFastmemLayout();
+@@ -74,6 +74,21 @@ RecompFastmemLayout GetRecompFastmemLayout();
  void SetRecompFastmemReady(bool ready);
  bool IsRecompFastmemReady();
  
@@ -1135,6 +1152,8 @@ index a1671ea1e7..64d8ce8ac9 100644
 +void AddRecompVerifyModule(RecompVerifyCodeFn verify, const u64* base, std::string name);
 +/// Fault counts since the last call, as a log line ("" when direct memory is off or nothing happened).
 +std::string TakeRecompDirectMemReport();
++/// Once per presented frame: empties the pages that absorb writes to unmapped memory (kart_runtime/direct_memory.h).
++void RecompDirectMemFrame();
 +
  /// ABI 6 feature GG1 (generation code guard). The loader calls this after
  /// SetRecompLookup, with what each GG1 module's recomp_image_guard_gen_v1
@@ -4245,6 +4264,35 @@ index 79c6ac2079..c9ac4da74e 100644
      // When the input tick is positive, sleep.
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
+diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
+index 8b7a1b642e..c4d2d79a39 100644
+--- a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
++++ b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++#include <algorithm>
+ // SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+@@ -504,6 +506,18 @@ Result FSP_SRV::OpenDataStorageByDataId(OutInterface<IStorage> out_interface,
+         R_RETURN(ResultUnknown);
+     }
+ 
++    // kart-recomp research aid (KARTRECOMP_SYSARCHIVE_INFO=1): the files of each system archive the game opens, with sizes and
++    // the first bytes, to see what a firmware-free replacement has to look like.
++    if (std::getenv("KARTRECOMP_SYSARCHIVE_INFO") != nullptr) {
++        if (const auto dir = FileSys::ExtractRomFS(data)) {
++            for (const auto& f : dir->GetFiles()) {
++                const auto head = f->ReadBytes(std::min<std::size_t>(f->GetSize(), 0x60));
++                LOG_INFO(Service_FS, "system archive {:016X}: {} size {:#x} head {}", title_id, f->GetName(), f->GetSize(),
++                         Common::HexToString(head));
++            }
++        }
++    }
++
+     const FileSys::PatchManager pm{title_id, fsc, content_provider};
+ 
+     auto base =
 diff --git a/src/core/hle/service/hle_ipc.cpp b/src/core/hle/service/hle_ipc.cpp
 index db80205a42..7bac09862b 100644
 --- a/src/core/hle/service/hle_ipc.cpp
@@ -4734,7 +4782,7 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
-index 622b67a83c..3b9c20e32f 100644
+index 622b67a83c..131af6f100 100644
 --- a/src/core/hle/service/vi/conductor.cpp
 +++ b/src/core/hle/service/vi/conductor.cpp
 @@ -4,15 +4,40 @@
@@ -4805,11 +4853,12 @@ index 622b67a83c..3b9c20e32f 100644
      m_system.CoreTiming().UnscheduleEvent(m_event);
  
      if (m_system.IsMulticore()) {
-@@ -67,10 +104,53 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
+@@ -67,10 +104,54 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
      }
  }
  
 +void Conductor::OnFrameQueued() {
++    Core::RecompDirectMemFrame();
 +    const s64 now = SteadyNs();
 +    if (m_last_queue_ns) {
 +        const double ms = static_cast<double>(now - m_last_queue_ns) * 1e-6;
@@ -4859,7 +4908,7 @@ index 622b67a83c..3b9c20e32f 100644
      }
  }
  
-@@ -110,7 +190,7 @@ s64 Conductor::GetNextTicks() const {
+@@ -110,7 +191,7 @@ s64 Conductor::GetNextTicks() const {
          speed_scale = 1.f;
      }
  
@@ -4905,6 +4954,72 @@ index cf43a50363..decb91b0f7 100644
      s32 m_swap_interval = 1;
      f32 m_compose_speed_scale = 1.0f;
  };
+diff --git a/src/core/loader/deconstructed_rom_directory.cpp b/src/core/loader/deconstructed_rom_directory.cpp
+index c9ca95710f..04be58fdc4 100644
+--- a/src/core/loader/deconstructed_rom_directory.cpp
++++ b/src/core/loader/deconstructed_rom_directory.cpp
+@@ -13,9 +13,12 @@
+ #include "core/file_sys/control_metadata.h"
+ #include "core/file_sys/patch_manager.h"
+ #include "core/file_sys/romfs_factory.h"
++#include "core/file_sys/vfs/vfs.h"
++#include "core/file_sys/romfs.h"
+ #include "core/hle/kernel/k_page_table.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/service/filesystem/filesystem.h"
++#include <cstdlib>
+ #include "core/loader/deconstructed_rom_directory.h"
+ #include "core/loader/nso.h"
+ 
+@@ -283,6 +286,22 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
+             romfs = dir->GetFile("romfs");
+         }
+     }
++    // kart-recomp, "decrypted files": the game's data as a plain folder (KARTRECOMP_ROMFS_DIR, or a "romfs" folder inside or beside
++    // the ExeFS folder). The RomFS image the game reads is laid out over those files; nothing is copied.
++    if (romfs == nullptr) {
++        FileSys::VirtualDir data;
++        if (const char* env = std::getenv("KARTRECOMP_ROMFS_DIR"); env && *env) {
++            data = system.GetFilesystem()->OpenDirectory(env, FileSys::OpenMode::Read);
++            if (!data) romfs = system.GetFilesystem()->OpenFile(env, FileSys::OpenMode::Read); // a RomFS image file works too
++            if (!data && !romfs) LOG_ERROR(Loader, "KARTRECOMP_ROMFS_DIR={} cannot be opened", env);
++        }
++        if (!data && !romfs && dir != nullptr) data = dir->GetSubdirectory("romfs");
++        if (!data && !romfs && dir != nullptr && dir->GetParentDirectory()) data = dir->GetParentDirectory()->GetSubdirectory("romfs");
++        if (data) {
++            romfs = FileSys::CreateRomFS(data);
++            LOG_INFO(Loader, "RomFS from the folder {} ({} MB image)", data->GetFullPath(), romfs ? romfs->GetSize() >> 20 : 0);
++        }
++    }
+     LOG_DEBUG(Loader, "registering romfs factory for pid={} title={:016X} romfs_present={}",
+               process.GetProcessId(), metadata.GetTitleID(), romfs != nullptr);
+     system.GetFileSystemController().RegisterProcess(
+diff --git a/src/core/loader/loader.cpp b/src/core/loader/loader.cpp
+index 053fcd0bb1..3d04ec0f1a 100644
+--- a/src/core/loader/loader.cpp
++++ b/src/core/loader/loader.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <ostream>
+@@ -88,6 +89,13 @@ bool HasApplicationProgramContent(const std::shared_ptr<FileSys::NSP>& nsp) {
+ } // namespace
+ 
+ FileType IdentifyFile(FileSys::VirtualFile file) {
++    // kart-recomp, "decrypted files" (KARTRECOMP_DECRYPTED=1): the game is an ExeFS folder, and there are no keys, so the
++    // container probes below (which decrypt a header to look) must not run on its files.
++    if (std::getenv("KARTRECOMP_DECRYPTED") != nullptr) {
++        if (const auto romdir_type = IdentifyFileLoader<AppLoader_DeconstructedRomDirectory>(file)) {
++            return *romdir_type;
++        }
++    }
+     if (const auto nsp_type = IdentifyFileLoader<AppLoader_NSP>(file)) {
+         return *nsp_type;
+     } else if (const auto xci_type = IdentifyFileLoader<AppLoader_XCI>(file)) {
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
 index 3cc84acfdf..74a38ac4f7 100644
 --- a/src/core/loader/nso.cpp
@@ -7688,10 +7803,10 @@ index 0000000000..fc5364b0f8
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/direct_memory.h b/src/kart_runtime/direct_memory.h
 new file mode 100644
-index 0000000000..064c95124c
+index 0000000000..6b0956610e
 --- /dev/null
 +++ b/src/kart_runtime/direct_memory.h
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,222 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart_runtime: direct game memory.
 +//
@@ -7703,7 +7818,11 @@ index 0000000000..064c95124c
 +//                               mod that leaves a null object pointer in the game does this every frame; after the first fault
 +//                               the page is there and later reads cost nothing.
 +//   write to an unmapped page   is dropped: the page is made writable for that one instruction (single step), then replaced with
-+//                               a zero page again.
++//                               a zero page again. Two signals per write is far too slow for code that fills a whole buffer it
++//                               never got (a game without firmware decodes Mii data into a null buffer, 300,000 writes a
++//                               second), so a page that takes kSinkAfter such writes becomes a "sink": it stays writable, and
++//                               ZeroSinks(), which the caller runs once per frame, empties all sinks. Writes to a sink are
++//                               gone by the next frame instead of at once.
 +//   access to a mapped page the game has no permission for (the lookup path ignored permissions): the page is opened for good.
 +//
 +// Faults outside the arena are not ours and go to the previous handler. Everything is counted (Stats) so a caller can log it.
@@ -7711,7 +7830,9 @@ index 0000000000..064c95124c
 +// No dependencies beyond the standard library and the OS; see README.md.
 +#pragma once
 +
++#include <algorithm>
 +#include <atomic>
++#include <cstddef>
 +#include <cstdint>
 +
 +#if defined(__linux__) && defined(__x86_64__)
@@ -7731,6 +7852,8 @@ index 0000000000..064c95124c
 +    std::atomic<std::uint64_t> opened_pages{0};    ///< mapped pages opened because the game lacked permission
 +    std::atomic<std::uint64_t> last_unmapped{0};   ///< game address of the latest unmapped access
 +    std::atomic<std::uint64_t> last_opened{0};     ///< game address of the latest opened page
++    std::atomic<std::uint64_t> sink_pages{0};      ///< unmapped pages that take writes without a fault (emptied by ZeroSinks)
++    std::atomic<std::uint64_t> last_write_ip{0};   ///< host instruction address of the latest dropped write (which code did it)
 +};
 +
 +inline Stats& GetStats() {
@@ -7742,6 +7865,38 @@ index 0000000000..064c95124c
 +inline std::atomic<std::uint8_t*> g_base{nullptr};
 +inline std::atomic<std::uint64_t> g_size{0};
 +inline std::atomic<IsMappedFn> g_is_mapped{nullptr};
++inline constexpr std::uint32_t kSinkAfter = 16;   ///< dropped writes to one page before it becomes a sink
++inline constexpr std::size_t kCountSlots = 4096;  ///< write counters, a direct-mapped cache keyed by page
++inline constexpr std::size_t kMaxRanges = 1024;   ///< separate sink ranges; past that, writes are single-stepped again
++inline constexpr std::uint64_t kMaxGrow = 1u << 20; ///< a range that keeps being extended grows by up to this much at once
++inline std::atomic<std::uint64_t> g_count_page[kCountSlots];
++inline std::atomic<std::uint32_t> g_count[kCountSlots];
++/// Sink ranges [start, end) in game addresses. Code that fills a buffer it never got walks upwards through memory, so a sink is
++/// usually the page after an existing range: ranges keep the list short and let the range grow ahead of the writer.
++struct SinkRange {
++    std::uint64_t start, end;
++};
++inline SinkRange g_ranges[kMaxRanges];
++inline std::size_t g_range_count = 0;
++inline std::atomic_flag g_range_lock = ATOMIC_FLAG_INIT; ///< spin lock: taken in the fault handler and in ZeroSinks
++struct RangeLock {
++    RangeLock() {
++        while (g_range_lock.test_and_set(std::memory_order_acquire)) {
++        }
++    }
++    ~RangeLock() { g_range_lock.clear(std::memory_order_release); }
++};
++
++/// Counts a dropped write to `page` (a game address); true when the page should become a sink now.
++inline bool CountWrite(std::uint64_t page) {
++    const std::size_t slot = (page >> 12) % kCountSlots;
++    if (g_count_page[slot].load(std::memory_order_relaxed) != page + 1) {
++        g_count_page[slot].store(page + 1, std::memory_order_relaxed);
++        g_count[slot].store(1, std::memory_order_relaxed);
++        return false;
++    }
++    return g_count[slot].fetch_add(1, std::memory_order_relaxed) + 1 >= kSinkAfter;
++}
 +#if defined(__linux__) && defined(__x86_64__)
 +inline struct sigaction g_old_segv {};
 +inline struct sigaction g_old_trap {};
@@ -7784,6 +7939,32 @@ index 0000000000..064c95124c
 +        stats.unmapped_reads.fetch_add(1, std::memory_order_relaxed);
 +        return;
 +    }
++    stats.last_write_ip.store(static_cast<std::uint64_t>(uc->uc_mcontext.gregs[REG_RIP]), std::memory_order_relaxed);
++    const std::uint64_t game_page = game & ~std::uint64_t{0xfff};
++    if (CountWrite(game_page)) {
++        RangeLock lock;
++        // The page right after a range extends it, and by as much as the range has already grown (up to kMaxGrow, stopping at
++        // anything the game has mapped): a writer walking through memory soon stops faulting at all.
++        std::uint64_t start = game_page, end = game_page + 0x1000;
++        SinkRange* into = nullptr;
++        for (std::size_t i = 0; i < g_range_count; ++i) {
++            if (g_ranges[i].end == game_page) {
++                into = &g_ranges[i];
++                const std::uint64_t want = std::min(g_ranges[i].end - g_ranges[i].start, kMaxGrow);
++                const std::uint64_t limit = g_size.load(std::memory_order_relaxed);
++                while (end - start < want && end < limit && !(is_mapped && is_mapped(end))) end += 0x1000;
++                break;
++            }
++        }
++        if ((into || g_range_count < kMaxRanges) &&
++            mmap(base + start, end - start, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED) {
++            if (into) into->end = end;
++            else g_ranges[g_range_count++] = {start, end};
++            stats.sink_pages.fetch_add((end - start) >> 12, std::memory_order_relaxed);
++            stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
++            return; // the write happens, into the sink
++        }
++    }
 +    int slot = t_stepping[0] == nullptr ? 0 : (t_stepping[1] == nullptr ? 1 : -1);
 +    if (slot < 0 || mmap(page, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
 +        return Chain(g_old_segv, sig, info, raw);
@@ -7804,6 +7985,28 @@ index 0000000000..064c95124c
 +}
 +#endif
 +} // namespace Detail
++
++/// Empties the sink pages (see the top of the file): call once per frame, from any one thread. Sinks the game has mapped real
++/// memory over since are left alone.
++inline void ZeroSinks() {
++#if defined(__linux__) && defined(__x86_64__)
++    std::uint8_t* const base = Detail::g_base.load(std::memory_order_relaxed);
++    if (!base) return;
++    const IsMappedFn is_mapped = Detail::g_is_mapped.load(std::memory_order_relaxed);
++    Detail::RangeLock lock;
++    for (std::size_t i = 0; i < Detail::g_range_count; ++i) {
++        const Detail::SinkRange range = Detail::g_ranges[i];
++        // Pages the game has mapped since are its own now: empty only the runs between them.
++        std::uint64_t run = range.start;
++        for (std::uint64_t page = range.start; page <= range.end; page += 0x1000) {
++            if (page == range.end || (is_mapped && is_mapped(page))) {
++                if (page > run) madvise(base + run, page - run, MADV_DONTNEED);
++                run = page + 0x1000;
++            }
++        }
++    }
++#endif
++}
 +
 +/// Starts handling faults in [base, base + size). Call once, before game code runs. False when this platform has no handler.
 +inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped) {
@@ -7994,10 +8197,10 @@ index 0000000000..e3e1ccc18e
 +}
 diff --git a/src/kart_runtime/tests/test_direct_memory.cpp b/src/kart_runtime/tests/test_direct_memory.cpp
 new file mode 100644
-index 0000000000..7e93b086d1
+index 0000000000..bbaebea55b
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_direct_memory.cpp
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,92 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart_runtime test: direct memory's fault handler on a small arena.
 +#include <cstdio>
@@ -8009,7 +8212,7 @@ index 0000000000..7e93b086d1
 +#if defined(__linux__) && defined(__x86_64__)
 +namespace {
 +constexpr std::uint64_t kSize = 64 * 0x1000;
-+constexpr std::uint64_t kMapped = 8 * 0x1000; // one game page that exists, read-only
++constexpr std::uint64_t kMapped = 50 * 0x1000; // one game page that exists, read-only
 +
 +bool IsMapped(std::uint64_t address) {
 +    return (address & ~std::uint64_t{0xfff}) == kMapped;
@@ -8053,6 +8256,28 @@ index 0000000000..7e93b086d1
 +    *reinterpret_cast<volatile std::uint64_t*>(arena + 5 * 0x1000 - 4) = ~std::uint64_t{0}; // unaligned on purpose (x86)
 +    for (int i = -4; i < 4; ++i) CHECK(mem[5 * 0x1000 + i] == 0);
 +    CHECK(stats.unmapped_writes.load() == 4);
++
++    // A page that keeps taking writes becomes a sink: the writes stop faulting, and ZeroSinks empties it.
++    const std::uint64_t writes_before = stats.unmapped_writes.load();
++    for (int i = 0; i < 1000; ++i) mem[20 * 0x1000 + (i & 0xff)] = static_cast<std::uint8_t>(i | 1);
++    CHECK(stats.sink_pages.load() == 1);
++    CHECK(stats.unmapped_writes.load() - writes_before <= 16);
++    CHECK(mem[20 * 0x1000 + 5] != 0);
++    ZeroSinks();
++    for (int i = 0; i < 256; ++i) CHECK(mem[20 * 0x1000 + i] == 0);
++    mem[20 * 0x1000 + 9] = 3; // still a sink: no fault, emptied again
++    ZeroSinks();
++    CHECK(mem[20 * 0x1000 + 9] == 0);
++    CHECK(stats.sink_pages.load() == 1);
++
++    // A writer walking upwards through unmapped memory: the sink range grows ahead of it, so almost no write faults, and it
++    // stops at the mapped page (which is opened, not swallowed).
++    const std::uint64_t walk_before = stats.unmapped_writes.load();
++    for (std::uint64_t a = 21 * 0x1000; a < 40 * 0x1000; a += 4) *reinterpret_cast<volatile std::uint32_t*>(arena + a) = 0xdead;
++    CHECK(stats.unmapped_writes.load() - walk_before < 200);
++    ZeroSinks();
++    for (std::uint64_t a = 21 * 0x1000; a < 40 * 0x1000; a += 0x400) CHECK(mem[a] == 0);
++    CHECK(mem[kMapped + 5] == 42);
 +
 +    // A mapped page the game may not write is opened, and keeps its contents and the write.
 +    mem[kMapped + 6] = 7;

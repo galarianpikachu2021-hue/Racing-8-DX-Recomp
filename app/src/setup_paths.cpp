@@ -109,22 +109,35 @@ bool PlaceFile(const QString& from, const QString& to, bool move, QString* error
 }
 } // namespace
 
-QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
+namespace {
+QString DecryptedValue(const DataLayout& l, const char* key) {
+    QFile f(l.decryptedFile());
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    for (const QByteArray& line : f.readAll().split('\n'))
+        if (line.startsWith(QByteArray(key) + "=")) return QString::fromUtf8(line.mid(qstrlen(key) + 1)).trimmed();
+    return {};
+}
+} // namespace
+
+QString DataLayout::decryptedExefs() const { return DecryptedValue(*this, "exefs"); }
+QString DataLayout::decryptedRomfs() const { return DecryptedValue(*this, "romfs"); }
+
+QStringList DataLayout::contentArgs() const {
+    if (decrypted()) return {QDir(decryptedExefs()).filePath("main")};
+    return {"--content-base", base(), "--content-update", update()};
+}
+
+void DataLayout::addContentEnv(QProcessEnvironment& env) const {
+    if (!decrypted()) return;
+    env.insert("KARTRECOMP_DECRYPTED", "1");
+    env.insert("KARTRECOMP_ROMFS_DIR", decryptedRomfs());
+}
+
+// Firmware: every .nca of a folder, or of a zip, flat into the registered folder. "" or the reason it failed.
+QString InstallFirmware(const QString& firmware, const DataLayout& l) {
+    SetupInputs in;
+    in.firmware = firmware;
     QString error;
-    if (!PlaceFile(in.base, l.base(), true, &error) || !PlaceFile(in.update, l.update(), true, &error) ||
-        !PlaceFile(in.keys, l.keysFile(), false, &error))
-        return error;
-    // title.keys beside prod.keys, when the user has one
-    const QString title = QFileInfo(in.keys).absolutePath() + "/title.keys";
-    if (QFileInfo(title).isFile() && !PlaceFile(title, QFileInfo(l.keysFile()).absolutePath() + "/title.keys", false, &error)) return error;
-    // DLC files already in the folder (moved there by an earlier build) stay; anything the user dropped from the list goes
-    QSet<QString> wanted;
-    for (const QString& dlc : in.dlc) wanted.insert(QFileInfo(dlc).fileName());
-    for (const QFileInfo& old : QDir(l.dlcDir()).entryInfoList(QDir::Files))
-        if (!wanted.contains(old.fileName())) QFile::remove(old.absoluteFilePath());
-    for (const QString& dlc : in.dlc)
-        if (!PlaceFile(dlc, l.dlcDir() + "/" + QFileInfo(dlc).fileName(), true, &error)) return error;
-    // firmware: every .nca of a folder, or of a zip, flat into the registered folder
     // Already installed (the page shows the installed folder when its own settings are gone): clearing it first would delete the input.
     if (QFileInfo(in.firmware).isDir() && QDir(in.firmware).canonicalPath() == QDir(l.firmwareDir()).canonicalPath()) return {};
     QDir(l.firmwareDir()).removeRecursively();
@@ -150,6 +163,37 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
         if (n == 0) return QStringLiteral("The firmware zip holds no .nca files.");
     }
     return {};
+}
+
+QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
+    QString error;
+    if (in.decrypted()) {
+        // Used in place: the data is about 12 GB of files the user keeps where they are.
+        QDir().mkpath(l.content());
+        QFile f(l.decryptedFile());
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return QStringLiteral("Cannot write %1.").arg(l.decryptedFile());
+        f.write("exefs=" + QFileInfo(in.exefs).absoluteFilePath().toUtf8() + "\nromfs=" + QFileInfo(in.romfs).absoluteFilePath().toUtf8() + "\n");
+        f.close();
+        // Optional in this mode: with keys and firmware the game has its Mii data.
+        if (!in.keys.isEmpty() && !PlaceFile(in.keys, l.keysFile(), false, &error)) return error;
+        if (!in.firmware.isEmpty()) return InstallFirmware(in.firmware, l);
+        return {};
+    }
+    QFile::remove(l.decryptedFile());
+    if (!PlaceFile(in.base, l.base(), true, &error) || !PlaceFile(in.update, l.update(), true, &error) ||
+        !PlaceFile(in.keys, l.keysFile(), false, &error))
+        return error;
+    // title.keys beside prod.keys, when the user has one
+    const QString title = QFileInfo(in.keys).absolutePath() + "/title.keys";
+    if (QFileInfo(title).isFile() && !PlaceFile(title, QFileInfo(l.keysFile()).absolutePath() + "/title.keys", false, &error)) return error;
+    // DLC files already in the folder (moved there by an earlier build) stay; anything the user dropped from the list goes
+    QSet<QString> wanted;
+    for (const QString& dlc : in.dlc) wanted.insert(QFileInfo(dlc).fileName());
+    for (const QFileInfo& old : QDir(l.dlcDir()).entryInfoList(QDir::Files))
+        if (!wanted.contains(old.fileName())) QFile::remove(old.absoluteFilePath());
+    for (const QString& dlc : in.dlc)
+        if (!PlaceFile(dlc, l.dlcDir() + "/" + QFileInfo(dlc).fileName(), true, &error)) return error;
+    return InstallFirmware(in.firmware, l);
 }
 
 bool IsBuilt(const DataLayout& l, const QString& engineVersion) {

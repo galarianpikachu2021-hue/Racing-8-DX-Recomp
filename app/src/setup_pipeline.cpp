@@ -37,7 +37,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     const auto reader = [&](const QString& p) { return ReadNspInfo(paths.exporter, p, in.keys); };
     if (const QString why = ValidateInputs(in, reader); !why.isEmpty()) return {false, why};
     // Each supported update has its own hot block list (data/mk8d-<version>/hot_blocks.txt); without one every block is compiled cold.
-    const QString updateName = UpdateName(reader(in.update).version);
+    const QString updateName = in.decrypted() ? DecryptedUpdateName(in.exefs) : UpdateName(reader(in.update).version);
     QString hotList = HotListFor(paths.hotList, updateName);
     if (!QFileInfo::exists(hotList)) hotList.clear();
     if (Cancelled(cancel)) return {false, QStringLiteral("Cancelled.")};
@@ -61,6 +61,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         ex.setProcessChannelMode(QProcess::SeparateChannels);
         BuildRunner::DieWithParent(ex);
         QStringList args{"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"};
+        if (in.decrypted()) args = {"--exefs", layout.decryptedExefs(), "--out", layout.exportDir(), "--progress-fd", "1"};
         for (const QString& p : in.patches) args << "--patch" << p;
         if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond";
         ex.start(paths.exporter, args);

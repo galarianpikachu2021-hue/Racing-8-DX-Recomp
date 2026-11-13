@@ -114,9 +114,9 @@ QString GamePackage::problems() const {
 
 QStringList GamePackage::launchArguments(bool fullscreen) const {
     if (installed) {
-        QStringList args{QStringLiteral("--module-dir"), layout.moduleDir(), QStringLiteral("--content-base"), layout.base(),
-                         QStringLiteral("--content-update"), layout.update()};
-        for (const auto& dlc : dlcFiles()) args << QStringLiteral("--content-dlc") << dlc;
+        QStringList args = QStringList{QStringLiteral("--module-dir"), layout.moduleDir()} + layout.contentArgs();
+        if (!layout.decrypted()) // DLC comes as NSPs, which need keys
+            for (const auto& dlc : dlcFiles()) args << QStringLiteral("--content-dlc") << dlc;
         if (fullscreen) args << QStringLiteral("-f");
         return args;
     }
@@ -154,6 +154,7 @@ QProcessEnvironment GamePackage::launchEnvironment() const {
             }
         }
         if (!env.contains(QStringLiteral("KARTRECOMP_NATIVE_GPU"))) env.insert(QStringLiteral("KARTRECOMP_NATIVE_GPU"), QStringLiteral("native"));
+        layout.addContentEnv(env);
         return env;
     }
 #ifndef Q_OS_WIN

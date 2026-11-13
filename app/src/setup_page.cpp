@@ -18,6 +18,8 @@
 #include <QVBoxLayout>
 #include <thread>
 
+#include <QComboBox>
+
 #include "build_runner.h"
 #include "keys_check.h"
 #include "nsp_info.h"
@@ -34,8 +36,37 @@ SetupPage::SetupPage(QWidget* parent)
                                 "and stays on this PC."));
     intro->setWordWrap(true);
     top->addWidget(intro);
-    auto* grid = new QGridLayout;
-    top->addLayout(grid);
+    // Two ways to give the game: the NSP files with keys and firmware (everything works), or already decrypted files (no keys or
+    // firmware; DLC and the screens that need firmware data are not available).
+    mode = new QComboBox;
+    mode->addItems({tr("Game files (NSP) with keys and firmware"), tr("Decrypted files (no keys or firmware)")});
+    top->addWidget(mode);
+    nspBox = new QWidget;
+    auto* grid = new QGridLayout(nspBox);
+    grid->setContentsMargins(0, 0, 0, 0);
+    top->addWidget(nspBox);
+    decBox = new QWidget;
+    auto* dgrid = new QGridLayout(decBox);
+    dgrid->setContentsMargins(0, 0, 0, 0);
+    top->addWidget(decBox);
+    exefs = addRow(dgrid, 0, tr("Game code"), tr("ExeFS folder: main, main.npdm, rtld, sdk, subsdk0 (update 3.0.4 or 4.0.1 applied)"),
+                   [this] { pick(exefs, true, tr("Select the ExeFS folder"), {}); });
+    romfs = addRow(dgrid, 1, tr("Game data"), tr("RomFS folder (the game's files), or a romfs.bin image"), [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the RomFS folder (cancel to pick a romfs.bin instead)"));
+        if (!dir.isEmpty()) { romfs.edit->setText(dir); revalidate(); return; }
+        pick(romfs, false, tr("Select the RomFS image"), tr("RomFS images (*.bin *.romfs);;All files (*)"));
+    });
+    decKeys = addRow(dgrid, 2, tr("Keys (optional)"), tr("prod.keys, only to read the firmware"), [this] { pick(decKeys, false, tr("Select prod.keys"), tr("Key files (*.keys)")); });
+    decFirmware = addRow(dgrid, 3, tr("Firmware (optional)"), tr("Folder of firmware files, or a .zip: gives the game its Mii data"), [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Select the firmware folder (cancel to pick a zip instead)"));
+        if (!dir.isEmpty()) { decFirmware.edit->setText(dir); revalidate(); return; }
+        pick(decFirmware, false, tr("Select the firmware zip"), tr("Zip files (*.zip)"));
+    });
+    auto* decNote = new QLabel(tr("The code and data are used where they are (nothing is copied or moved), so keep them there. DLC is not available "
+                                  "in this mode. Without keys and firmware the game has no Mii data, and at the moment it crashes soon after it "
+                                  "starts because of that: give both until that is fixed."));
+    decNote->setWordWrap(true);
+    dgrid->addWidget(decNote, 8, 0, 1, 3);
     base = addRow(grid, 0, tr("Base game"), tr("Mario Kart 8 Deluxe (.nsp)"), [this] { pick(base, false, tr("Select the base game"), tr("NSP files (*.nsp)")); });
     update = addRow(grid, 1, tr("Update"), tr("The 3.0.4 or 4.0.1 update (.nsp)"), [this] { pick(update, false, tr("Select the 3.0.4 or 4.0.1 update"), tr("NSP files (*.nsp)")); });
     dlcRow = addRow(grid, 2, tr("DLC (optional)"), tr("Booster Course Pass and other add-ons (.nsp)"), [this] { pickDlc(); });
@@ -76,6 +107,20 @@ SetupPage::SetupPage(QWidget* parent)
     keys.edit->setText(s.value("setup/keys").toString());
     firmware.edit->setText(s.value("setup/firmware").toString());
     dlc = s.value("setup/dlc").toStringList();
+    exefs.edit->setText(s.value("setup/exefs").toString());
+    romfs.edit->setText(s.value("setup/romfs").toString());
+    decKeys.edit->setText(s.value("setup/dec_keys").toString());
+    decFirmware.edit->setText(s.value("setup/dec_firmware").toString());
+    mode->setCurrentIndex(s.value("setup/decrypted", layout.decrypted()).toBool() ? 1 : 0);
+    const auto showMode = [this] {
+        nspBox->setVisible(mode->currentIndex() == 0);
+        decBox->setVisible(mode->currentIndex() == 1);
+    };
+    showMode();
+    connect(mode, &QComboBox::currentIndexChanged, this, [this, showMode] {
+        showMode();
+        revalidate();
+    });
     split60->setChecked(s.value("setup/split60", false).toBool());
     dlcRow.edit->setText(dlc.join("; "));
     QString missing;
@@ -131,7 +176,13 @@ void SetupPage::pickDlc() {
 }
 
 SetupInputs SetupPage::inputs() const {
-    SetupInputs in{base.edit->text(), update.edit->text(), keys.edit->text(), firmware.edit->text(), dlc, {}};
+    SetupInputs in{base.edit->text(), update.edit->text(), keys.edit->text(), firmware.edit->text(), dlc, {}, {}, {}};
+    if (mode->currentIndex() == 1) {
+        in.exefs = exefs.edit->text().isEmpty() ? QStringLiteral(" ") : exefs.edit->text(); // decrypted mode even while still empty
+        in.romfs = romfs.edit->text();
+        in.keys = decKeys.edit->text();
+        in.firmware = decFirmware.edit->text();
+    }
     if (split60->isChecked()) in.patches << QStringLiteral("split60");
     return in;
 }
@@ -154,6 +205,20 @@ void SetupPage::revalidate() {
     const SetupInputs in = inputs();
     const bool exporterOk = QFileInfo::exists(paths.exporter);
     const auto show = [](Row& r, const QString& reason, bool empty) { r.status->setText(empty ? QString() : StatusText(reason)); };
+    if (mode->currentIndex() == 1) {
+        const QString code = exefs.edit->text(), data = romfs.edit->text();
+        show(exefs, ValidateExefs(code), code.isEmpty());
+        show(romfs, ValidateRomfs(data), data.isEmpty());
+        const QString k = decKeys.edit->text(), fw = decFirmware.edit->text();
+        const KeyProblem kp = k.isEmpty() ? KeyProblem::None : CheckKeys(k);
+        show(decKeys, k.isEmpty() ? tr("Give the keys too: the firmware cannot be read without them.") : KeyProblemText(kp, MissingKeyName(k)), k.isEmpty() && fw.isEmpty());
+        show(decFirmware, fw.isEmpty() ? tr("Give the firmware too.") : ValidateFirmware(fw), fw.isEmpty() && k.isEmpty());
+        inputsValid = exporterOk && !code.isEmpty() && !data.isEmpty() && exefs.status->text() == StatusText({}) && romfs.status->text() == StatusText({}) &&
+                      (decKeys.status->text().isEmpty() || decKeys.status->text() == StatusText({})) &&
+                      (decFirmware.status->text().isEmpty() || decFirmware.status->text() == StatusText({}));
+        refreshButtons();
+        return;
+    }
     // keys first: opening an NSP needs them
     const KeyProblem kp = in.keys.isEmpty() ? KeyProblem::None : CheckKeys(in.keys);
     show(keys, KeyProblemText(kp, MissingKeyName(in.keys)), in.keys.isEmpty());
@@ -194,10 +259,12 @@ void SetupPage::build() {
     auto outside = [](const QString& from, const QString& to) {
         return !from.isEmpty() && !(QFileInfo(to).exists() && QFileInfo(to).canonicalFilePath() == QFileInfo(from).canonicalFilePath());
     };
-    if (outside(base.edit->text(), layout.base())) toMove << base.edit->text();
-    if (outside(update.edit->text(), layout.update())) toMove << update.edit->text();
-    for (const QString& d : dlc)
-        if (outside(d, layout.dlcDir() + "/" + QFileInfo(d).fileName())) toMove << d;
+    if (mode->currentIndex() == 0) {
+        if (outside(base.edit->text(), layout.base())) toMove << base.edit->text();
+        if (outside(update.edit->text(), layout.update())) toMove << update.edit->text();
+        for (const QString& d : dlc)
+            if (outside(d, layout.dlcDir() + "/" + QFileInfo(d).fileName())) toMove << d;
+    }
     if (!toMove.isEmpty()) {
         const auto answer = QMessageBox::warning(
             this, tr("Move your game files?"),
@@ -250,4 +317,9 @@ void SetupPage::saveInputs() const {
     s.setValue("setup/firmware", firmware.edit->text());
     s.setValue("setup/dlc", dlc);
     s.setValue("setup/split60", split60->isChecked());
+    s.setValue("setup/exefs", exefs.edit->text());
+    s.setValue("setup/romfs", romfs.edit->text());
+    s.setValue("setup/dec_keys", decKeys.edit->text());
+    s.setValue("setup/dec_firmware", decFirmware.edit->text());
+    s.setValue("setup/decrypted", mode->currentIndex() == 1);
 }

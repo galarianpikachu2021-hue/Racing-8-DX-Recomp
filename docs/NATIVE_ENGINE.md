@@ -324,3 +324,31 @@ Tried and dropped: checking only the chain budget at block exits (not `halted` a
 
 Still open on this path: the per-block entry check (`c->pc` against the block's own address) and the `c->pc` store on every
 chained exit; huge pages for the arena; Windows (needs a vectored exception handler doing what `direct_memory.h` does).
+
+## "Decrypted files" Setup mode (2026-11-13)
+
+Setup can take the game as already decrypted files instead of NSPs: a code folder (ExeFS: `main`, `main.npdm`, `rtld`, `sdk`,
+`subsdk0`, update 3.0.4 or 4.0.1 applied; the update is recognised by `main`'s build id) and the data (a RomFS folder, or a
+`romfs.bin` image). Nothing is copied: `content/decrypted.txt` in the data folder names the two paths.
+
+- Exporter: `kartrecomp-export --exefs <folder> --out <dir>` (no keys). Same output as from the NSPs (checked: identical files).
+- Engine: started with `<exefs>/main` as the game, `KARTRECOMP_DECRYPTED=1` (no keys/firmware check, the folder loader is tried
+  first so no container probe decrypts anything) and `KARTRECOMP_ROMFS_DIR=<folder or image>` (`FileSys::CreateRomFS` lays the
+  image out over the folder's files).
+- Launcher: mode box on the Setup page, `DataLayout::contentArgs()` / `addContentEnv()` for every launch and the test boot,
+  `kartrecomp-setup --exefs <dir> --romfs <dir|file>`. DLC (NSPs) is not available in this mode.
+- Verified: whole pipeline in a sandbox with no keys or firmware, 4 min 53 s, test boot passed; title screen reached from both a
+  `romfs.bin` and a folder.
+- **Not solved: no firmware means no Mii data, and the game then destroys its own memory.** suyu's stand-in for the MiiModel
+  system archive is six 16-byte files. The game treats them as real, ends up with a vertex buffer at address 0x1903c with a size of
+  about 4 GB, and converts it in place (`main`+0x8e408c calling 0x8e53f0, 4.0.1): four billion stray writes that run over the
+  game's own code and data. With the slow page-table path this took minutes; with direct memory it takes seconds, and the game
+  crashes about 25 s after start. Without the archive at all the game does not boot; a 64 KB all-zero stand-in fails differently.
+  A guard at the loop entry also broke normal boots. So for now the mode has optional keys + firmware rows, and with them it is
+  clean. A real fix needs a stand-in archive in the right format (NFTR/NFSR, the Switch form of the FFL resource: header with
+  per-part maximum sizes, then part tables) with at least empty parts the game accepts.
+- `kart_runtime/direct_memory.h` gained sink ranges for such runaway writers (a page that takes 16 dropped writes stays
+  writable and grows ahead of the writer; `ZeroSinks()` empties them once per frame), and the fault report names the writing
+  code (`latest dropped write from <module>+<offset>`). Research aids: `KARTRECOMP_SYSARCHIVE_INFO=1` (files and headers of
+  the system archives the game opens), `KARTRECOMP_ALLOW_PROBE=1` with `--content-probe --content-dump <dir>` (writes exefs and
+  romfs.bin from the NSPs).
