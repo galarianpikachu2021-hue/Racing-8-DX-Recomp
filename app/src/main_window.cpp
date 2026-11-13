@@ -257,36 +257,20 @@ QWidget* MainWindow::buildPlayTab() {
     language_combo = makeCombo(kConsoleLanguages);
     language_combo->setCurrentIndex(1); // English (US) until the config says otherwise: a save before loadSettings must not write Japanese
     language_combo->setToolTip(
-        tr("The language the emulated console runs the game in, chosen before you start. Saved in the "
+        tr("The language the game runs in, chosen before you start. Saved in the "
            "game's config and used every launch until you pick another here (or in game, where it can also "
            "be changed and overrides this). Not every course or text string is translated, so a non-English "
            "language can still fall back to English in places."));
     form->addRow(tr("Console language:"), language_combo);
 
-    renderer_combo = makeCombo({tr("Emulated GPU (default)"), tr("Native Vulkan (experimental)")});
-    renderer_combo->setToolTip(
-        tr("Native Vulkan runs the game's own NVN graphics calls directly on your GPU with no "
-           "emulated GPU. It is new: expect a short pause as each course starts, and please report "
-           "anything that looks different from the emulated GPU. The Display tab's internal "
-           "resolution applies to both renderers (see Native resolution scaling to turn it off "
-           "for native); the upscaling filter, FSR and anti-aliasing apply to the emulated GPU "
-           "only for now."));
-    renderer_combo->setCurrentIndex(QSettings().value(QStringLiteral("renderer"), 0).toInt());
-    connect(renderer_combo, &QComboBox::currentIndexChanged, this,
-            [](int index) { QSettings().setValue(QStringLiteral("renderer"), index); });
-    form->addRow(tr("Renderer:"), renderer_combo);
     native_res_combo = makeCombo({tr("720p"), tr("1080p"), tr("1440p"), tr("4K (2160p)")});
     native_res_combo->setToolTip(
-        tr("The native Vulkan renderer's output resolution: the size of the final picture, the HUD included. "
-           "The 3D scene can be drawn smaller than this and upscaled in the in-game menu (F10). This replaces "
-           "the Display tab's internal resolution multiplier for native Vulkan; the emulated GPU keeps that one."));
+        tr("The output resolution: the size of the final picture, the HUD included. "
+           "The 3D scene can be drawn smaller than this and upscaled in the in-game menu (F10)."));
     native_res_combo->setCurrentIndex(QSettings().value(QStringLiteral("native_output_resolution"), 2).toInt());
     connect(native_res_combo, &QComboBox::currentIndexChanged, this,
             [](int index) { QSettings().setValue(QStringLiteral("native_output_resolution"), index); });
-    native_res_combo->setEnabled(renderer_combo->currentIndex() == 1);
-    connect(renderer_combo, &QComboBox::currentIndexChanged, native_res_combo,
-            [this](int index) { native_res_combo->setEnabled(index == 1); });
-    form->addRow(tr("Native output resolution:"), native_res_combo);
+    form->addRow(tr("Output resolution:"), native_res_combo);
     auto* ingame_note = new QLabel(
         tr("In game, F10 (or both stick buttons, L3 + R3, on a controller) opens a settings menu: upscaler, render scale, "
            "sharpening, frame generation, HDR, present mode, speed limit, an FPS counter and which controller plays as "
@@ -296,7 +280,7 @@ QWidget* MainWindow::buildPlayTab() {
 #ifdef Q_OS_LINUX
     pin_combo = makeCombo({tr("Off (default)"), tr("On")});
     pin_combo->setToolTip(
-        tr("Pins each emulated CPU core's thread (and the native renderer's) to its own CPU, so the "
+        tr("Pins each of the game's main threads (and the renderer's) to its own CPU, so the "
            "caches stay warm instead of being refilled after every migration. It helps a little in "
            "heavy moments (fewer dropped frames). Leave it off if the CPU is busy with other "
            "programs, because pinned threads can't move away from them. Needs 6 or more CPU threads."));
@@ -387,24 +371,25 @@ QWidget* MainWindow::buildDisplayTab() {
     vsync_combo = makeCombo(kVSync);
     fullscreen_mode_combo = makeCombo(kFullscreenModes);
     docked_combo = makeCombo(kConsoleModes);
-    form->addRow(tr("Internal resolution:"), resolution_combo);
     form->addRow(tr("Aspect ratio:"), aspect_combo);
-    form->addRow(tr("Upscaling filter:"), filter_combo);
     fsr_sharpness_spin = new QSpinBox;
     fsr_sharpness_spin->setRange(0, 200);
     fsr_sharpness_spin->setSuffix(QStringLiteral(" %"));
-    form->addRow(tr("FSR sharpening:"), fsr_sharpness_spin);
-    form->addRow(tr("Anti-aliasing:"), aa_combo);
+    // Settings of the removed emulated GPU (internal resolution, upscaling filter, its FSR sharpening, anti-aliasing): the
+    // widgets stay so the config values are kept as they are, but they are not shown. The renderer's own upscalers,
+    // sharpening and render scale are on the Enhancements tab and in the in-game menu.
+    for (QWidget* w : {static_cast<QWidget*>(resolution_combo), static_cast<QWidget*>(filter_combo),
+                       static_cast<QWidget*>(fsr_sharpness_spin), static_cast<QWidget*>(aa_combo)}) {
+        w->setParent(page);
+        w->hide();
+    }
     form->addRow(tr("VSync:"), vsync_combo);
     form->addRow(tr("Fullscreen mode:"), fullscreen_mode_combo);
     form->addRow(tr("Graphics quality:"), docked_combo);
     auto* note = new QLabel(
         tr("Graphics quality: High uses the game's full effects, Low its lighter ones (the console's docked and handheld "
            "modes). The resolution is the same in both: it follows the output resolution and render scale. It can also be "
-           "changed in game (F10). The internal resolution is the picture size the emulated GPU draws at. "
-           "It only looks sharper when the window or screen is larger than 1920 x 1080, "
-           "for example 3840 x 2160 in fullscreen on a 1440p or 4K monitor. AMD FSR (1) with sharpening is "
-           "the upscaler built in. Changes are saved immediately and apply from the next launch; "
+           "changed in game (F10). Changes are saved immediately and apply from the next launch; "
            "they are locked while the game runs."));
     note->setWordWrap(true);
     form->addRow(note);
@@ -414,7 +399,7 @@ QWidget* MainWindow::buildDisplayTab() {
 QWidget* MainWindow::buildFrameRateTab() {
     auto* page = frame_rate_page = new QWidget;
     auto* form = new QFormLayout(page);
-    limit_check = new QCheckBox(tr("Limit emulation speed"));
+    limit_check = new QCheckBox(tr("Limit game speed"));
     limit_spin = new QSpinBox;
     limit_spin->setRange(10, 400);
     limit_spin->setSuffix(QStringLiteral(" %"));
@@ -584,8 +569,8 @@ void MainWindow::refreshControllers() {
 
 QProcessEnvironment MainWindow::launchEnvironment() const {
     auto env = package.launchEnvironment();
-    if (renderer_combo->currentIndex() == 1) {
-        env.insert(QStringLiteral("KARTRECOMP_NATIVE_GPU"), QStringLiteral("native"));
+    {
+        env.insert(QStringLiteral("KARTRECOMP_NATIVE_GPU"), QStringLiteral("native")); // the only renderer
         static const int kHeights[] = {720, 1080, 1440, 2160};
         env.insert(QStringLiteral("KARTRECOMP_NATIVE_HEIGHT"),
                    QString::number(kHeights[qBound(0, native_res_combo->currentIndex(), 3)]));
