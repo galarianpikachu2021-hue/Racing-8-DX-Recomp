@@ -62,6 +62,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         BuildRunner::DieWithParent(ex);
         QStringList args{"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"};
         for (const QString& p : in.patches) args << "--patch" << p;
+        if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond";
         ex.start(paths.exporter, args);
         if (!ex.waitForStarted()) return {false, QStringLiteral("Cannot start the exporter (%1).").arg(paths.exporter)};
         while (!ex.waitForFinished(200)) {
@@ -88,7 +89,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QFile list(QDir(layout.exportDir()).filePath("code_patches.txt"));
         if (list.open(QIODevice::ReadOnly)) plan.codePatches = list.readAll();
     }
-    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + "|hot-O3";
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::FastCode() ? "|hot-O3-fast1" : "|hot-O3");
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QStringLiteral("Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);

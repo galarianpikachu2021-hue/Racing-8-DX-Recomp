@@ -52,6 +52,8 @@ def main() -> int:
     weave = "--weave" in sys.argv
     centre_stick = not weave and not time_trial
     lines = []
+    # --frames=N: script length (default 12000 = 200 s; a 50cc Grand Prix race of three laps needs about 16000).
+    end = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--frames=")), 12000)
     race_start = 2300 if centre_stick else 3400
     # Title and menus: hold A for 4 frames every second.
     menu_taps = [f for f in range(400, race_start, 60) if not (players > 1 and f == 520)]
@@ -72,12 +74,13 @@ def main() -> int:
     if time_trial:
         for k in range(4):
             lines.append(f"{615 + k} KEY_DDOWN 0;0 0;0")
-    # --cup=N: the cup-select screen is up around frame 1260 and the A tap at 1300 confirms it, so
+    # --cup=N: the cup-select screen is up from about frame 1110 and the A tap at 1180 confirms it (2026-11-12; it was 1260/1300
+    # before loads got faster), so
     # N right-presses in between move N cups along (1 = Flower Cup, whose first course, Mario Circuit,
     # has an open sky; the default Mushroom Cup starts in the mostly enclosed Mario Kart Stadium).
     for i in range(cup):
         for k in range(4):
-            lines.append(f"{1262 + 8 * i + k} KEY_DRIGHT 0;0 0;0")
+            lines.append(f"{1136 + 8 * i + k} KEY_DRIGHT 0;0 0;0")
     # Smart Steering resets each race and is toggled from the pause menu (L), which
     # only opens once the race has started: + (pause), L, + (resume) after "GO",
     # with the accelerator released (A would pick "Continue"). "GO" is around frame 2325 on a normal
@@ -88,7 +91,7 @@ def main() -> int:
     pause_window = range(2290, 2480) if centre_stick else range(0)
     pause_toggle = {2300: "KEY_PLUS", 2370: "KEY_L", 2450: "KEY_PLUS"}
     # Race: accelerate, weave gently (8 s period), use an item every 5 s.
-    for f in range(race_start, 12000):
+    for f in range(race_start, end):
         if f in pause_window:
             button = next((b for start, b in pause_toggle.items() if start <= f < start + (10 if b == "KEY_L" else 4)), None)
             if button:
@@ -121,7 +124,7 @@ def main() -> int:
         import os
         base = os.path.join(os.path.dirname(os.path.abspath(args[0])), "script0-{}.txt")
         other = [f"{f + k} KEY_A 0;0 0;0" for f in menu_taps for k in range(4)]
-        other += [f"{f} KEY_A 0;0 0;0" for f in range(race_start, 12000)]
+        other += [f"{f} KEY_A 0;0 0;0" for f in range(race_start, end)]
         other.sort(key=lambda line: int(line.split()[0]))
         for n in range(2, players + 1):
             with open(base.format(n), "w") as out:

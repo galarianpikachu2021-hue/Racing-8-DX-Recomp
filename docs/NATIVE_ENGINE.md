@@ -277,3 +277,50 @@ Mario Circuit with the user's mods and settings (FSR 3 100%, HDR, 3x frame gener
   mix/delay is most likely the slowdown (picture slow, audio real time). To confirm by ear after the pin fix.
 - **Crash**: not native-related: the known character-mod null call (docs/NATIVE_GPU.md "PC 0"); the engine's null-call recovery
   stopped after 100,000 calls (~5 min of a race with that racer). The cap is removed.
+
+## Fast code: direct memory, whole-image guard, chained branches, native calls (2026-11-12)
+
+The user's slowdown (Mario Circuit, bursts of 17-25 ms frames once per lap) is the main game thread running out of CPU: in a
+scripted three-lap 50cc race without mods it already averages 64% busy and peaks at 81%. Four changes to the generated code cut
+that. All are static (no JIT), and Setup builds them on Linux by default (`BuildRunner::FastCode()`;
+`KARTRECOMP_NO_FAST_CODE=1` at Setup time builds the old form; Windows keeps the old form until its engine has the fault handler).
+
+Measured on 4.0.1, Mario Circuit, 3 laps, native threads, pinned, 180 s profile; first only the 127 hot units of `main` rebuilt:
+
+| build | main game thread samples | all game threads | vs before |
+|---|---|---|---|
+| before | 115,339 | 249,303 | |
+| direct memory | 96,982 | 208,875 | -16% |
+| + conditional branches chained | 93,694 | 198,335 | -20% |
+| + native calls (BL and BLR) | 91,660 | 193,318 | -22% |
+| + whole-image guard (no per-block check) | 83,757 | 179,769 | -28% |
+
+1. **Direct memory (image feature DM1, `-DRECOMP_DIRECT_MEM=1`).** Every load and store used to call a helper that looked the
+   address up in the page table (two dependent loads, a call, and the compiler had to assume the call changed every register in
+   the context). Now game address A is read at `arena + A`, inline: the arena is the engine's existing reservation of the whole
+   39-bit address space (suyu's "fastmem arena", `HostMemory::VirtualBasePointer`), mapped with the game's own permissions. Each
+   block reads the arena base once (`_dm`, declared by `RECOMP_GG_GUARD`) and takes its context as a `restrict` pointer, so a
+   store to game memory does not make the compiler reload registers. The module gets the arena through
+   `recomp_image_direct_v1` (engine: `ActivateDirectMem` in `arm_recomp.cpp`, before the first guest block runs).
+   What the lookup did for bad addresses is now `src/kart_runtime/direct_memory.h` (standalone, with a test): a fault handler
+   that makes reads of unmapped memory return zeros (a zero page is mapped there, so a mod that leaves a null object in the
+   game, like the Trump driver on Donkey Kong, faults once per page instead of taking the slow path 37 times a frame), drops
+   writes to unmapped memory (single step), and opens mapped pages the game has no permission for (the lookup ignored
+   permissions). The counts are logged with the frame pacing line (`direct memory: ...`).
+   Limits: an address outside the 39-bit space is not caught (it was read as zero before; now it is a host access relative to
+   the arena, in practice a crash); the arena maps 4 KB pages, so the earlier huge-page gain of the backing mapping (2%) is
+   not available on this path yet.
+2. **Whole-image guard (GW1, `-DRECOMP_GUARD_WHOLE=1`).** Every block used to compare a per-block "seen" word with the
+   module's generation word on entry (three loads, one of them a cache line per block). Instead each module exports
+   `recomp_image_verify_code_v1`: an FNV-1a hash over all instruction words of the span its blocks cover, checked once against
+   the game's memory before any guest code runs (`VerifyWholeImages`). A mismatch (other update, a code-patching mod or cheat)
+   stops the engine with a message that says to run Setup again; before, each block noticed for itself.
+3. **Conditional branches chain (exporter `--chain-cond`).** B.cond, CBZ/CBNZ and TBZ/TBNZ tail-call their targets like B
+   does, instead of returning to `recomp_image_run_slice`, whose 23 MB block index misses the cache for most targets.
+4. **Native calls (exporter `--native-calls`, now also for BLR).** BL and BLR call the target block as a C function; a RET to
+   the instruction after the call continues there without a dispatcher round trip.
+
+Tried and dropped: checking only the chain budget at block exits (not `halted` and `pending_svc`): the game hung at boot.
+
+Still open on this path: the per-block entry check (`c->pc` against the block's own address) and the `c->pc` store on every
+chained exit; huge pages for the arena; Windows (needs a vectored exception handler doing what `direct_memory.h` does).

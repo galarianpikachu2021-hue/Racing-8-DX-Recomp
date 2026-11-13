@@ -38,9 +38,20 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
     // Hot pieces at -O3: measured 2% less game-thread CPU than -O2 (4.0.1, 4 races each), same compile time and size. Cold pieces
     // are compiled cheaply.
     a << (hot ? "-O3" : "-O0");
+    // Fast code (docs/NATIVE_ENGINE.md "Direct memory"): game memory is read in place instead of through a helper call, and the
+    // blocks leave their own code check to one check of the whole module at start.
+    if (BuildRunner::FastCode()) a << "-DRECOMP_DIRECT_MEM=1" << "-DRECOMP_GUARD_WHOLE=1";
     return a;
 }
 } // namespace
+
+bool BuildRunner::FastCode() {
+#ifdef Q_OS_WIN
+    return false; // the Windows engine has no fault handler for direct memory yet
+#else
+    return qEnvironmentVariable("KARTRECOMP_NO_FAST_CODE") != QLatin1String("1");
+#endif
+}
 
 QString BuildRunner::ModuleFileName(const QString& name) {
 #ifdef Q_OS_WIN

@@ -113,7 +113,7 @@ index 88bf023008..7044ca660e 100644
              eden_path_cache = eden_path / CACHE_DIR;
              eden_path_config = eden_path / CONFIG_DIR;
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index 0ae108d9c1..5017e4a72d 100644
+index 0ae108d9c1..8ce347aa34 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -50,6 +50,7 @@
@@ -221,7 +221,21 @@ index 0ae108d9c1..5017e4a72d 100644
  
          // Virtual memory initialization
          virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
-@@ -784,6 +854,30 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
+@@ -582,6 +652,13 @@ public:
+         }
+ #if defined(__linux__)
+         madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
++#if defined(__x86_64__)
++        // kart-recomp: the reservation starts readable and writable, so memory the game never mapped reads as zeros and keeps
++        // what is written to it. Recompiled code with direct memory (kart_runtime/direct_memory.h) accesses this range itself:
++        // start with no access, like a range that was mapped and unmapped again, so every such access reaches the fault
++        // handler (reads give zeros, writes are dropped - what the page-table lookup did).
++        mprotect(virtual_base, virtual_size, PROT_NONE);
++#endif
+ #endif
+         free_manager.SetAddressSpace(virtual_base, virtual_size);
+         return true;
+@@ -784,6 +861,30 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
  }
  
  void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
@@ -321,10 +335,10 @@ index 0000000000..7d4a017150
 +} // namespace KartCodePatches
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
-index 0000000000..fff81b0826
+index 0000000000..032850d7a5
 --- /dev/null
 +++ b/src/common/kart_overlay.h
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,207 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: input path to the in-game overlay menu (suyu_cmd/native_gpu/overlay_menu.h).
 +// The window and controller drivers push navigation events here; while the menu is open the
@@ -454,6 +468,15 @@ index 0000000000..fff81b0826
 +inline std::atomic<uint32_t>& TitleBHeld() {
 +    static std::atomic<uint32_t> bits{0};
 +    return bits;
++}
++/// Diagnostics for the frame-pacing log line: controller reads by the game and vsync signals since the last line.
++inline std::atomic<uint32_t>& DiagPadReads() {
++    static std::atomic<uint32_t> n{0};
++    return n;
++}
++inline std::atomic<uint32_t>& DiagVsyncs() {
++    static std::atomic<uint32_t> n{0};
++    return n;
 +}
 +inline std::atomic<bool>& QuitRequest() { // the overlay's "Quit game": the window closes like its close button
 +    static std::atomic<bool> v{false};
@@ -804,20 +827,23 @@ index 408daa6839..663bb22f05 100644
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..636e7d2025 100644
+index 67a55424e9..9ce6247b12 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
-@@ -20,6 +20,9 @@
+@@ -20,6 +20,12 @@
  #include "common/string_util.h"
  #include "common/fs/path_util.h"
  #include "core/arm/recomp/arm_recomp.h"
++#include "kart_runtime/direct_memory.h"
++#include "core/device_memory.h"
++#include "common/page_table.h"
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
 +#include "core/arm/recomp/nvn_trace.h"
  #include "core/arm/recomp/guest_fp_env.h"
  #include "core/arm/recomp/recomp_gap_session.h"
  #include "core/arm/recomp/recomp_diagnostic_sampler.h"
-@@ -209,6 +212,8 @@ const int kChainBudgetOverride = [] {
+@@ -209,6 +215,8 @@ const int kChainBudgetOverride = [] {
  }();
  std::atomic<int> g_recomp_chain_budget{32};
  
@@ -826,7 +852,148 @@ index 67a55424e9..636e7d2025 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -1910,12 +1915,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -775,6 +783,124 @@ bool IsRecompFastmemReady() {
+     return g_fastmem_ready.load(std::memory_order_acquire);
+ }
+ 
++// kart-recomp: direct memory (DM1). The adapter between the modules, suyu's address-space arena and kart_runtime's fault handler.
++namespace {
++std::mutex g_dm_lock;
++std::vector<RecompDirectMemSetter> g_dm_setters;
++std::atomic<bool> g_dm_wanted{false};
++std::atomic<bool> g_dm_active{false};
++std::atomic<const Common::PageTable::PageEntryData*> g_dm_entries{nullptr};
++std::atomic<u64> g_dm_limit{0};
++
++bool DirectMemIsMapped(u64 address) {
++    const auto* entries = g_dm_entries.load(std::memory_order_relaxed);
++    if (!entries || address >= g_dm_limit.load(std::memory_order_relaxed)) return false;
++    return entries[address >> Memory::YUZU_PAGEBITS].ptr.Type() != Common::PageType::Unmapped;
++}
++
++struct VerifyModule {
++    RecompVerifyCodeFn verify;
++    const u64* base;
++    std::string name;
++};
++std::vector<VerifyModule> g_verify_modules;
++std::atomic<bool> g_verify_pending{false};
++
++/// GW1: every module that leaves the per-block check out verifies its whole code once, here.
++void VerifyWholeImages(System& system) {
++    if (!g_verify_pending.load(std::memory_order_acquire)) return;
++    std::scoped_lock lk{g_dm_lock};
++    if (!g_verify_pending.load(std::memory_order_acquire)) return;
++    const u8* const arena = system.DeviceMemory().buffer.VirtualBasePointer();
++    // The modules learn their load bases when the first guest thread looks up its first block (ModuleBaseFor), which calls
++    // this again; before that there is nothing to compare.
++    for (const auto& m : g_verify_modules) {
++        if (m.base && *m.base == 0) return;
++    }
++    for (const auto& m : g_verify_modules) {
++        if (!arena || !m.base || m.verify(arena + *m.base) != 1) {
++            LOG_CRITICAL(Core_ARM, "The game's code in memory is not the code the recompiled module '{}' was built from (a different "
++                                   "game update, or a mod or cheat that patches code). Run Setup again to rebuild the game.", m.name);
++            if (arena && m.base) {
++                u32 w[8];
++                std::memcpy(w, arena + *m.base, sizeof(w));
++                LOG_CRITICAL(Core_ARM, "  module base {:#x}; first code words in memory: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}",
++                             *m.base, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
++            }
++            std::fprintf(stderr, "kart-recomp: recompiled module '%s' does not match the game's code; run Setup again.\n",
++                         m.name.c_str());
++            std::abort();
++        }
++    }
++    LOG_INFO(Core_ARM, "whole-image code guard: {} module(s) verified", g_verify_modules.size());
++    g_verify_pending.store(false, std::memory_order_release);
++}
++
++void ActivateDirectMem(System& system, const void* entries, u64 address_space_max) {
++    VerifyWholeImages(system);
++    if (!g_dm_wanted.load(std::memory_order_acquire) || g_dm_active.load(std::memory_order_acquire)) return;
++    std::scoped_lock lk{g_dm_lock};
++    if (g_dm_active.load(std::memory_order_acquire)) return;
++    u8* const arena = system.DeviceMemory().buffer.VirtualBasePointer();
++    g_dm_entries.store(static_cast<const Common::PageTable::PageEntryData*>(entries));
++    g_dm_limit.store(address_space_max);
++    if (!arena || !KartRuntime::DirectMemory::Install(arena, u64{1} << 39, &DirectMemIsMapped)) {
++        LOG_CRITICAL(Core_ARM, "The game was built for direct memory but this engine has no address-space arena or fault handler "
++                               "here; rebuild the game without it");
++        std::abort();
++    }
++    // Prove the fault handler works here before the game depends on it: address 0x100 is never mapped, so a read must give zero
++    // and a write must be dropped.
++    {
++        volatile u64* const probe = reinterpret_cast<volatile u64*>(arena + 0x100);
++        const u64 before = *probe;
++        *probe = 0x5a5a5a5a;
++        if (before != 0 || *probe != 0) {
++            LOG_CRITICAL(Core_ARM, "direct memory: the fault handler self-test failed (read {:#x}, then {:#x} after a write)", before,
++                         static_cast<u64>(*probe));
++            std::abort();
++        }
++    }
++    for (const auto setter : g_dm_setters) {
++        if (setter(arena, u64{1} << 39) != 1) {
++            LOG_CRITICAL(Core_ARM, "A game module refused the direct memory arena; rebuild the game");
++            std::abort();
++        }
++    }
++    g_dm_active.store(true, std::memory_order_release);
++    LOG_INFO(Core_ARM, "direct memory: {} module(s) read the game's address space at {}", g_dm_setters.size(), fmt::ptr(arena));
++}
++} // namespace
++
++void AddRecompVerifyModule(RecompVerifyCodeFn verify, const u64* base, std::string name) {
++    std::scoped_lock lk{g_dm_lock};
++    for (const auto& m : g_verify_modules) {
++        if (m.verify == verify) return; // the loader runs twice
++    }
++    g_verify_modules.push_back({verify, base, std::move(name)});
++    g_verify_pending.store(true, std::memory_order_release);
++}
++
++void AddRecompDirectMemModule(RecompDirectMemSetter setter) {
++    std::scoped_lock lk{g_dm_lock};
++    if (std::find(g_dm_setters.begin(), g_dm_setters.end(), setter) != g_dm_setters.end()) return; // the loader runs twice
++    g_dm_setters.push_back(setter);
++    g_dm_wanted.store(true, std::memory_order_release);
++}
++
++std::string TakeRecompDirectMemReport() {
++    if (!g_dm_active.load(std::memory_order_acquire)) return {};
++    auto& st = KartRuntime::DirectMemory::GetStats();
++    static u64 seen_r = 0, seen_w = 0, seen_o = 0;
++    const u64 r = st.unmapped_reads.load(), w = st.unmapped_writes.load(), o = st.opened_pages.load();
++    if (r == seen_r && w == seen_w && o == seen_o) return {};
++    std::string line = fmt::format("direct memory: {} unmapped pages read (as zeros), {} writes to unmapped memory dropped (latest "
++                                   "address {:#x}), {} pages opened without permission (latest {:#x})",
++                                   r - seen_r, w - seen_w, st.last_unmapped.load(), o - seen_o, st.last_opened.load());
++    seen_r = r, seen_w = w, seen_o = o;
++    return line;
++}
++
+ namespace {
+ 
+ const char* PinCauseName(RecompGuardGen::PinCause cause) {
+@@ -1002,6 +1128,7 @@ struct ArmRecomp::Impl {
+         bridge.page_bits = view.page_bits;
+         bridge.pointer_mask = view.pointer_mask;
+         bridge.address_space_max = view.address_space_max;
++        ActivateDirectMem(system, view.entries, view.address_space_max);
+         if (kSlowPathAbove != 0 && kSlowPathAbove < bridge.address_space_max &&
+             TotalStaticBlocks() >= kSlowPathAfterBlocks) {
+             bridge.address_space_max = kSlowPathAbove;
+@@ -1179,6 +1306,7 @@ struct ArmRecomp::Impl {
+                     for (const auto& [module_base, name] : modules) {
+                         setter(index++, name.c_str(), module_base);
+                     }
++                    VerifyWholeImages(system); // GW1: the bases are known now, and no block has run yet
+                 }
+             }
+         }
+@@ -1910,12 +2038,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      impl->interrupted.store(false, std::memory_order_relaxed);
      impl->ctx.halted = 0;
  
@@ -847,7 +1014,7 @@ index 67a55424e9..636e7d2025 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +1937,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2060,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -855,7 +1022,7 @@ index 67a55424e9..636e7d2025 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +1977,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +2100,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -912,7 +1079,7 @@ index 67a55424e9..636e7d2025 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2258,6 +2309,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2432,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -922,7 +1089,7 @@ index 67a55424e9..636e7d2025 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2591,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2714,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -948,6 +1115,30 @@ index 67a55424e9..636e7d2025 100644
 +    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *Core::t_hook_system, c->vreg};
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
+diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
+index a1671ea1e7..64d8ce8ac9 100644
+--- a/src/core/arm/recomp/arm_recomp.h
++++ b/src/core/arm/recomp/arm_recomp.h
+@@ -74,6 +74,19 @@ RecompFastmemLayout GetRecompFastmemLayout();
+ void SetRecompFastmemReady(bool ready);
+ bool IsRecompFastmemReady();
+ 
++/// kart-recomp: direct memory (image feature DM1). A module built for it reads guest address A at arena + A; the loader registers
++/// the module's recomp_image_direct_v1 here and it is called with the arena once the game's address space exists, before any
++/// guest code runs.
++using RecompDirectMemSetter = unsigned (*)(u8* arena, u64 size);
++void AddRecompDirectMemModule(RecompDirectMemSetter setter);
++/// kart-recomp: whole-image code guard (image feature GW1). The loader registers the module's recomp_image_verify_code_v1 and
++/// where its load base is kept; before any guest code runs the engine has it check the game's code in memory against what the
++/// module was generated from, and stops with a clear message on a mismatch.
++using RecompVerifyCodeFn = unsigned (*)(const u8* code_at_base);
++void AddRecompVerifyModule(RecompVerifyCodeFn verify, const u64* base, std::string name);
++/// Fault counts since the last call, as a log line ("" when direct memory is off or nothing happened).
++std::string TakeRecompDirectMemReport();
++
+ /// ABI 6 feature GG1 (generation code guard). The loader calls this after
+ /// SetRecompLookup, with what each GG1 module's recomp_image_guard_gen_v1
+ /// returned, and before the process is created. The guard only engages with
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..11a0a8b666
@@ -1761,10 +1952,10 @@ index 0000000000..11a6dabdf0
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
-index 0000000000..f1c251f6f5
+index 0000000000..68e8b5a69b
 --- /dev/null
 +++ b/src/core/arm/recomp/native_hid.cpp
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,266 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_hid.h"
 +
@@ -1776,6 +1967,7 @@ index 0000000000..f1c251f6f5
 +#include <string>
 +#include <vector>
 +
++#include "common/kart_overlay.h"
 +#include "common/logging/log.h"
 +#include "common/settings.h"
 +#include "core/arm/recomp/host_hooks.h"
@@ -1954,6 +2146,7 @@ index 0000000000..f1c251f6f5
 +            const u64 out = ctx.x[0];
 +            const u32 id = mem.Read32(ctx.x[1]);
 +            const NpadState s = Read(Controller(*sys, id), style);
++            KartOverlay::DiagPadReads().fetch_add(1, std::memory_order_relaxed);
 +            mem.WriteBlock(out, &s, sizeof(s));
 +            ctx.pc = ctx.x[30];
 +            return true;
@@ -2696,6 +2889,39 @@ index 0000000000..5129cdb53e
 +void WriteReport();
 +
 +} // namespace Core::NvnTrace
+diff --git a/src/core/arm/recomp/recomp_image_features.h b/src/core/arm/recomp/recomp_image_features.h
+index bc1f385ca0..b05acb9a85 100644
+--- a/src/core/arm/recomp/recomp_image_features.h
++++ b/src/core/arm/recomp/recomp_image_features.h
+@@ -17,7 +17,10 @@
+ //   bit 0 (0x1)  FM1   page-table fastmem (RECOMP_FEATURE_FASTMEM_PT1)
+ //   bit 1 (0x2)  GG1   generation code guard (RECOMP_FEATURE_GUARD_GEN1)
+ //   bit 2 (0x4)  FPX1  exact native floating point (RECOMP_FEATURE_FPX1)
+-//   bits 3-31          free
++//   bit 3 (0x8)  DM1   direct memory: guest address A is read at arena + A (RECOMP_FEATURE_DIRECT_MEM1, kart-recomp)
++//   bit 4 (0x10) GW1   whole-image code guard: blocks do not verify themselves, the host has the image verify all of
++//                      its code once before guest code runs (RECOMP_FEATURE_GUARD_WHOLE1, kart-recomp)
++//   bits 5-31          free
+ //
+ // Deliberately dependency-free so tests/recompiler_smoke can include it.
+ namespace Core::RecompImageFeature {
+@@ -25,9 +28,15 @@ namespace Core::RecompImageFeature {
+ inline constexpr std::uint32_t FastmemPT1 = 1u << 0;
+ inline constexpr std::uint32_t GuardGen1 = 1u << 1;
+ inline constexpr std::uint32_t ExactFpX1 = 1u << 2;
++inline constexpr std::uint32_t DirectMem1 = 1u << 3;
++inline constexpr std::uint32_t GuardWhole1 = 1u << 4;
+ 
+ /// Features this host implements.
+-inline constexpr std::uint32_t kHostSupported = FastmemPT1 | GuardGen1 | ExactFpX1;
++inline constexpr std::uint32_t kHostSupported = FastmemPT1 | GuardGen1 | ExactFpX1 | GuardWhole1
++#if defined(__linux__) && defined(__x86_64__)
++                                                | DirectMem1 // needs kart_runtime/direct_memory.h's fault handler
++#endif
++    ;
+ 
+ /// The bits of `features` a host implementing `supported` does not know; any
+ /// nonzero result means the image must be refused.
 diff --git a/src/core/arm/recomp/sdk_trace.cpp b/src/core/arm/recomp/sdk_trace.cpp
 new file mode 100644
 index 0000000000..8603bf77ee
@@ -4508,15 +4734,17 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
-index 622b67a83c..d13852a7a8 100644
+index 622b67a83c..3b9c20e32f 100644
 --- a/src/core/hle/service/vi/conductor.cpp
 +++ b/src/core/hle/service/vi/conductor.cpp
-@@ -4,15 +4,38 @@
+@@ -4,15 +4,40 @@
  // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
++#include "common/kart_overlay.h"
 +#include "common/logging/log.h"
  #include "common/settings.h"
++#include "core/arm/recomp/arm_recomp.h"
  #include "core/core.h"
  #include "core/core_timing.h"
 +#include "core/hle/service/nvnflinger/frame_pacing.h"
@@ -4551,7 +4779,7 @@ index 622b67a83c..d13852a7a8 100644
  
  namespace Service::VI {
  
-@@ -22,6 +45,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -22,6 +47,16 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
          m_vsync_managers.insert({display.GetId(), VsyncManager{}});
      });
  
@@ -4568,7 +4796,7 @@ index 622b67a83c..d13852a7a8 100644
      if (system.IsMulticore()) {
          m_event = Core::Timing::CreateEvent(
              "ScreenComposition",
-@@ -47,6 +80,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
+@@ -47,6 +82,8 @@ Conductor::Conductor(Core::System& system, Container& container, DisplayList& di
  }
  
  Conductor::~Conductor() {
@@ -4577,7 +4805,7 @@ index 622b67a83c..d13852a7a8 100644
      m_system.CoreTiming().UnscheduleEvent(m_event);
  
      if (m_system.IsMulticore()) {
-@@ -67,9 +102,43 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
+@@ -67,10 +104,53 @@ void Conductor::UnlinkVsyncEvent(u64 display_id, Event* event) {
      }
  }
  
@@ -4590,6 +4818,14 @@ index 622b67a83c..d13852a7a8 100644
 +            LOG_INFO(Service_VI, "frame pacing: queue intervals <=17.5 ms {}, <=20 {}, <=25 {}, <=40 {}, longer {}; {} early composes (adaptive vsync {})",
 +                     m_interval_buckets[0], m_interval_buckets[1], m_interval_buckets[2], m_interval_buckets[3],
 +                     m_interval_buckets[4], m_early_composes, m_adaptive_vsync ? "on" : "off");
++            // Per 600 frames: how long they took, how many vsync signals the game got and how often it read its controllers
++            // (normally 10 s, 600 and 2 per frame): shows a game that steps its logic more or less than once per frame.
++            static s64 last_line_ns = 0;
++            LOG_INFO(Service_VI, "frame pacing: 600 frames in {:.2f} s, {} vsync signals, {} native pad reads",
++                     last_line_ns ? static_cast<double>(now - last_line_ns) * 1e-9 : 0.0, KartOverlay::DiagVsyncs().exchange(0),
++                     KartOverlay::DiagPadReads().exchange(0));
++            last_line_ns = now;
++            if (const std::string dm = Core::TakeRecompDirectMemReport(); !dm.empty()) LOG_WARNING(Service_VI, "{}", dm);
 +            std::fill(std::begin(m_interval_buckets), std::end(m_interval_buckets), 0u);
 +            m_early_composes = 0;
 +            m_interval_count = 0;
@@ -4619,9 +4855,11 @@ index 622b67a83c..d13852a7a8 100644
          m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
 +        if (m_swap_interval != before) LOG_INFO(Service_VI, "kart-recomp: game swap interval {} -> {}", before, m_swap_interval);
          manager.SignalVsync(m_system.Kernel());
++        KartOverlay::DiagVsyncs().fetch_add(1, std::memory_order_relaxed);
      }
  }
-@@ -110,7 +179,7 @@ s64 Conductor::GetNextTicks() const {
+ 
+@@ -110,7 +190,7 @@ s64 Conductor::GetNextTicks() const {
          speed_scale = 1.f;
      }
  
@@ -6706,7 +6944,7 @@ index 0000000000..c36de3728b
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..c242f5b386 100644
+index 699980238b..3b5b26b402 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -350,17 +350,20 @@ inline constexpr int kChainBudget = 256;
@@ -6735,7 +6973,7 @@ index 699980238b..c242f5b386 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -369,6 +372,37 @@ inline std::string ChainTo(u64 t) {
+@@ -369,6 +372,77 @@ inline std::string ChainTo(u64 t) {
      return b;
  }
  
@@ -6747,6 +6985,46 @@ index 699980238b..c242f5b386 100644
 +// capped, past which the BL chains as before.
 +inline bool g_native_calls = false;
 +inline constexpr unsigned kNativeCallDepth = 48;
++// kart-recomp (exporter --chain-cond): conditional branches (B.cond, CBZ/CBNZ, TBZ/TBNZ) tail-call their two targets like B does,
++// instead of returning to the module's dispatcher loop, whose block-index read misses the cache for most branch targets.
++// Measured with direct memory on (4.0.1, Mario Circuit, all game threads): 5% less CPU. The older measurement above ("deliberately
++// do not chain") was taken on the JIT-hybrid build and does not hold for the static-only one.
++inline bool g_chain_cond = false;
++inline std::string ChainTo(u64 t);
++inline std::string CondExit(const std::string& cond, u64 taken, u64 next) {
++    if (g_chain_cond) {
++        return "if " + cond + " " + ChainTo(taken) + " else " + ChainTo(next);
++    }
++    char b[160];
++    snprintf(b, sizeof b, " { c->pc=g_module_base+0x%llxULL; } else { c->pc=g_module_base+0x%llxULL; } return;",
++             (unsigned long long)taken, (unsigned long long)next);
++    return "if " + cond + b;
++}
++// What a native call does when the callee came back at the return address: go on with the block there.
++inline std::string AfterNativeCall(u64 next) {
++    if (g_chain_blocks && g_chain_mod && g_chain_blocks->count(next)) {
++        char nn[64];
++        FuncNameTo(nn, g_chain_mod, next);
++        return std::string{"{ void "} + nn + "(GuestContext*); RECOMP_TAIL return " + nn + "(c); }";
++    }
++    return "return;";
++}
++// BLR with native calls: the target is looked up in this module's block index (a miss, or a block the host hooks, goes to the
++// dispatcher as before), called as a C function, and a RET to the instruction after the BLR continues there directly.
++inline std::string NativeCallIndirect(unsigned rn, u64 next) {
++    char b[1024];
++    const std::string after = AfterNativeCall(next);
++    snprintf(b, sizeof b,
++             "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; c->pc=_target; { uint64_t _rel=_target-g_module_base; "
++             "BlockFn _f=(_rel<0x1000000ULL && g_main_hookmap[_rel>>2])?(BlockFn)0:recomp_lookup(_rel); "
++             "if (!_f || c->halted || c->pending_svc != ~UINT64_C(0) || --c->chain_budget <= 0) return; "
++             "if (c->fm_reserved < %uu) { c->fm_reserved++; _f(c); c->fm_reserved--; "
++             "if (c->pc != g_module_base+0x%llxULL || c->halted || c->pending_svc != ~UINT64_C(0) || "
++             "--c->chain_budget <= 0) return; %s } "
++             "RECOMP_TAIL return _f(c); } } /* BLR */",
++             rn, (unsigned long long)next, kNativeCallDepth, (unsigned long long)next, after.c_str());
++    return b;
++}
 +inline std::string NativeCallTo(u64 t, u64 next) {
 +    if (!g_native_calls || !g_chain_blocks || !g_chain_mod || !g_chain_blocks->count(t)) {
 +        return ChainTo(t);
@@ -6773,7 +7051,7 @@ index 699980238b..c242f5b386 100644
  // The same for a computed target. A chain of blocks otherwise ends at the first
  // BR, BLR or RET, and every one of those is a round trip out to the host
  // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
-@@ -946,8 +980,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -946,8 +1020,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -6783,7 +7061,7 @@ index 699980238b..c242f5b386 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1188,10 +1221,10 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,16 +1261,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
@@ -6797,7 +7075,37 @@ index 699980238b..c242f5b386 100644
          return false;
      }
      if ((i & 0xFFFFFC1F) == 0xD65F0000) { put("c->pc=c->x[30]; return; /* RET */"); return false; }
-@@ -5100,7 +5133,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+     if ((i & 0xFFFFFC1F) == 0xD61F0000) { u32 rn = (i >> 5) & 31; put("c->pc=c->x[" + std::to_string(rn) + "]; return; /* BR */"); return false; }
+     if ((i & 0xFFFFFC1F) == 0xD63F0000) {
+         u32 rn = (i >> 5) & 31;
++        if (g_native_calls && g_chain_blocks && g_chain_mod) {
++            put(NativeCallIndirect(rn, next));
++            return false;
++        }
+         snprintf(buf, sizeof buf,
+                  "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; "
+                  "c->pc=_target; return; } /* BLR */",
+@@ -1209,16 +1286,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+         const s64 off = ((s32)((i >> 5) << 13) >> 13);
+         const u64 tt = pc + off * 4;
+         const u32 cond = i & 15;
+-        snprintf(buf, sizeof buf,
+-                 "if %s { c->pc=g_module_base+0x%llxULL; } else { "
+-                 "c->pc=g_module_base+0x%llxULL; } return;",
+-                 Cond(cond).c_str(), (unsigned long long)tt,
+-                 (unsigned long long)next);
+-        put(buf);
++        put(CondExit(Cond(cond), tt, next));
+         return false;
+     }
+-    if ((i & 0x7E000000) == 0x34000000) { u32 sf = i >> 31; bool nz = (i >> 24) & 1; u32 rt = i & 31; s64 off = ((s32)(((i >> 5) & 0x7FFFF) << 13) >> 13); u64 tt = pc + off * 4; std::string v = sf ? Xz(rt) : Wz(rt); snprintf(buf, sizeof buf, "if ((%s)%s0) { c->pc=g_module_base+0x%llxULL; } else { c->pc=g_module_base+0x%llxULL; } return;", v.c_str(), nz ? "!=" : "==", (unsigned long long)tt, (unsigned long long)next); put(buf); return false; }
+-    if ((i & 0x7E000000) == 0x36000000) { bool nz = (i >> 24) & 1; u32 b = ((i >> 31) << 5) | ((i >> 19) & 31); u32 rt = i & 31; s64 off = ((s32)(((i >> 5) & 0x3FFF) << 18) >> 18); u64 tt = pc + off * 4; snprintf(buf, sizeof buf, "if (((%s>>%u)&1)%s0) { c->pc=g_module_base+0x%llxULL; } else { c->pc=g_module_base+0x%llxULL; } return;", Xz(rt).c_str(), b, nz ? "!=" : "==", (unsigned long long)tt, (unsigned long long)next); put(buf); return false; }
++    if ((i & 0x7E000000) == 0x34000000) { u32 sf = i >> 31; bool nz = (i >> 24) & 1; u32 rt = i & 31; s64 off = ((s32)(((i >> 5) & 0x7FFFF) << 13) >> 13); u64 tt = pc + off * 4; std::string v = sf ? Xz(rt) : Wz(rt); put(CondExit("((" + v + ")" + (nz ? "!=" : "==") + "0)", tt, next)); return false; }
++    if ((i & 0x7E000000) == 0x36000000) { bool nz = (i >> 24) & 1; u32 b = ((i >> 31) << 5) | ((i >> 19) & 31); u32 rt = i & 31; s64 off = ((s32)(((i >> 5) & 0x3FFF) << 18) >> 18); u64 tt = pc + off * 4; put(CondExit("(((" + Xz(rt) + ">>" + std::to_string(b) + ")&1)" + (nz ? "!=" : "==") + "0)", tt, next)); return false; }
+     if ((i & 0xFFE0001F) == 0xD4000001) { u32 imm = (i >> 5) & 0xFFFF; snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; c->pending_svc=%uULL; recomp_svc(c,%u); return;", (unsigned long long)next, imm, imm); put(buf); return false; }
+     if ((i & 0xFFE0001F) == 0xD4200000) {
+         const u32 imm = (i >> 5) & 0xFFFF;
+@@ -5100,7 +5172,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -6808,7 +7116,16 @@ index 699980238b..c242f5b386 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5257,6 +5292,17 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5231,7 +5305,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+         FuncNameTo(namebuf, mod.c_str(), b.vaddr);
+         rcu += "void ";
+         rcu += namebuf;
+-        rcu += "(GuestContext* c){\n";
++        rcu += "(GuestContext* RECOMP_RESTRICT c){\n";
+         const u32 first = (u32)((b.vaddr - base) / 4);
+         rcu += "    static const uint32_t _expected[]={";
+         if (EmitGuardGen()) {
+@@ -5257,6 +5331,17 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -6826,7 +7143,7 @@ index 699980238b..c242f5b386 100644
          // Lookup indexes every emitted instruction, not only block starts. An
          // indirect transfer can therefore enter the middle of this function.
          // Direct chains publish their exact target PC before calling, so any
-@@ -5321,10 +5367,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5321,10 +5406,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -6838,7 +7155,7 @@ index 699980238b..c242f5b386 100644
          }
          rcu += "}\n\n";
          flush_unit(unit, false);
-@@ -5566,7 +5609,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5566,7 +5648,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -6847,7 +7164,15 @@ index 699980238b..c242f5b386 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5758,7 +5801,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5746,6 +5828,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+ 
+     std::ostringstream ex;
+     ex << "/* auto-generated by suyu static recompiler - DO NOT EDIT */\n"
++          "#define RECOMP_RUNTIME_IMPL 1\n"
+           "#include \"recomp_runtime.h\"\n\n"
+           "/* The one symbol suyu resolves out of a recompiled image. Named\n"
+           "   distinctly from the internal recomp_lookup so the export is\n"
+@@ -5758,7 +5841,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -6857,7 +7182,70 @@ index 699980238b..c242f5b386 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5838,12 +5882,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5799,13 +5883,61 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+               "  return &g_recomp_gg_word;\n"
+               "}\n";
+     }
++    if (EmitGuardGen()) {
++        // kart-recomp: DM1 and GW1 (see DirectMemH). The code hash is FNV-1a over the instruction words the blocks cover, as the
++        // exporter read them (code patches applied). Only block words: the words between blocks are data the loader or the
++        // game may change (rtld's are).
++        std::vector<std::pair<u64, u64>> runs; // merged [start, end) spans of block words, module-relative
++        {
++            std::vector<std::pair<u64, u64>> spans;
++            spans.reserve(blocks.size());
++            for (const auto& b : blocks) spans.emplace_back(b.vaddr, b.vaddr + (u64)b.count * 4);
++            std::sort(spans.begin(), spans.end());
++            for (const auto& sp : spans) {
++                if (!runs.empty() && sp.first <= runs.back().second) runs.back().second = std::max(runs.back().second, sp.second);
++                else runs.push_back(sp);
++            }
++        }
++        u64 hash = 0xcbf29ce484222325ULL;
++        std::string run_table = "static const uint64_t recomp_gw_runs[][2]={";
++        for (const auto& [lo, end] : runs) {
++            for (u64 a = lo; a < end; a += 4) hash = (hash ^ p[(a - base) / 4]) * 0x100000001b3ULL;
++            char e[64];
++            snprintf(e, sizeof e, "{0x%llxULL,0x%llxULL},", (unsigned long long)lo, (unsigned long long)end);
++            run_table += e;
++            if (run_table.size() - run_table.rfind('\n') > 110) run_table += "\n ";
++        }
++        run_table += "{0,0}};\n";
++        char gw[1400];
++        snprintf(gw, sizeof gw,
++                 "#if defined(RECOMP_DIRECT_MEM)\n"
++                 "#define RECOMP_DM_FEATURE RECOMP_FEATURE_DIRECT_MEM1\n"
++                 "uint8_t* g_recomp_dm_base = 0;\n"
++                 "/* DM1 handshake: the host's arena for the 39-bit guest address space. */\n"
++                 "RECOMP_API unsigned recomp_image_direct_v1(uint8_t* arena, uint64_t size){\n"
++                 "  if(!arena || size<(1ULL<<39)) return 0;\n"
++                 "  g_recomp_dm_base=arena; return 1;\n}\n"
++                 "#else\n#define RECOMP_DM_FEATURE 0u\n#endif\n"
++                 "#if defined(RECOMP_GUARD_WHOLE)\n#define RECOMP_GW_FEATURE RECOMP_FEATURE_GUARD_WHOLE1\n"
++                 "#else\n#define RECOMP_GW_FEATURE 0u\n#endif\n"
++                 "/* GW1: `code` is the guest memory at this image's load base (set before this call). 1 when every instruction\n"
++                 "   word the blocks were generated from (recomp_gw_runs: the spans they cover) is there unchanged. */\n"
++                 "RECOMP_API unsigned recomp_image_verify_code_v1(const uint8_t* code){\n"
++                 "  uint64_t h=0xcbf29ce484222325ULL, a; uint32_t w; unsigned r;\n"
++                 "  for(r=0;recomp_gw_runs[r][1];++r) for(a=recomp_gw_runs[r][0];a<recomp_gw_runs[r][1];a+=4){\n"
++                 "    memcpy(&w,code+a,4); h=(h^w)*0x100000001b3ULL; }\n"
++                 "  return h==0x%llxULL;\n}\n",
++                 (unsigned long long)hash);
++        ex << run_table << gw;
++    }
+     if (g_emit_fastmem) {
+         ex << "/* ABI 6 feature handshake. The host passes its own view of the page\n"
+               "   table layout and of the context offsets; 1 means this image was\n"
+               "   compiled against exactly those, so the host may enable fm_limit. */\n"
+               "RECOMP_API unsigned recomp_image_features(void){ return RECOMP_FEATURE_FASTMEM_PT1"
+            << (EmitGuardGen() ? " | RECOMP_FEATURE_GUARD_GEN1" : "")
+-           << (g_emit_fpx ? " | RECOMP_FEATURE_FPX1" : "") << "; }\n"
++           << (g_emit_fpx ? " | RECOMP_FEATURE_FPX1" : "")
++           << (EmitGuardGen() ? " | RECOMP_DM_FEATURE | RECOMP_GW_FEATURE" : "") << "; }\n"
+               "RECOMP_API unsigned recomp_image_fastmem_v1(uint32_t page_bits, uint32_t stride_log2,\n"
+               "                                            uint64_t ptr_mask, uint32_t off_table,\n"
+               "                                            uint32_t off_limit){\n"
+@@ -5838,12 +5970,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -6885,7 +7273,7 @@ index 699980238b..c242f5b386 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +5922,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +6010,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -6895,7 +7283,78 @@ index 699980238b..c242f5b386 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6888,10 +6946,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6368,6 +6514,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
+ )RT";
+ }
+ 
++// kart-recomp: direct memory (image feature DM1) and the whole-image code guard (GW1) pieces of the runtime header.
++inline const char* DirectMemH() {
++    return R"RT(/* DM1, direct memory (kart-recomp). Guest address A is host address g_recomp_dm_base + A: the host's arena for the whole
++   guest address space, handed over by recomp_image_direct_v1 before any guest code runs. Units compiled with
++   RECOMP_DIRECT_MEM access guest memory there inline instead of calling the helpers above (a mov instead of a call and a
++   page-table read; measured 16% less game-thread CPU). Unmapped and protected pages are the host's fault handler's business.
++   Each block reads the base once into _dm (see RECOMP_GG_GUARD), and its context pointer is restrict, so a guest store
++   makes the compiler reload neither.
++
++   GW1, whole-image guard: with RECOMP_GUARD_WHOLE the blocks do not check their own instruction words on entry (three loads
++   per block, one of them a cache line of its own; measured 7% of game-thread CPU). Instead the host has the image verify
++   all of its code once, before any guest code runs (recomp_image_verify_code_v1), and refuses to start on a mismatch. */
++#define RECOMP_FEATURE_DIRECT_MEM1 8u
++#define RECOMP_FEATURE_GUARD_WHOLE1 16u
++#if defined(RECOMP_DIRECT_MEM) && (defined(__GNUC__) || defined(__clang__))
++#define RECOMP_RESTRICT __restrict__
++#else
++#define RECOMP_RESTRICT
++#endif
++#if defined(RECOMP_GUARD_WHOLE) && !defined(RECOMP_RUNTIME_IMPL) && defined(RECOMP_GG_GUARD)
++#undef RECOMP_GG_GUARD
++#define RECOMP_GG_GUARD(hdr,idx) (void)(hdr)
++#endif
++#if defined(RECOMP_DIRECT_MEM)
++extern uint8_t* g_recomp_dm_base RECOMP_GG_HIDDEN;
++#if !defined(RECOMP_RUNTIME_IMPL)
++static RECOMP_INLINE uint64_t recomp_dm_load8 (const uint8_t* m,uint64_t a){ return m[a]; }
++static RECOMP_INLINE uint64_t recomp_dm_load16(const uint8_t* m,uint64_t a){ uint16_t v; __builtin_memcpy(&v,m+a,2); return v; }
++static RECOMP_INLINE uint64_t recomp_dm_load32(const uint8_t* m,uint64_t a){ uint32_t v; __builtin_memcpy(&v,m+a,4); return v; }
++static RECOMP_INLINE uint64_t recomp_dm_load64(const uint8_t* m,uint64_t a){ uint64_t v; __builtin_memcpy(&v,m+a,8); return v; }
++static RECOMP_INLINE void recomp_dm_store8 (uint8_t* m,uint64_t a,uint64_t v){ m[a]=(uint8_t)v; }
++static RECOMP_INLINE void recomp_dm_store16(uint8_t* m,uint64_t a,uint64_t v){ uint16_t t=(uint16_t)v; __builtin_memcpy(m+a,&t,2); }
++static RECOMP_INLINE void recomp_dm_store32(uint8_t* m,uint64_t a,uint64_t v){ uint32_t t=(uint32_t)v; __builtin_memcpy(m+a,&t,4); }
++static RECOMP_INLINE void recomp_dm_store64(uint8_t* m,uint64_t a,uint64_t v){ __builtin_memcpy(m+a,&v,8); }
++static RECOMP_INLINE void recomp_dm_ldp32(const uint8_t* m,uint64_t a,uint64_t* lo,uint64_t* hi){ uint32_t x,y; __builtin_memcpy(&x,m+a,4); __builtin_memcpy(&y,m+a+4,4); *lo=x; *hi=y; }
++static RECOMP_INLINE void recomp_dm_ldp64(const uint8_t* m,uint64_t a,uint64_t* lo,uint64_t* hi){ uint64_t x,y; __builtin_memcpy(&x,m+a,8); __builtin_memcpy(&y,m+a+8,8); *lo=x; *hi=y; }
++static RECOMP_INLINE void recomp_dm_stp32(uint8_t* m,uint64_t a,uint64_t v0,uint64_t v1){ uint32_t x=(uint32_t)v0,y=(uint32_t)v1; __builtin_memcpy(m+a,&x,4); __builtin_memcpy(m+a+4,&y,4); }
++static RECOMP_INLINE void recomp_dm_stp64(uint8_t* m,uint64_t a,uint64_t v0,uint64_t v1){ __builtin_memcpy(m+a,&v0,8); __builtin_memcpy(m+a+8,&v1,8); }
++#define recomp_load8(c,a)  recomp_dm_load8(_dm,(a))
++#define recomp_load16(c,a) recomp_dm_load16(_dm,(a))
++#define recomp_load32(c,a) recomp_dm_load32(_dm,(a))
++#define recomp_load64(c,a) recomp_dm_load64(_dm,(a))
++#define recomp_store8(c,a,v)  recomp_dm_store8(_dm,(a),(v))
++#define recomp_store16(c,a,v) recomp_dm_store16(_dm,(a),(v))
++#define recomp_store32(c,a,v) recomp_dm_store32(_dm,(a),(v))
++#define recomp_store64(c,a,v) recomp_dm_store64(_dm,(a),(v))
++#define recomp_ldp32(c,a,lo,hi) recomp_dm_ldp32(_dm,(a),(lo),(hi))
++#define recomp_ldp64(c,a,lo,hi) recomp_dm_ldp64(_dm,(a),(lo),(hi))
++#define recomp_stp32(c,a,v0,v1) recomp_dm_stp32(_dm,(a),(v0),(v1))
++#define recomp_stp64(c,a,v0,v1) recomp_dm_stp64(_dm,(a),(v0),(v1))
++#undef RECOMP_GG_GUARD
++#if defined(RECOMP_GUARD_WHOLE)
++#define RECOMP_GG_GUARD(hdr,idx) (void)(hdr); uint8_t* const _dm=g_recomp_dm_base
++#else
++#define RECOMP_GG_GUARD(hdr,idx) \
++  if(RECOMP_GG_UNLIKELY(RECOMP_GG_LOAD(recomp_gg_seen[idx])!=RECOMP_GG_LOAD(g_recomp_gg_word))) \
++    recomp_gg_miss(c,&recomp_gg_seen[idx],hdr); \
++  uint8_t* const _dm=g_recomp_dm_base
++#endif
++#endif
++#endif
++)RT";
++}
++
+ // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
+ // Kept under MSVC's 16380-byte limit per string literal.
+ inline const char* FpxAbiH() {
+@@ -6888,10 +7098,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -6922,7 +7381,32 @@ index 699980238b..c242f5b386 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -7580,6 +7654,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -6960,6 +7186,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+         text.replace(text.find(abi5_line), abi5_line.size(),
+                      std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
+     }
++    if (fastmem && EmitGuardGen()) {
++        // kart-recomp: DM1/GW1, right after the memory helper prototypes they replace.
++        static constexpr std::string_view dm_at = "void recomp_stp64(GuestContext*,uint64_t,uint64_t,uint64_t);\n";
++        text.insert(text.find(dm_at) + dm_at.size(), DirectMemH());
++    } else {
++        static constexpr std::string_view dm_at = "void recomp_stp64(GuestContext*,uint64_t,uint64_t,uint64_t);\n";
++        text.insert(text.find(dm_at) + dm_at.size(), "#define RECOMP_RESTRICT\n");
++    }
+     if (fpx) {
+         // After GuestContext, before the include guard closes.
+         static constexpr std::string_view guard_end = "#endif\n";
+@@ -7241,7 +7475,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+     // than being a single literal. Adjacent-literal concatenation would not
+     // help: the limit applies to the result as well. The memory helpers are a
+     // piece of their own because ABI 6 reuses their exact text as its slow path.
+-    const std::string head = std::string(R"RT(#include "recomp_runtime.h"
++    const std::string head = std::string(R"RT(#define RECOMP_RUNTIME_IMPL 1
++#include "recomp_runtime.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -7580,6 +7815,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif
@@ -6979,10 +7463,10 @@ index 1b328796c9..a5bf25a9bd 100644
          if (npad_type == NpadStyleIndex::Handheld) {
 diff --git a/src/kart_runtime/README.md b/src/kart_runtime/README.md
 new file mode 100644
-index 0000000000..683620653f
+index 0000000000..9e51c01115
 --- /dev/null
 +++ b/src/kart_runtime/README.md
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,12 @@
 +# kart_runtime: the native engine's own runtime
 +
 +Engine-independent building blocks for the native engine (kart-recomp `docs/NATIVE_ENGINE.md`). Rules:
@@ -6994,6 +7478,7 @@ index 0000000000..683620653f
 +| component | what it is |
 +|---|---|
 +| `core_scheduler.h` | Host threads sharing virtual CPU cores the way the console's threads do: one running thread per core, strict priority, FIFO among equals, a preemption request for the running thread. Replaces fibers and emulated-core threads. |
++| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
 diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
 new file mode 100644
 index 0000000000..fc5364b0f8
@@ -7201,6 +7686,146 @@ index 0000000000..fc5364b0f8
 +};
 +
 +} // namespace KartRuntime
+diff --git a/src/kart_runtime/direct_memory.h b/src/kart_runtime/direct_memory.h
+new file mode 100644
+index 0000000000..064c95124c
+--- /dev/null
++++ b/src/kart_runtime/direct_memory.h
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart_runtime: direct game memory.
++//
++// The game's address space is one reserved host range ("arena"): game address A lives at arena + A. Recompiled code built for
++// direct memory reads and writes there with plain host instructions, with no lookup and no call. That only works for pages that
++// are mapped with the right access, so this file supplies what the lookup path used to do for the rest, from a fault handler:
++//
++//   read of an unmapped page    reads zeros (a zero page is mapped there, read-only): what the lookup path returned. A character
++//                               mod that leaves a null object pointer in the game does this every frame; after the first fault
++//                               the page is there and later reads cost nothing.
++//   write to an unmapped page   is dropped: the page is made writable for that one instruction (single step), then replaced with
++//                               a zero page again.
++//   access to a mapped page the game has no permission for (the lookup path ignored permissions): the page is opened for good.
++//
++// Faults outside the arena are not ours and go to the previous handler. Everything is counted (Stats) so a caller can log it.
++// Linux x86-64 only for now; Install returns false elsewhere and the caller must not load direct-memory game code then.
++// No dependencies beyond the standard library and the OS; see README.md.
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++#if defined(__linux__) && defined(__x86_64__)
++#include <signal.h>
++#include <sys/mman.h>
++#include <ucontext.h>
++#endif
++
++namespace KartRuntime::DirectMemory {
++
++/// True when the game has this address mapped. Called from the fault handler: it may only read memory (no locks, no allocation).
++using IsMappedFn = bool (*)(std::uint64_t game_address);
++
++struct Stats {
++    std::atomic<std::uint64_t> unmapped_reads{0};  ///< faults: reads of unmapped pages (each page faults once)
++    std::atomic<std::uint64_t> unmapped_writes{0}; ///< faults: dropped writes to unmapped pages
++    std::atomic<std::uint64_t> opened_pages{0};    ///< mapped pages opened because the game lacked permission
++    std::atomic<std::uint64_t> last_unmapped{0};   ///< game address of the latest unmapped access
++    std::atomic<std::uint64_t> last_opened{0};     ///< game address of the latest opened page
++};
++
++inline Stats& GetStats() {
++    static Stats stats;
++    return stats;
++}
++
++namespace Detail {
++inline std::atomic<std::uint8_t*> g_base{nullptr};
++inline std::atomic<std::uint64_t> g_size{0};
++inline std::atomic<IsMappedFn> g_is_mapped{nullptr};
++#if defined(__linux__) && defined(__x86_64__)
++inline struct sigaction g_old_segv {};
++inline struct sigaction g_old_trap {};
++/// Pages made writable for the instruction being stepped (one instruction can touch two pages).
++inline thread_local void* t_stepping[2] = {nullptr, nullptr};
++
++inline void Chain(const struct sigaction& old, int sig, siginfo_t* info, void* raw) {
++    if (old.sa_flags & SA_SIGINFO) {
++        if (old.sa_sigaction) return old.sa_sigaction(sig, info, raw);
++    } else if (old.sa_handler != SIG_DFL && old.sa_handler != SIG_IGN) {
++        return old.sa_handler(sig);
++    }
++    // No earlier handler: die the default way, with the fault reported as itself.
++    struct sigaction dfl {};
++    dfl.sa_handler = SIG_DFL;
++    sigaction(sig, &dfl, nullptr);
++}
++
++inline void OnSegv(int sig, siginfo_t* info, void* raw) {
++    auto* uc = static_cast<ucontext_t*>(raw);
++    std::uint8_t* const base = g_base.load(std::memory_order_relaxed);
++    auto* const fault = static_cast<std::uint8_t*>(info->si_addr);
++    if (!base || fault < base || fault >= base + g_size.load(std::memory_order_relaxed)) return Chain(g_old_segv, sig, info, raw);
++    const std::uint64_t game = static_cast<std::uint64_t>(fault - base);
++    void* const page = base + (game & ~std::uint64_t{0xfff});
++    const bool write = (uc->uc_mcontext.gregs[REG_ERR] & 2) != 0;
++    Stats& stats = GetStats();
++    const IsMappedFn is_mapped = g_is_mapped.load(std::memory_order_relaxed);
++    if (is_mapped && is_mapped(game)) {
++        if (mprotect(page, 0x1000, PROT_READ | PROT_WRITE) != 0) return Chain(g_old_segv, sig, info, raw);
++        stats.opened_pages.fetch_add(1, std::memory_order_relaxed);
++        stats.last_opened.store(game, std::memory_order_relaxed);
++        return;
++    }
++    stats.last_unmapped.store(game, std::memory_order_relaxed);
++    if (!write) {
++        if (mmap(page, 0x1000, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
++            return Chain(g_old_segv, sig, info, raw);
++        }
++        stats.unmapped_reads.fetch_add(1, std::memory_order_relaxed);
++        return;
++    }
++    int slot = t_stepping[0] == nullptr ? 0 : (t_stepping[1] == nullptr ? 1 : -1);
++    if (slot < 0 || mmap(page, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
++        return Chain(g_old_segv, sig, info, raw);
++    }
++    t_stepping[slot] = page;
++    uc->uc_mcontext.gregs[REG_EFL] |= 0x100; // trap flag: SIGTRAP after this instruction
++    stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
++}
++
++inline void OnTrap(int sig, siginfo_t* info, void* raw) {
++    if (!t_stepping[0]) return Chain(g_old_trap, sig, info, raw);
++    auto* uc = static_cast<ucontext_t*>(raw);
++    for (void*& page : t_stepping) {
++        if (page) mmap(page, 0x1000, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); // a fresh zero page: the write is gone
++        page = nullptr;
++    }
++    uc->uc_mcontext.gregs[REG_EFL] &= ~static_cast<greg_t>(0x100);
++}
++#endif
++} // namespace Detail
++
++/// Starts handling faults in [base, base + size). Call once, before game code runs. False when this platform has no handler.
++inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped) {
++#if defined(__linux__) && defined(__x86_64__)
++    if (!base || Detail::g_base.load()) return Detail::g_base.load() == base;
++    Detail::g_is_mapped.store(is_mapped);
++    Detail::g_size.store(size);
++    Detail::g_base.store(base);
++    struct sigaction sa {};
++    sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
++    sigemptyset(&sa.sa_mask);
++    sa.sa_sigaction = &Detail::OnSegv;
++    if (sigaction(SIGSEGV, &sa, &Detail::g_old_segv) != 0) return false;
++    sa.sa_sigaction = &Detail::OnTrap;
++    return sigaction(SIGTRAP, &sa, &Detail::g_old_trap) == 0;
++#else
++    (void)base, (void)size, (void)is_mapped;
++    return false;
++#endif
++}
++
++} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/tests/build_and_run.sh b/src/kart_runtime/tests/build_and_run.sh
 new file mode 100755
 index 0000000000..a6681aba4f
@@ -7367,6 +7992,82 @@ index 0000000000..e3e1ccc18e
 +    std::puts("core_scheduler: all tests passed");
 +    return 0;
 +}
+diff --git a/src/kart_runtime/tests/test_direct_memory.cpp b/src/kart_runtime/tests/test_direct_memory.cpp
+new file mode 100644
+index 0000000000..7e93b086d1
+--- /dev/null
++++ b/src/kart_runtime/tests/test_direct_memory.cpp
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart_runtime test: direct memory's fault handler on a small arena.
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "../direct_memory.h"
++
++#if defined(__linux__) && defined(__x86_64__)
++namespace {
++constexpr std::uint64_t kSize = 64 * 0x1000;
++constexpr std::uint64_t kMapped = 8 * 0x1000; // one game page that exists, read-only
++
++bool IsMapped(std::uint64_t address) {
++    return (address & ~std::uint64_t{0xfff}) == kMapped;
++}
++
++#define CHECK(x)                                                                                                                 \
++    do {                                                                                                                         \
++        if (!(x)) {                                                                                                              \
++            std::printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #x);                                                           \
++            std::exit(1);                                                                                                        \
++        }                                                                                                                        \
++    } while (0)
++} // namespace
++
++int main() {
++    using namespace KartRuntime::DirectMemory;
++    auto* arena = static_cast<std::uint8_t*>(mmap(nullptr, kSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
++    CHECK(arena != MAP_FAILED);
++    CHECK(mmap(arena + kMapped, 0x1000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED);
++    arena[kMapped + 5] = 42;
++    CHECK(mprotect(arena + kMapped, 0x1000, PROT_READ) == 0);
++    CHECK(Install(arena, kSize, &IsMapped));
++    volatile std::uint8_t* mem = arena;
++    Stats& stats = GetStats();
++
++    // Reads of unmapped memory give zeros; the page faults once.
++    volatile std::uint64_t* null_object = reinterpret_cast<volatile std::uint64_t*>(arena + 0x100);
++    CHECK(*null_object == 0);
++    CHECK(null_object[1] == 0);
++    CHECK(stats.unmapped_reads.load() == 1);
++    CHECK(stats.last_unmapped.load() == 0x100);
++
++    // Writes to unmapped memory are dropped, on a page read before and on a fresh one.
++    *null_object = 0x1234;
++    CHECK(*null_object == 0);
++    mem[3 * 0x1000 + 7] = 9;
++    CHECK(mem[3 * 0x1000 + 7] == 0);
++    CHECK(stats.unmapped_writes.load() == 2);
++
++    // A write across two unmapped pages: both halves dropped.
++    *reinterpret_cast<volatile std::uint64_t*>(arena + 5 * 0x1000 - 4) = ~std::uint64_t{0}; // unaligned on purpose (x86)
++    for (int i = -4; i < 4; ++i) CHECK(mem[5 * 0x1000 + i] == 0);
++    CHECK(stats.unmapped_writes.load() == 4);
++
++    // A mapped page the game may not write is opened, and keeps its contents and the write.
++    mem[kMapped + 6] = 7;
++    CHECK(mem[kMapped + 5] == 42 && mem[kMapped + 6] == 7);
++    CHECK(stats.opened_pages.load() == 1);
++    CHECK(stats.last_opened.load() == kMapped + 6);
++    std::printf("test_direct_memory: ok\n");
++    return 0;
++}
++#else
++int main() {
++    std::printf("test_direct_memory: skipped (no fault handler on this platform)\n");
++    return KartRuntime::DirectMemory::Install(nullptr, 0, nullptr) ? 1 : 0;
++}
++#endif
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 index 8fd46dffa7..1870c99abe 100644
 --- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
