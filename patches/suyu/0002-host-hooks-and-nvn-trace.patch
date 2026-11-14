@@ -8041,6 +8041,67 @@ index 8b6d05a8dc..b50e5673d5 100644
      if (info == nullptr || info->handler_callback == nullptr)
          return ReportUnimplementedFunction(ctx, info);
  
+diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
+index 7bdd89905c..10862cb426 100644
+--- a/src/core/hle/service/services.cpp
++++ b/src/core/hle/service/services.cpp
+@@ -5,6 +5,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "core/hle/service/services.h"
++#include <set>
++#include <sstream>
++#include "core/hle/kernel/native_services.h"
+ 
+ #include "core/hle/service/acc/acc.h"
+ #include "core/hle/service/am/am.h"
+@@ -71,6 +74,23 @@
+ 
+ namespace Service {
+ 
++namespace {
++/// kart-recomp: with native services the game talks to the runtime, and only the emulated service modules that the runtime uses
++/// as libraries are started (KARTRECOMP_HLE_SERVICES=<comma list> chooses others, "all" starts every one).
++bool StartModule(std::string_view name) {
++    static const std::set<std::string, std::less<>> wanted = [] {
++        std::set<std::string, std::less<>> out;
++        const char* v = std::getenv("KARTRECOMP_HLE_SERVICES");
++        std::string list = v ? v : (Kernel::NativeServices::Enabled() ? "sm,hid,nvservices,ns,am,settings" : "all");
++        std::stringstream in{list};
++        for (std::string item; std::getline(in, item, ',');)
++            if (!item.empty()) out.insert(item);
++        return out;
++    }();
++    return wanted.contains("all") || wanted.contains(name);
++}
++} // namespace
++
+ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
+                    std::stop_token token) {
+     auto& kernel = system.Kernel();
+@@ -102,8 +122,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+         {"nvservices", &Nvidia::LoopProcess},
+         {"bsdsocket",  &Sockets::LoopProcess},
+     })
+-        kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
+-    kernel.RunOnHostCoreProcess("vi",         [&, token] { VI::LoopProcess(system, token); }).detach();
++        if (StartModule(e.first))
++            kernel.RunOnHostCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); }).detach();
++    if (StartModule("vi"))
++        kernel.RunOnHostCoreProcess("vi",         [&, token] { VI::LoopProcess(system, token); }).detach();
+     // Avoid cold clones of lambdas -- succintly
+     for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
+         {"sm",         &SM::LoopProcess},
+@@ -157,7 +179,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+         {"i2c",        &I2C::LoopProcess},
+         {"gpio",        &GPIO::LoopProcess},
+     })
+-        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
++        if (StartModule(e.first))
++            kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
+ }
+ 
+ } // namespace Service
 diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
 index ae07565196..3cd1665b8a 100644
 --- a/src/core/hle/service/set/system_settings_server.cpp

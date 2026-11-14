@@ -640,3 +640,12 @@ The GPU and device memory maps call into a rasterizer only when one is bound.
   Signal/Reset` update the mirror, a runtime ResetSignal resets the emulated event too. The game waits on and resets them
   natively. The only emulated object it still waits on is a thread (waiting for a thread to end), logged once per kind
   (`native services: the game waits on an emulated ...`).
+
+## The emulated system services are no longer started (2026-11-15)
+
+With native services on, only the 6 emulated service modules the runtime uses as libraries are started: `sm` (the registry
+the runtime looks library objects up in), `hid` (hid_core's resource manager and its update thread), `nvservices` (the driver
+module), `ns` (the shared-font loader), `am` (starts the game's process through its window system and registers it with the
+controller library) and `settings` (the controller module waits for it). The other 52 (audio, file system, vi/nvnflinger,
+account, time/glue/psc, mii, sockets, ldn, ...) are not started (`KARTRECOMP_HLE_SERVICES=<list>|all`).
+Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host threads, 2 fewer log errors (the socket service's).
