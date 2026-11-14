@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..88a9bf46b5 100644
+index 408daa6839..361da63f72 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -906,7 +906,7 @@ index 408daa6839..88a9bf46b5 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1371,18 @@ endif()
+@@ -1335,3 +1371,21 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -921,7 +921,10 @@ index 408daa6839..88a9bf46b5 100644
 +option(KARTRECOMP_DROP_UNUSED_SERVICES "Leave the unused emulated service modules out of the build" ${KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT})
 +if (KARTRECOMP_DROP_UNUSED_SERVICES)
 +    get_target_property(KR_CORE_SOURCES core SOURCES)
-+    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(aoc|bcat|bpc|btdrv|btm|erpt|es|eupld|fatal|fgm|friend|gpio|grc|i2c|lbl|ldn|ldr|lm|mig|mm|mnpp|ncm|ngc|nifm|nim|npns|olsc|omm|pcie|pctl|pcv|prepo|ptm|ro|spl|ssl|usb)/")
++    set(KR_KEEP hle/service/am/applet_manager.cpp hle/service/am/process_creation.cpp hle/service/am/frontend/applets.cpp
++        hle/service/glue/glue_manager.cpp)
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(aoc|bcat|bpc|btdrv|btm|erpt|es|eupld|fatal|fgm|friend|gpio|grc|i2c|lbl|ldn|ldr|lm|mig|mm|mnpp|ncm|ngc|nifm|nim|npns|olsc|omm|pcie|pctl|pcv|prepo|ptm|ro|spl|ssl|usb|am|vi|nvnflinger|nfc|nfp|caps|sockets|pm|psc|glue)/")
++    list(APPEND KR_CORE_SOURCES ${KR_KEEP})
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES})
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
@@ -3606,7 +3609,7 @@ index 0000000000..49a539dcf1
 +
 +} // namespace Core::SdkTrace
 diff --git a/src/core/core.cpp b/src/core/core.cpp
-index b15af176fe..45a2de02a8 100644
+index b15af176fe..6e87354c69 100644
 --- a/src/core/core.cpp
 +++ b/src/core/core.cpp
 @@ -15,6 +15,8 @@
@@ -3618,7 +3621,29 @@ index b15af176fe..45a2de02a8 100644
  #include "core/arm/recomp/arm_recomp.h"
  
  #include "launch_timestamp_cache.h"
-@@ -107,6 +109,16 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
+@@ -43,11 +45,21 @@
+ #include "core/hle/service/apm/apm_controller.h"
+ #include "core/hle/service/filesystem/filesystem.h"
+ #include "core/hle/service/glue/glue_manager.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/glue/time/static.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/psc/time/static.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/psc/time/steady_clock.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/psc/time/system_clock.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/psc/time/time_zone_service.h"
++#endif
+ #include "core/hle/service/service.h"
+ #include "core/hle/service/services.h"
+ #include "core/hle/service/set/system_settings_server.h"
+@@ -107,6 +119,16 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
      return vfs->OpenFile(path, FileSys::OpenMode::Read);
  }
  
@@ -3635,7 +3660,23 @@ index b15af176fe..45a2de02a8 100644
  struct System::Impl {
      explicit Impl(System& system)
          : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
-@@ -273,11 +285,17 @@ struct System::Impl {
+@@ -165,6 +187,7 @@ struct System::Impl {
+         if (!system.IsPoweredOn()) {
+             return;
+         }
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ 
+         auto settings_service =
+             system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>("set:sys",
+@@ -212,6 +235,7 @@ struct System::Impl {
+         network_clock->GetSystemClockContext(&context);
+         settings_service->SetNetworkSystemClockContext(context);
+         network_clock->SetCurrentTime(new_time);
++#endif
+     }
+ 
+     void Run() {
+@@ -273,11 +297,17 @@ struct System::Impl {
      SystemResultStatus SetupForApplicationProcess(System& system, Frontend::EmuWindow& emu_window) {
          LOG_INFO(Core, "SetupForApplicationProcess: host1x_core");
          host1x_core.emplace(system);
@@ -3658,7 +3699,7 @@ index b15af176fe..45a2de02a8 100644
  
          audio_core.emplace(system);
          LOG_INFO(Core, "SetupForApplicationProcess: audio_core done");
-@@ -402,7 +420,7 @@ struct System::Impl {
+@@ -402,7 +432,7 @@ struct System::Impl {
              LOG_ERROR(Core, "Failed to find program id for ROM");
          }
  
@@ -3667,7 +3708,7 @@ index b15af176fe..45a2de02a8 100644
          if (auto room_member = Network::GetRoomMember().lock()) {
              Network::GameInfo game_info;
              game_info.name = name;
-@@ -434,6 +452,8 @@ struct System::Impl {
+@@ -434,6 +464,8 @@ struct System::Impl {
          if (gpu_core) {
              gpu_core->ShutdownThread();
          }
@@ -3676,7 +3717,7 @@ index b15af176fe..45a2de02a8 100644
          kernel.CloseServices();
          kernel.ShutdownCores();
          services.reset();
-@@ -693,6 +713,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
+@@ -693,6 +725,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
      return impl->kernel.ApplicationProcess()->GetMemory();
  }
  
@@ -6080,10 +6121,10 @@ index 0000000000..dbcef7046d
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..d66c12dfb7
+index 0000000000..90a2cf1dad
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,388 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -6117,10 +6158,18 @@ index 0000000000..d66c12dfb7
 +#include "core/hle/service/ns/platform_service_manager.h"
 +#include "core/hle/kernel/k_shared_memory.h"
 +#include "core/hle/kernel/k_handle_table.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
 +#include "core/hle/service/vi/application_display_service.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
 +#include "core/hle/service/vi/container.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
 +#include "core/hle/service/vi/manager_root_service.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
 +#include "core/hle/service/vi/vi_types.h"
++#endif
 +#include "hid_core/frontend/emulated_controller.h"
 +#include "hid_core/hid_core.h"
 +#include "core/loader/loader.h"
@@ -6346,7 +6395,9 @@ index 0000000000..d66c12dfb7
 +            *out = display->CreateLayer();
 +            return true;
 +        };
-+    } else h.create_layer = [&system, aruid](u64* out) {
++    }
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
++    else h.create_layer = [&system, aruid](u64* out) {
 +        // The game's layer on the default display (the display service still makes the window's buffer queue).
 +        std::shared_ptr<Service::VI::IApplicationDisplayService> display;
 +        auto root = system.ServiceManager().GetService<Service::VI::IManagerRootService>("vi:m", true);
@@ -6358,6 +6409,9 @@ index 0000000000..d66c12dfb7
 +        (void)container->SetLayerVisibility(*out, true);
 +        return true;
 +    };
++#else
++    (void)aruid;
++#endif
 +    h.controller_applet = [&system](const AppletHooks::ControllerArgs& a) { return ControllerApplet(system, a); };
 +    h.web_applet = [&system](const AppletHooks::WebRequest& r) { return WebApplet(system, r); };
 +    static KartRuntime::Services::Applets& applets = *new KartRuntime::Services::Applets{runtime, std::move(h)}; // kept to process exit
@@ -6403,6 +6457,10 @@ index 0000000000..d66c12dfb7
 +
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f) {
 +    g_open_url = std::move(f);
++}
++
++void RequestGameExit() {
++    if (g_applets) g_applets->RequestExit();
 +}
 +
 +void OnOperationModeChanged() {
@@ -6457,10 +6515,10 @@ index 0000000000..d66c12dfb7
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..1d62b2e704
+index 0000000000..05bff5db47
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,54 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -6507,6 +6565,8 @@ index 0000000000..1d62b2e704
 +
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
++/// The engine asks the game to quit (the applet manager's exit message).
++void RequestGameExit();
 +/// The engine switched docked / handheld: the game gets its message.
 +void OnOperationModeChanged();
 +
@@ -7346,10 +7406,69 @@ index 79c6ac2079..7a9c434d60 100644
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
 diff --git a/src/core/hle/service/am/applet_manager.cpp b/src/core/hle/service/am/applet_manager.cpp
-index 3dd2adc9c0..217185a87b 100644
+index 3dd2adc9c0..08f8399c2b 100644
 --- a/src/core/hle/service/am/applet_manager.cpp
 +++ b/src/core/hle/service/am/applet_manager.cpp
-@@ -11,6 +11,11 @@
+@@ -4,6 +4,58 @@
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#ifdef KARTRECOMP_DROP_UNUSED_SERVICES
++// kart-recomp: this build has no emulated applet manager (the runtime's "appletOE" answers the game). What is left of this
++// class starts the game's process: registers it with the controller library and runs it.
++#include "core/core.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/am/applet_manager.h"
++#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/os/process.h"
++#include "core/hle/service/sm/sm.h"
++#include "hid_core/resource_manager.h"
++
++namespace Service::AM {
++
++AppletManager::AppletManager(Core::System& system) : m_system{system} {}
++AppletManager::~AppletManager() = default;
++
++void AppletManager::CreateAndInsertByFrontendAppletParameters(std::unique_ptr<Process> process, const FrontendAppletParameters&) {
++    auto hid = m_system.ServiceManager().GetService<HID::IHidServer>("hid", true);
++    const u64 pid = process->GetProcessId();
++    if (hid) {
++        auto rm = hid->GetResourceManager();
++        rm->RegisterAppletResourceUserId(pid, true);
++        rm->SetAruidValidForVibration(pid, true);
++        rm->EnableInput(pid, true);
++    }
++    LOG_INFO(Service_AM, "native start: running the game's process {} directly", pid);
++    process->Run();
++    std::scoped_lock lk{m_lock};
++    m_native_process = std::move(process);
++}
++
++void AppletManager::ReleaseNativeProcess() {
++    std::unique_ptr<Process> process;
++    {
++        std::scoped_lock lk{m_lock};
++        process = std::move(m_native_process);
++    }
++    process.reset();
++}
++
++void AppletManager::RequestExit() {
++    Kernel::NativeServices::RequestGameExit();
++}
++
++void AppletManager::OperationModeChanged() {
++    Kernel::NativeServices::OnOperationModeChanged();
++}
++
++void AppletManager::SetWindowSystem(WindowSystem*) {}
++
++} // namespace Service::AM
++#else
+ #include "common/settings.h"
+ #include "common/uuid.h"
+ #include "core/core.h"
+@@ -11,6 +63,11 @@
  #include "core/hle/service/acc/profile_manager.h"
  #include "core/hle/service/am/applet_data_broker.h"
  #include "core/hle/service/am/applet_manager.h"
@@ -7361,7 +7480,7 @@ index 3dd2adc9c0..217185a87b 100644
  #include "core/hle/service/am/frontend/applet_cabinet.h"
  #include "core/hle/service/am/frontend/applet_controller.h"
  #include "core/hle/service/am/frontend/applet_mii_edit_types.h"
-@@ -233,6 +238,23 @@ AppletManager::~AppletManager() = default;
+@@ -233,6 +290,23 @@ AppletManager::~AppletManager() = default;
  
  void AppletManager::CreateAndInsertByFrontendAppletParameters(
      std::unique_ptr<Process> process, const FrontendAppletParameters& params) {
@@ -7385,7 +7504,7 @@ index 3dd2adc9c0..217185a87b 100644
      LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: setting pending process");
      {
          std::scoped_lock lk{m_lock};
-@@ -243,6 +265,15 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
+@@ -243,6 +317,15 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
      LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: notified");
  }
  
@@ -7401,7 +7520,7 @@ index 3dd2adc9c0..217185a87b 100644
  void AppletManager::RequestExit() {
      std::scoped_lock lk{m_lock};
      if (m_window_system) {
-@@ -251,6 +282,7 @@ void AppletManager::RequestExit() {
+@@ -251,6 +334,7 @@ void AppletManager::RequestExit() {
  }
  
  void AppletManager::OperationModeChanged() {
@@ -7409,6 +7528,12 @@ index 3dd2adc9c0..217185a87b 100644
      std::scoped_lock lk{m_lock};
      if (m_window_system) {
          m_window_system->OnOperationModeChanged();
+@@ -361,3 +445,5 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
+ }
+ 
+ } // namespace Service::AM
++
++#endif // KARTRECOMP_DROP_UNUSED_SERVICES
 diff --git a/src/core/hle/service/am/applet_manager.h b/src/core/hle/service/am/applet_manager.h
 index 4d477b5327..1a966ecf6c 100644
 --- a/src/core/hle/service/am/applet_manager.h
@@ -7430,6 +7555,84 @@ index 4d477b5327..1a966ecf6c 100644
  };
  
  } // namespace Service::AM
+diff --git a/src/core/hle/service/am/frontend/applets.cpp b/src/core/hle/service/am/frontend/applets.cpp
+index 11538cf9a8..8f5b01c3cd 100644
+--- a/src/core/hle/service/am/frontend/applets.cpp
++++ b/src/core/hle/service/am/frontend/applets.cpp
+@@ -15,24 +15,49 @@
+ #include "core/frontend/applets/software_keyboard.h"
+ #include "core/frontend/applets/web_browser.h"
+ #include "core/hle/kernel/k_event.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/am.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/applet_data_broker.h"
++#endif
+ #include "core/hle/service/am/applet_manager.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_cabinet.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_controller.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_error.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_general.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_mii_edit.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_net_connect.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_profile_select.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_software_keyboard.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/frontend/applet_web_browser.h"
++#endif
+ #include "core/hle/service/am/frontend/applets.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/am/service/storage.h"
++#endif
+ #include "core/hle/service/sm/sm.h"
+ 
+ namespace Service::AM::Frontend {
+ 
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ FrontendApplet::FrontendApplet(Core::System& system_, std::shared_ptr<Applet> applet_,
+                                LibraryAppletMode applet_mode_)
+     : system{system_}, applet{std::move(applet_)}, applet_mode{applet_mode_} {}
+@@ -78,6 +103,8 @@ void FrontendApplet::Exit() {
+     applet_->state_changed_event.Signal(system.Kernel());
+ }
+ 
++#endif
++
+ FrontendAppletSet::FrontendAppletSet() = default;
+ 
+ FrontendAppletSet::FrontendAppletSet(CabinetApplet cabinet_applet,
+@@ -214,6 +241,7 @@ void FrontendAppletHolder::ClearAll() {
+     frontend = {};
+ }
+ 
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ std::shared_ptr<FrontendApplet> FrontendAppletHolder::GetApplet(std::shared_ptr<Applet> applet,
+                                                                 AppletId id,
+                                                                 LibraryAppletMode mode) const {
+@@ -250,4 +278,6 @@ std::shared_ptr<FrontendApplet> FrontendAppletHolder::GetApplet(std::shared_ptr<
+     }
+ }
+ 
++#endif
++
+ } // namespace Service::AM::Frontend
 diff --git a/src/core/hle/service/caps/caps_su.cpp b/src/core/hle/service/caps/caps_su.cpp
 index 9b86072f2f..509722eaae 100644
 --- a/src/core/hle/service/caps/caps_su.cpp
@@ -8170,13 +8373,19 @@ index 8b6d05a8dc..b50e5673d5 100644
          return ReportUnimplementedFunction(ctx, info);
  
 diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
-index 7bdd89905c..63facc95e5 100644
+index 7bdd89905c..5ec0a3661c 100644
 --- a/src/core/hle/service/services.cpp
 +++ b/src/core/hle/service/services.cpp
-@@ -5,72 +5,176 @@
+@@ -1,11 +1,24 @@
+ // SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "core/hle/service/services.h"
+-
++#include "core/hle/service/filesystem/filesystem.h"
 +#include "core/hle/service/ns/platform_service_manager.h"
 +#include "core/hle/service/hid/hid_server.h"
 +#include "core/hle/service/nvdrv/nvdrv_interface.h"
@@ -8186,143 +8395,50 @@ index 7bdd89905c..63facc95e5 100644
 +#include <set>
 +#include <sstream>
 +#include "core/hle/kernel/native_services.h"
- 
++#include "core/hle/service/ipc_helpers.h"
++#include "core/hle/service/nvdrv/nvdrv.h"
++#include "core/hle/service/service.h"
++#include "core/hle/service/sm/sm.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/acc/acc.h"
  #include "core/hle/service/am/am.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/aoc/addon_content_manager.h"
-+#endif
- #include "core/hle/service/apm/apm.h"
- #include "core/hle/service/audio/audio.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/bcat/bcat.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/bpc/bpc.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/btdrv/btdrv.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/btm/btm.h"
-+#endif
- #include "core/hle/service/caps/caps.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/erpt/erpt.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/es/es.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/eupld/eupld.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/fatal/fatal.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/fgm/fgm.h"
-+#endif
- #include "core/hle/service/filesystem/filesystem.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/friend/friend.h"
-+#endif
- #include "core/hle/service/glue/glue.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+@@ -27,11 +40,7 @@
  #include "core/hle/service/grc/grc.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/gpio/gpio.h"
-+#endif
  #include "core/hle/service/hid/hid.h"
- #include "core/hle/service/ipc_helpers.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+-#include "core/hle/service/ipc_helpers.h"
  #include "core/hle/service/i2c/i2c.h"
-+#endif
- #ifndef SUYU_NO_JIT
- #include "core/hle/service/jit/jit.h"
- #endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+-#ifndef SUYU_NO_JIT
+-#include "core/hle/service/jit/jit.h"
+-#endif
  #include "core/hle/service/lbl/lbl.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/ldn/ldn.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/ldr/ldr.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/lm/lm.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/mig/mig.h"
-+#endif
- #include "core/hle/service/mii/mii.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/mm/mm_u.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/mnpp/mnpp_app.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/ncm/ncm.h"
-+#endif
- #include "core/hle/service/nfc/nfc.h"
- #include "core/hle/service/nfp/nfp.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/ngc/ngc.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/nifm/nifm.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+@@ -48,7 +57,6 @@
  #include "core/hle/service/nim/nim.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/npns/npns.h"
-+#endif
  #include "core/hle/service/ns/ns.h"
- #include "core/hle/service/nvdrv/nvdrv.h"
+-#include "core/hle/service/nvdrv/nvdrv.h"
  #include "core/hle/service/nvnflinger/nvnflinger.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/olsc/olsc.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/omm/omm.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/pcie/pcie.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/pctl/pctl.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/pcv/pcv.h"
-+#endif
- #include "core/hle/service/pm/pm.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
- #include "core/hle/service/prepo/prepo.h"
-+#endif
+@@ -60,22 +68,51 @@
  #include "core/hle/service/psc/psc.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/ptm/ptm.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/ro/ro.h"
-+#endif
- #include "core/hle/service/service.h"
+-#include "core/hle/service/service.h"
  #include "core/hle/service/set/settings.h"
- #include "core/hle/service/sm/sm.h"
+-#include "core/hle/service/sm/sm.h"
  #include "core/hle/service/sockets/sockets.h"
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/spl/spl_module.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/ssl/ssl.h"
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
  #include "core/hle/service/usb/usb.h"
-+#endif
  #include "core/hle/service/vi/vi.h"
++#ifndef SUYU_NO_JIT
++#include "core/hle/service/jit/jit.h"
++#endif
++#endif
  
  namespace Service {
  
@@ -8330,6 +8446,10 @@ index 7bdd89905c..63facc95e5 100644
 +/// kart-recomp: with native services the game talks to the runtime, and only the emulated service modules that the runtime uses
 +/// as libraries are started (KARTRECOMP_HLE_SERVICES=<comma list> chooses others, "all" starts every one).
 +bool StartModule(std::string_view name) {
++#ifdef KARTRECOMP_DROP_UNUSED_SERVICES
++    (void)name;
++    return false; // this build has no emulated service modules to start
++#else
 +    static const std::set<std::string, std::less<>> wanted = [] {
 +        std::set<std::string, std::less<>> out;
 +        const char* v = std::getenv("KARTRECOMP_HLE_SERVICES");
@@ -8340,6 +8460,7 @@ index 7bdd89905c..63facc95e5 100644
 +        return out;
 +    }();
 +    return wanted.contains("all") || wanted.contains(name);
++#endif
 +}
 +} // namespace
 +
@@ -8349,17 +8470,15 @@ index 7bdd89905c..63facc95e5 100644
 +
  Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                     std::stop_token token) {
-     auto& kernel = system.Kernel();
-@@ -97,67 +201,173 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
-         // which is the honest answer for a build that cannot provide one.
-         {"jit",        &JIT::LoopProcess},
- #endif
+-    auto& kernel = system.Kernel();
++    [[maybe_unused]] auto& kernel = system.Kernel();
+ 
+     system.GetFileSystemController().CreateFactories(*system.GetFilesystem(), false);
 +#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"ldn",        &LDN::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"Loader",     &LDR::LoopProcess},
-+#endif
+ 
+     // Just a quick C++ lesson
+     // Capturing lambdas will silently create new variables for the objects referenced via <ident> = <expr>
+@@ -102,8 +139,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          {"nvservices", &Nvidia::LoopProcess},
          {"bsdsocket",  &Sockets::LoopProcess},
      })
@@ -8372,129 +8491,14 @@ index 7bdd89905c..63facc95e5 100644
      // Avoid cold clones of lambdas -- succintly
      for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
          {"sm",         &SM::LoopProcess},
-         {"account",    &Account::LoopProcess},
-         {"am",         &AM::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"aoc",        &AOC::LoopProcess},
-+#endif
-         {"apm",        &APM::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"bcat",       &BCAT::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"bpc",        &BPC::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"btdrv",      &BtDrv::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"btm",        &BTM::LoopProcess},
-+#endif
-         {"capsrv",     &Capture::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"erpt",       &ERPT::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"es",         &ES::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"eupld",      &EUPLD::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"fatal",      &Fatal::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"fgm",        &FGM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"friends",    &Friend::LoopProcess},
-+#endif
-         {"settings",   &Set::LoopProcess},
-         {"psc",        &PSC::LoopProcess},
-         {"glue",       &Glue::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"grc",        &GRC::LoopProcess},
-+#endif
-         {"hid",        &HID::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"lbl",        &LBL::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"LogManager.Prod", &LM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"mig",        &Migration::LoopProcess},
-+#endif
-         {"mii",        &Mii::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"mm",         &MM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"mnpp",       &MNPP::LoopProcess},
-+#endif
-         {"nvnflinger", &Nvnflinger::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"NCM",        &NCM::LoopProcess},
-+#endif
-         {"nfc",        &NFC::LoopProcess},
-         {"nfp",        &NFP::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"ngc",        &NGC::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"nifm",       &NIFM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"nim",        &NIM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"npns",       &NPNS::LoopProcess},
-+#endif
-         {"ns",         &NS::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"olsc",       &OLSC::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"omm",        &OMM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"pcie",       &PCIe::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"pctl",       &PCTL::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"pcv",        &PCV::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"prepo",      &PlayReport::LoopProcess},
-+#endif
-         {"ProcessManager", &PM::LoopProcess},
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"ptm",        &PTM::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"ro",         &RO::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"spl",        &SPL::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"ssl",        &SSL::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
-         {"usb",        &USB::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+@@ -157,7 +196,38 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          {"i2c",        &I2C::LoopProcess},
-+#endif
-+#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
          {"gpio",        &GPIO::LoopProcess},
-+#endif
      })
 -        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
 +        if (StartModule(e.first))
 +            kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
++#endif
 +
 +    // kart-recomp: library objects the runtime and the controller library look up, without their modules' server threads.
 +    auto library = [&sm](const char* name, SessionRequestHandlerFactory factory) {
