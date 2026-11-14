@@ -497,3 +497,27 @@ never without native threads).
 What is still the emulated kernel: `WaitSynchronization` / `ResetSignal` / `CancelSynchronization` on events (the game waits on
 service events: vsync, audio, GPU syncpoints), the IPC transport for the services that are answered on the calling thread, the
 handle table, the memory map system calls and thread creation bookkeeping (the threads themselves are host threads).
+
+## Native graphics queue: the emulated GPU gets no work (2026-11-14)
+
+On by default on Linux with the native renderer (`KARTRECOMP_NATIVE_QUEUE=0` turns it off; elsewhere opt-in with `=1`).
+`core/nvn_host/nvn_host.cpp` answers the game's NVN queue, sync and window calls itself, so the game's GPU driver never
+submits a command stream: `nvnQueueSubmitCommands` (the native renderer takes the submission, as before), `nvnQueueFlush`,
+`nvnQueueFinish`, `nvnQueueFenceSync`, `nvnQueueWaitSync`, `nvnSyncWait` (done at once: the emulated GPU's Null renderer also
+signalled as soon as it had read the commands), `nvnWindowAcquireTexture` (the window's textures in turn) and
+`nvnQueuePresentTexture`.
+- **Counter reports** (`nvnCommandBufferReportCounter`, ~6 a frame: timestamp, samples passed and type 0x10): recorded as a
+  command and written when the submission is taken, as the GPU wrote them for this game: value 0, then the GPU timer
+  (measured first with `KARTRECOMP_NVN_COUNTER_PROBE=1`: every report the game reads held 0).
+- **Pacing**: the display queue's blocking `DequeueBuffer` used to hold the game to the refresh rate (without it the game ran
+  at ~870 fps). A display clock now does the same: each present is shown one refresh after the previous one (or at once when
+  the game is late; `KARTRECOMP_VSYNC_HZ` as before), and an acquire waits, with the game thread's core given up, while more
+  than (textures - 2) presented frames are still waiting to be shown (the window has 3).
+- The window's per-frame work (input scripts, overlay requests) ran when the emulated display showed a frame; it now runs on
+  each native present (`NvnHost::SetFrameDisplayed`), and the fps counter counts native presents.
+- Checked: 1P 4.0.1 and 3.0.4, 4P split-screen 4.0.1 with the user's display settings (frame generation): 60 / 59.9 fps, same
+  pictures, laps reached. The emulated GPU thread no longer appears in a CPU profile at all (it was 0.35%).
+
+Not done yet: the emulated GPU is still created (about 40 MB) because the game's driver still uses the GPU service for channel
+setup and GPU address-space mappings at boot (`nvhost_as_gpu`, `nvhost_gpu`); those need native answers before `Tegra::GPU`
+can go.

@@ -5720,12 +5720,16 @@ index 3cc84acfdf..74a38ac4f7 100644
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..563a89995b
+index 0000000000..bb76429020
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1296 @@
+@@ -0,0 +1,1449 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
++#include "common/settings.h"
++#include "core/core_timing.h"
++#include "core/hle/kernel/native_threads.h"
++#include "core/perf_stats.h"
 +
 +#include <algorithm>
 +#include <cstdlib>
@@ -5763,6 +5767,16 @@ index 0000000000..563a89995b
 +
 +struct State {
 +    std::mutex lock;
++    // KARTRECOMP_NVN_COUNTER_PROBE=1 (research): what the counter reports hold a few frames after they were recorded.
++    std::vector<std::tuple<u32, u64, u64>> counter_probe; ///< type, GPU address, frame
++    u64 probe_frame = 0;
++    std::map<std::pair<u32, u64>, u64> probe_seen;
++    u64 probe_logged = 0;
++    std::unordered_map<u64, u32> window_next; ///< native queue: next texture index per window
++    /// Native queue: when each presented frame is shown by the display clock (one frame per refresh), oldest first; an acquire
++    /// waits while too many are still waiting to be shown, as the display queue's DequeueBuffer did.
++    std::deque<std::chrono::steady_clock::time_point> display_times;
++    std::chrono::steady_clock::time_point last_shown{};
 +    std::unordered_map<std::string, std::pair<u64, u64>> hook_time; ///< ns, calls (since last report)
 +    u64 presents_timed = 0;
 +    u64 submit_flatten_ns = 0;
@@ -5913,6 +5927,34 @@ index 0000000000..563a89995b
 +        return;
 +    }
 +    FlattenList(it->second, out, depth);
++}
++
++std::function<void()> g_frame_displayed;
++
++/// Native queue: set by a hook that must wait (outside the model lock) before returning to the game.
++thread_local std::chrono::steady_clock::time_point t_wait_until{};
++
++/// Writes guest memory by GPU address through the memory pools (native queue's counter reports). Lock held.
++bool WriteGpu(State& s, u64 gpu, const void* data, size_t size) {
++    Core::System* system = s.system_ptr.load(std::memory_order_acquire);
++    if (!system) return false;
++    std::shared_lock lock{s.range_lock};
++    auto it = std::upper_bound(s.ranges.begin(), s.ranges.end(), gpu, [](u64 a, const State::Range& r) { return a < r.base; });
++    for (int back = 0; back < 16 && it != s.ranges.begin(); ++back) {
++        --it;
++        if (gpu + size <= it->base + it->size && gpu >= it->base) {
++            return system->ApplicationMemory().WriteBlock(it->storage + (gpu - it->base), data, size);
++        }
++    }
++    return false;
++}
++
++/// The GPU timer, as the GPU writes it into reports (Tegra::GPU::GetTicks).
++u64 GpuTicks(Core::System& system) {
++    u64 tick = system.CoreTiming().GetGPUTicks();
++    const Settings::GpuOverclock overclock = Settings::values.fast_gpu_time.GetValue();
++    if (overclock != Settings::GpuOverclock::Normal) tick /= 256 * u64(overclock);
++    return tick;
 +}
 +
 +// NVNmemoryPool: up to three GPU mappings of the storage, each written by the
@@ -6366,6 +6408,44 @@ index 0000000000..563a89995b
 +        }
 +    };
 +
++    h["nvnCommandBufferReportCounter"] = [](HookContext& ctx, State& s) {
++        static const bool probe = std::getenv("KARTRECOMP_NVN_COUNTER_PROBE") != nullptr;
++        if (probe && s.counter_probe.size() < 100000) s.counter_probe.emplace_back(Arg32(ctx, 1), ctx.x[2], s.probe_frame);
++        if (NativeQueue()) {
++            Command c{.op = Op::ReportCounter};
++            c.index = Arg32(ctx, 1);
++            c.address = ctx.x[2];
++            Append(s, ctx.x[0], std::move(c));
++        }
++    };
++    // Native queue: the GPU work is the native renderer's, which takes each submission as it comes, so a sync is done as soon
++    // as it is fenced (the emulated GPU's Null renderer signalled as soon as it had read the commands: the same for the game).
++    h["nvnSyncWait"] = [](HookContext& ctx, State&) {
++        if (NativeQueue()) ctx.x[0] = 0; // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
++    };
++    h["nvnQueueWaitSync"] = [](HookContext& ctx, State&) {
++        if (NativeQueue()) ctx.x[0] = 1; // NVN_TRUE
++    };
++    h["nvnQueueFenceSync"] = [](HookContext&, State&) {};
++    h["nvnQueueFlush"] = [](HookContext&, State&) {};
++    h["nvnQueueFinish"] = [](HookContext&, State&) {};
++    h["nvnWindowAcquireTexture"] = [](HookContext& ctx, State& s) {
++        if (!NativeQueue()) return;
++        // The window's textures in turn (the display queue's order for a game that presents every texture it acquires).
++        const auto it = s.windows.find(ctx.x[0]);
++        const u32 count = it == s.windows.end() || it->second.empty() ? 2u : static_cast<u32>(it->second.size());
++        u32& next = s.window_next[ctx.x[0]];
++        const u32 index = next % count;
++        next = (index + 1) % count;
++        Mem(ctx).Write32(ctx.x[2], index);
++        ctx.x[0] = 0; // NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS
++        // Pacing: with `count` textures, one is on screen and at most count - 2 may wait to be shown when the next is handed out.
++        const auto now = std::chrono::steady_clock::now();
++        while (!s.display_times.empty() && s.display_times.front() <= now) s.display_times.pop_front();
++        const size_t may_wait = count >= 2 ? count - 2 : 0;
++        if (s.display_times.size() > may_wait) t_wait_until = s.display_times[s.display_times.size() - may_wait - 1];
++    };
++
 +    // Queue
 +    h["nvnQueueSubmitCommands"] = [](HookContext& ctx, State& s) {
 +        const auto t0 = std::chrono::steady_clock::now();
@@ -6376,6 +6456,14 @@ index 0000000000..563a89995b
 +        }
 +        const auto t1 = std::chrono::steady_clock::now();
 +        s.submit_flatten_ns += static_cast<u64>((t1 - t0).count());
++        if (NativeQueue()) {
++            // Counter reports: what the GPU wrote for this game (value 0, then the GPU time) when the submission is taken.
++            for (const Command* c : flat.commands) {
++                if (c->op != Op::ReportCounter) continue;
++                const u64 report[2]{0, GpuTicks(ctx.system)};
++                WriteGpu(s, c->address, report, sizeof(report));
++            }
++        }
 +        for (size_t i = 0; i < s.backends.size(); ++i) {
 +            const auto tb = std::chrono::steady_clock::now();
 +            s.backends[i]->Submit(flat);
@@ -6383,6 +6471,38 @@ index 0000000000..563a89995b
 +        }
 +    };
 +    h["nvnQueuePresentTexture"] = [](HookContext& ctx, State& s) {
++        ++s.probe_frame;
++        if (NativeQueue()) {
++            // The display clock: this frame is shown one refresh after the previous one, or now if the game is late.
++            static const auto period = std::chrono::nanoseconds{1000000000 / [] {
++                int hz = 60;
++                if (const char* v = std::getenv("KARTRECOMP_VSYNC_HZ")) hz = std::clamp(std::atoi(v), 30, 360);
++                return hz;
++            }()};
++            const auto now = std::chrono::steady_clock::now();
++            auto shown = s.display_times.empty() ? now : std::max(now, s.display_times.back() + period);
++            if (s.display_times.empty() && s.last_shown + period > now) shown = s.last_shown + period;
++            s.display_times.push_back(shown);
++            s.last_shown = shown;
++            ctx.system.GetPerfStats().EndGameFrame();
++        }
++        if (!s.counter_probe.empty()) {
++            std::vector<std::tuple<u32, u64, u64>> keep;
++            for (const auto& [type, addr, frame] : s.counter_probe) {
++                if (frame + 3 > s.probe_frame) {
++                    keep.emplace_back(type, addr, frame);
++                    continue;
++                }
++                u64 v[2]{};
++                ReadGpu(s, addr, v, sizeof(v), true);
++                const u64 value_key = v[0] > 1000000 ? 1000000 : v[0];
++                if (++s.probe_seen[{type, value_key}] == 1 || (s.probe_logged < 60 && s.probe_frame % 600 == 0)) {
++                    ++s.probe_logged;
++                    LOG_INFO(Core_ARM, "nvn counter probe: type={:#x} addr={:#x} value={:#x} time={:#x} frame={}", type, addr, v[0], v[1], frame);
++                }
++            }
++            s.counter_probe = std::move(keep);
++        }
 +        const auto it = s.windows.find(ctx.x[1]);
 +        const u32 index = Arg32(ctx, 2);
 +        TextureDesc t;
@@ -6684,6 +6804,14 @@ index 0000000000..563a89995b
 +    if (keep || !Exclusive()) {
 +        return false;
 +    }
++    if (NativeQueue()) {
++        static const std::set<std::string> queue{
++            "nvnQueueSubmitCommands", "nvnQueueFlush",      "nvnQueueFinish",          "nvnQueuePresentTexture",
++            "nvnQueueFenceSync",      "nvnQueueWaitSync",   "nvnSyncWait",             "nvnWindowAcquireTexture",
++            "nvnCommandBufferReportCounter",
++        };
++        if (queue.contains(name)) return true;
++    }
 +    static const std::set<std::string> names{
 +        "nvnCommandBufferBindUniformBuffer", "nvnCommandBufferBindTexture",
 +        "nvnCommandBufferBindProgram", "nvnCommandBufferBindVertexBuffer",
@@ -6763,6 +6891,23 @@ index 0000000000..563a89995b
 +        return !(v && std::strcmp(v, "off") == 0);
 +    }();
 +    return enabled;
++}
++
++void SetFrameDisplayed(std::function<void()> callback) {
++    g_frame_displayed = std::move(callback);
++}
++
++bool NativeQueue() {
++    static const bool on = [] {
++        // On by default on Linux (KARTRECOMP_NATIVE_QUEUE=0 turns it off); elsewhere only when asked for.
++        const char* v = std::getenv("KARTRECOMP_NATIVE_QUEUE");
++#ifdef __linux__
++        return Exclusive() && !(v && *v == '0');
++#else
++        return Exclusive() && v && *v == '1';
++#endif
++    }();
++    return on;
 +}
 +
 +bool Exclusive() {
@@ -7015,6 +7160,14 @@ index 0000000000..563a89995b
 +        for (Backend* b : throttle) {
 +            b->Throttle();
 +        }
++        if (present && NativeQueue() && g_frame_displayed) g_frame_displayed();
++        if (t_wait_until != std::chrono::steady_clock::time_point{}) {
++            const auto until = t_wait_until;
++            t_wait_until = {};
++            const bool left = Kernel::NativeThreads::BeginHostWait(); // a native game thread gives its core up meanwhile
++            std::this_thread::sleep_until(until);
++            if (left) Kernel::NativeThreads::EndHostWait();
++        }
 +        return replaced && ReturnFromCall(ctx);
 +    });
 +}
@@ -7022,10 +7175,10 @@ index 0000000000..563a89995b
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/nvn_host.h b/src/core/nvn_host/nvn_host.h
 new file mode 100644
-index 0000000000..66d45e856f
+index 0000000000..3d78e2fddb
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.h
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,216 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: nvn-host, the native NVN implementation (shadow stage).
 +//
@@ -7043,6 +7196,8 @@ index 0000000000..66d45e856f
 +// Enabled with KARTRECOMP_NATIVE_GPU=shadow (beside the emulated output) or =native
 +// (the only renderer). Report: <log dir>/nvn_host.txt.
 +#pragma once
++
++#include <functional>
 +
 +#include <memory>
 +#include <string>
@@ -7111,6 +7266,7 @@ index 0000000000..66d45e856f
 +    DepthRange,    ///< rgba = near, far (viewport depth range)
 +    BlendColor,    ///< rgba = blend constant
 +    Call,          ///< call = a nested command list (CallCommands), executed in place
++    ReportCounter, ///< native queue: index = NVN counter type, address = GPU address of the 16-byte report
 +};
 +
 +enum class DrawKind : u8 {
@@ -7193,6 +7349,12 @@ index 0000000000..66d45e856f
 +/// emulated GPU still consumes the command stream (syncpoints, fences) through
 +/// suyu's Null renderer but draws nothing.
 +bool Exclusive();
++
++/// Native queue (with Exclusive; default on Linux, KARTRECOMP_NATIVE_QUEUE=0/1): the game's NVN queue, syncs, window and counter reports are answered here and
++/// the game's GPU driver never submits anything; the emulated GPU sees no work.
++bool NativeQueue();
++/// Native queue: called after each present (outside the model lock), where the emulated display used to report a frame.
++void SetFrameDisplayed(std::function<void()> callback);
 +
 +/// Reads guest memory by GPU address (through the memory pools). Thread-safe.
 +bool ReadGpuMemory(u64 gpu_address, void* out, size_t size);

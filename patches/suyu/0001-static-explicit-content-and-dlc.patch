@@ -24524,7 +24524,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..f16fe9f2d0 100644
+index 03f738eb63..32edf42e73 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -25326,7 +25326,7 @@ index 03f738eb63..f16fe9f2d0 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2117,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2117,32 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25349,11 +25349,17 @@ index 03f738eb63..f16fe9f2d0 100644
 +        if (auto backend = KartRecomp::CreateVulkanShadowBackend(fullscreen)) {
 +            Core::NvnHost::AddBackend(std::move(backend));
 +        }
++        // Native queue: frames never reach the emulated display, so the window's per-frame work (input script, overlay
++        // requests) runs on each native present instead.
++        if (Core::NvnHost::NativeQueue()) {
++            Core::Frontend::EmuWindow* window = emu_window.get();
++            Core::NvnHost::SetFrameDisplayed([window] { window->OnFrameDisplayed(); });
++        }
 +    }
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,8 +2169,45 @@ int main(int argc, char** argv) {
+@@ -1857,8 +2175,45 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25399,7 +25405,7 @@ index 03f738eb63..f16fe9f2d0 100644
      if (static_cast<u32>(load_parameters.applet_id)) {
          // code below based off of suyu/main.cpp : GMainWindow::OnHomeMenu()
          // Inline minimal mapping (AppletIdToProgramId is in an anonymous namespace)
-@@ -1925,6 +2274,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2280,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25409,7 +25415,7 @@ index 03f738eb63..f16fe9f2d0 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2499,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2505,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25417,7 +25423,7 @@ index 03f738eb63..f16fe9f2d0 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2524,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2530,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25448,7 +25454,7 @@ index 03f738eb63..f16fe9f2d0 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2565,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2571,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25466,7 +25472,7 @@ index 03f738eb63..f16fe9f2d0 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2596,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2602,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -25477,7 +25483,7 @@ index 03f738eb63..f16fe9f2d0 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2624,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2630,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25489,7 +25495,7 @@ index 03f738eb63..f16fe9f2d0 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2636,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2642,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
