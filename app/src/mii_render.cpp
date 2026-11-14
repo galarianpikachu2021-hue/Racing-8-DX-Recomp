@@ -509,7 +509,8 @@ QImage Renderer::Render(const StoreData& mii, int width, int height) const {
 
     QMatrix4x4 proj, view;
     proj.perspective(15.0f, static_cast<float>(width) / static_cast<float>(height), 100.0f, 2000.0f);
-    const float look_y = 22.0f, distance = 560.0f * std::max(1.0f, 1.12f * static_cast<float>(width) / static_cast<float>(height) > 1.0f ? 1.0f : static_cast<float>(height) / static_cast<float>(width) / 1.2f);
+    // Framed like a Mii portrait: the head fills most of the picture, the shoulders just show below it.
+    const float look_y = 27.0f, distance = 455.0f * std::max(1.0f, 0.8f * static_cast<float>(height) / static_cast<float>(width));
     view.lookAt(QVector3D(0, look_y, distance), QVector3D(0, look_y, 0), QVector3D(0, 1, 0));
     const QMatrix4x4 vp = proj * view;
     const auto place = [](const std::array<float, 3>& at, float scale = 1.0f, bool flip = false, float dy = 0.0f, float dz = 0.0f) {
@@ -521,11 +522,10 @@ QImage Renderer::Render(const StoreData& mii, int width, int height) const {
     const std::array<float, 3> origin{0, 0, 0};
     const QMatrix4x4 identity;
 
-    // Shoulders and neck: not part of the firmware's Mii data (games bring their own bodies), so a plain bust in the
-    // favourite colour, wider with the Mii's build.
+    // Shoulders: not part of the firmware's Mii data (games bring their own bodies), so a plain small body in the favourite
+    // colour, a little wider with the Mii's build. A Mii has no visible neck: the head sits on the body.
     const float build = static_cast<float>(G("build")) / 127.0f;
-    Draw(t, Ellipsoid(0, -58.0f, -2.0f, 30.0f + 9.0f * build, 46.0f, 17.0f + 5.0f * build), identity, vp, Material{favourite});
-    Draw(t, Ellipsoid(0, -6.0f, -2.0f, 7.5f, 16.0f, 7.5f), identity, vp, Material{skin});
+    Draw(t, Ellipsoid(0, -36.0f, -3.0f, 19.0f + 6.0f * build, 34.0f, 12.0f + 4.0f * build), identity, vp, Material{favourite});
 
     const QImage face_tex = FaceTexture(mii, 512), mask_tex = MaskTexture(mii, 512);
     Material face_mat{skin};

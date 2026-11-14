@@ -29,7 +29,10 @@ int main(int argc, char** argv) {
         for (int i = 4; i < a.size(); ++i) {
             const QStringList kv = a[i].split(QLatin1Char('='));
             if (kv.size() != 2) continue;
-            if (kv[0] == QLatin1String("w")) w = kv[1].toInt();
+            if (kv[0] == QLatin1String("db")) { // db=<MiiDatabase.dat>:<index>
+                const int colon = kv[1].lastIndexOf(QLatin1Char(':'));
+                if (const auto db = Mii::Database::Load(kv[1].left(colon)); db && kv[1].mid(colon + 1).toInt() < db->Count()) mii = db->At(kv[1].mid(colon + 1).toInt());
+            } else if (kv[0] == QLatin1String("w")) w = kv[1].toInt();
             else if (kv[0] == QLatin1String("h")) h = kv[1].toInt();
             else if (Mii::FindField(kv[0].toUtf8().constData())) mii.Set(kv[0].toUtf8().constData(), kv[1].toInt());
         }
