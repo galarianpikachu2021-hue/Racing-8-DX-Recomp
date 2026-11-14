@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..d73c1669bb 100644
+index 408daa6839..1867bd5a48 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,13 +860,14 @@ index 408daa6839..d73c1669bb 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,16 @@ add_library(core STATIC
+@@ -339,6 +359,17 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
 +    hle/kernel/native_sync.cpp
 +    hle/kernel/native_sync.h
 +    hle/kernel/native_fs_backend.cpp
++    hle/kernel/native_hid_service.cpp
 +    hle/kernel/native_mii.cpp
 +    hle/kernel/native_services.cpp
 +    hle/kernel/native_services.h
@@ -877,7 +878,7 @@ index 408daa6839..d73c1669bb 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1081,8 @@ add_library(core STATIC
+@@ -1051,6 +1082,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -886,7 +887,7 @@ index 408daa6839..d73c1669bb 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1258,7 @@ else()
+@@ -1226,7 +1259,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -4609,6 +4610,290 @@ index 0000000000..ac7edb8a03
 +}
 +
 +} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_hid_service.cpp b/src/core/hle/kernel/native_hid_service.cpp
+new file mode 100644
+index 0000000000..4331af0a23
+--- /dev/null
++++ b/src/core/hle/kernel/native_hid_service.cpp
+@@ -0,0 +1,278 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the controller service ("hid") answered by the runtime. The controller state - which pads and styles the game
++// supports, Joy-Con assignment, motion, rumble, and the shared memory the SDK reads - is hid_core's resource manager (the input
++// library); this replaces the service around it. The game reads its buttons and sticks through the native controller reads
++// (core/arm/recomp/native_hid.cpp); its rumble goes from here straight to the controllers.
++#include <memory>
++#include <vector>
++
++#include "common/logging/log.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_handle_table.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_readable_event.h"
++#include "core/hle/kernel/k_shared_memory.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/sm/sm.h"
++#include "hid_core/hid_result.h"
++#include "hid_core/hid_types.h"
++#include "hid_core/hid_util.h"
++#include "hid_core/resource_manager.h"
++#include "hid_core/resources/npad/npad.h"
++#include "hid_core/resources/npad/npad_vibration.h"
++#include "hid_core/resources/six_axis/six_axis.h"
++#include "hid_core/resources/touch_screen/touch_screen.h"
++#include "hid_core/resources/vibration/vibration_device.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace Service::HID;
++using KartRuntime::Context;
++using KartRuntime::Service;
++using Core::HID::NpadIdType;
++
++/// An emulated kernel object (shared memory, an event of the input library) handed to the game as a copy handle.
++void PushKernelObject(KernelCore& kernel, Context& c, KAutoObject* object) {
++    Handle h{};
++    if (!object || GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, object).IsError()) return c.SetResult(0xD201);
++    c.PushCopyHandle(h);
++}
++
++/// The "applet resource user id" argument: the service takes the sender's process id from the kernel (the value in the
++/// message is skipped), as the emulated service did.
++u64 PopAruid(Context& c) {
++    c.Pop<u64>();
++    return c.Pid();
++}
++
++void Check(Context& c, Result r) {
++    if (r.IsError()) c.SetResult(r.raw);
++}
++
++std::shared_ptr<Service> AppletResource(KernelCore& kernel, std::shared_ptr<ResourceManager> rm, u64 aruid) {
++    auto s = std::make_shared<Service>("IAppletResource");
++    s->On(0, [&kernel, rm, aruid](Context& c) { // GetSharedMemoryHandle
++        Kernel::KSharedMemory* mem = nullptr;
++        if (const Result r = rm->GetSharedMemoryHandle(&mem, aruid); r.IsError()) return c.SetResult(r.raw);
++        PushKernelObject(kernel, c, mem);
++    });
++    return s;
++}
++
++std::shared_ptr<Service> VibrationDeviceList(std::shared_ptr<ResourceManager> rm) {
++    struct State {
++        std::mutex m;
++        std::vector<Core::HID::VibrationDeviceHandle> list;
++    };
++    auto st = std::make_shared<State>();
++    auto s = std::make_shared<Service>("IActiveVibrationDeviceList");
++    s->On(0, [rm, st](Context& c) { // ActivateVibrationDevice(handle)
++        const auto h = c.Pop<Core::HID::VibrationDeviceHandle>();
++        std::scoped_lock lk{st->m};
++        if (const Result r = IsVibrationHandleValid(h); r.IsError()) return c.SetResult(r.raw);
++        for (const auto& e : st->list)
++            if (e.device_index == h.device_index && e.npad_id == h.npad_id && e.npad_type == h.npad_type) return;
++        if (st->list.size() >= 0x100) return c.SetResult(ResultVibrationDeviceIndexOutOfRange.raw);
++        Check(c, rm->GetVibrationDevice(h)->Activate());
++        st->list.push_back(h);
++    });
++    return s;
++}
++
++std::shared_ptr<Service> HidServer(KernelCore& kernel, std::shared_ptr<ResourceManager> rm) {
++    auto s = std::make_shared<Service>("hid");
++    auto npad = [rm] { return rm->GetNpad(); };
++    s->On(0, [&kernel, rm](Context& c) { // CreateAppletResource(aruid)
++        const auto aruid = PopAruid(c);
++        rm->CreateAppletResource(aruid);
++        c.PushInterface(AppletResource(kernel, rm, aruid));
++    });
++    s->On(11, [rm](Context& c) { // ActivateTouchScreen(aruid)
++        const auto aruid = PopAruid(c);
++        if (const Result r = rm->GetTouchScreen()->Activate(); r.IsError()) return c.SetResult(r.raw);
++        Check(c, rm->GetTouchScreen()->Activate(aruid));
++    });
++    s->On(66, [rm](Context& c) { // StartSixAxisSensor(handle, aruid)
++        const auto h = c.Pop<Core::HID::SixAxisSensorHandle>();
++        Check(c, rm->GetSixAxis()->SetSixAxisEnabled(h, true));
++    });
++    s->On(67, [rm](Context& c) { // StopSixAxisSensor(handle, aruid)
++        const auto h = c.Pop<Core::HID::SixAxisSensorHandle>();
++        Check(c, rm->GetSixAxis()->SetSixAxisEnabled(h, false));
++    });
++    s->On(69, [rm](Context& c) { // EnableSixAxisSensorFusion(enabled, handle, aruid)
++        const bool enabled = c.Pop<u8>() != 0;
++        const auto h = c.Pop<Core::HID::SixAxisSensorHandle>();
++        Check(c, rm->GetSixAxis()->SetSixAxisFusionEnabled(h, enabled));
++    });
++    s->On(82, [rm](Context& c) { // IsSixAxisSensorAtRest(handle, aruid)
++        const auto h = c.Pop<Core::HID::SixAxisSensorHandle>();
++        bool rest = false;
++        if (const Result r = rm->GetSixAxis()->IsSixAxisSensorAtRest(h, rest); r.IsError()) return c.SetResult(r.raw);
++        c.Push<u8>(rest);
++    });
++    s->On(100, [&kernel, npad](Context& c) { // SetSupportedNpadStyleSet(style set, aruid)
++        const auto style = c.Pop<Core::HID::NpadStyleSet>();
++        const auto aruid = PopAruid(c);
++        Check(c, npad()->SetSupportedNpadStyleSet(kernel, aruid, style));
++    });
++    s->On(101, [&kernel, npad](Context& c) { // GetSupportedNpadStyleSet(aruid)
++        const auto aruid = PopAruid(c);
++        Core::HID::NpadStyleSet style{};
++        if (const Result r = npad()->GetSupportedNpadStyleSet(kernel, aruid, style); r.IsError()) return c.SetResult(r.raw);
++        c.Push(style);
++    });
++    s->On(102, [&kernel, npad](Context& c) { // SetSupportedNpadIdType(aruid, ids)
++        const auto aruid = PopAruid(c);
++        const auto raw = c.ReadBuffer(0);
++        std::vector<NpadIdType> ids(raw.size() / sizeof(NpadIdType));
++        std::memcpy(ids.data(), raw.data(), ids.size() * sizeof(NpadIdType));
++        Check(c, npad()->SetSupportedNpadIdType(kernel, aruid, ids));
++    });
++    s->On(103, [npad](Context& c) { // ActivateNpad(aruid)
++        const auto aruid = PopAruid(c);
++        npad()->SetRevision(aruid, NpadRevision::Revision0);
++        Check(c, npad()->Activate(aruid));
++    });
++    s->Ok(104); // DeactivateNpad: nothing since 10.0.0
++    s->On(106, [&kernel, npad](Context& c) { // AcquireNpadStyleSetUpdateEventHandle(npad id, aruid, unknown)
++        const auto id = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        Kernel::KReadableEvent* event = nullptr;
++        if (const Result r = npad()->AcquireNpadStyleSetUpdateEventHandle(kernel, aruid, &event, id); r.IsError()) return c.SetResult(r.raw);
++        PushKernelObject(kernel, c, event);
++    });
++    s->On(107, [&kernel, npad](Context& c) { // DisconnectNpad(npad id, aruid)
++        const auto id = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        Check(c, npad()->DisconnectNpad(kernel, aruid, id));
++    });
++    s->On(108, [](Context& c) { // GetPlayerLedPattern(npad id)
++        static constexpr u64 patterns[]{0b0001, 0b0011, 0b0111, 0b1111, 0b1001, 0b0101, 0b1101, 0b0110};
++        const auto id = static_cast<u32>(c.Pop<NpadIdType>());
++        c.Push<u64>(id < 8 ? patterns[id] : 0);
++    });
++    s->On(109, [npad](Context& c) { // ActivateNpadWithRevision(revision, aruid)
++        const auto revision = static_cast<NpadRevision>(c.Pop<s32>());
++        const auto aruid = PopAruid(c);
++        npad()->SetRevision(aruid, revision);
++        Check(c, npad()->Activate(aruid));
++    });
++    s->On(120, [npad](Context& c) { // SetNpadJoyHoldType(aruid, hold type)
++        const auto aruid = PopAruid(c);
++        const auto hold = static_cast<NpadJoyHoldType>(c.Pop<u64>());
++        Check(c, npad()->SetNpadJoyHoldType(aruid, hold));
++    });
++    s->On(121, [npad](Context& c) { // GetNpadJoyHoldType(aruid)
++        const auto aruid = PopAruid(c);
++        NpadJoyHoldType hold{};
++        if (const Result r = npad()->GetNpadJoyHoldType(aruid, hold); r.IsError()) return c.SetResult(r.raw);
++        c.Push<u64>(static_cast<u64>(hold));
++    });
++    auto single = [&kernel, npad](Context& c, bool with_device) { // SetNpadJoyAssignmentModeSingle(ByDefault)
++        const auto id = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        const auto device = with_device ? static_cast<NpadJoyDeviceType>(c.Pop<u64>()) : NpadJoyDeviceType::Left;
++        NpadIdType new_id{};
++        npad()->SetNpadMode(kernel, aruid, new_id, id, device, NpadJoyAssignmentMode::Single);
++    };
++    s->On(122, [single](Context& c) { single(c, false); });
++    s->On(123, [single](Context& c) { single(c, true); });
++    s->On(124, [&kernel, npad](Context& c) { // SetNpadJoyAssignmentModeDual(npad id, aruid)
++        const auto id = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        NpadIdType new_id{};
++        npad()->SetNpadMode(kernel, aruid, new_id, id, {}, NpadJoyAssignmentMode::Dual);
++    });
++    s->On(125, [&kernel, npad](Context& c) { // MergeSingleJoyAsDualJoy(id 1, id 2, aruid)
++        const auto a = c.Pop<NpadIdType>();
++        const auto b = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        Check(c, npad()->MergeSingleJoyAsDualJoy(kernel, aruid, a, b));
++    });
++    s->Ok(126); // StartLrAssignmentMode
++    s->Ok(127); // StopLrAssignmentMode
++    s->On(128, [&kernel, npad](Context& c) { // SetNpadHandheldActivationMode(aruid, mode)
++        const auto aruid = PopAruid(c);
++        const auto mode = static_cast<NpadHandheldActivationMode>(c.Pop<u64>());
++        if (mode >= NpadHandheldActivationMode::MaxActivationMode) return;
++        Check(c, npad()->SetNpadHandheldActivationMode(kernel, aruid, mode));
++    });
++    s->On(130, [&kernel, npad](Context& c) { // SwapNpadAssignment(id 1, id 2, aruid)
++        const auto a = c.Pop<NpadIdType>();
++        const auto b = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        Check(c, npad()->SwapNpadAssignment(kernel, aruid, a, b));
++    });
++    s->On(131, [npad](Context& c) { // IsUnintendedHomeButtonInputProtectionEnabled(npad id, aruid)
++        const auto id = c.Pop<NpadIdType>();
++        const auto aruid = PopAruid(c);
++        if (!IsNpadIdValid(id)) return c.SetResult(ResultInvalidNpadId.raw);
++        bool enabled = false;
++        if (const Result r = npad()->IsUnintendedHomeButtonInputProtectionEnabled(enabled, aruid, id); r.IsError()) return c.SetResult(r.raw);
++        c.Push<u8>(enabled);
++    });
++    s->On(200, [rm](Context& c) { // GetVibrationDeviceInfo(handle)
++        const auto h = c.Pop<Core::HID::VibrationDeviceHandle>();
++        Core::HID::VibrationDeviceInfo info{};
++        if (const Result r = rm->GetVibrationDeviceInfo(info, h); r.IsError()) return c.SetResult(r.raw);
++        c.Push(info);
++    });
++    s->On(201, [rm](Context& c) { // SendVibrationValue(handle, value, aruid)
++        const auto h = c.Pop<Core::HID::VibrationDeviceHandle>();
++        const auto v = c.Pop<Core::HID::VibrationValue>();
++        const auto aruid = PopAruid(c);
++        rm->SendVibrationValue(aruid, h, v);
++    });
++    s->On(202, [rm](Context& c) { // GetActualVibrationValue(handle, aruid)
++        const auto h = c.Pop<Core::HID::VibrationDeviceHandle>();
++        const auto aruid = PopAruid(c);
++        bool active = false;
++        if (const Result r = rm->IsVibrationAruidActive(aruid, active); r.IsError()) return c.SetResult(r.raw);
++        Core::HID::VibrationValue v = Core::HID::DEFAULT_VIBRATION_VALUE;
++        if (active) {
++            if (const Result r = IsVibrationHandleValid(h); r.IsError()) return c.SetResult(r.raw);
++            NpadVibrationDevice* device = rm->GetNSVibrationDevice(h);
++            if (!device || device->GetActualVibrationValue(v).IsError()) v = Core::HID::DEFAULT_VIBRATION_VALUE;
++        }
++        c.Push(v);
++    });
++    s->On(203, [rm](Context& c) { c.PushInterface(VibrationDeviceList(rm)); }); // CreateActiveVibrationDeviceList
++    s->On(204, [rm](Context& c) { // PermitVibration(can vibrate)
++        Check(c, rm->GetNpad()->GetVibrationHandler()->SetVibrationMasterVolume(c.Pop<u8>() ? 1.0f : 0.0f));
++    });
++    s->On(205, [rm](Context& c) { // IsVibrationPermitted
++        f32 volume = 0;
++        if (const Result r = rm->GetNpad()->GetVibrationHandler()->GetVibrationMasterVolume(volume); r.IsError()) return c.SetResult(r.raw);
++        c.Push<u8>(volume > 0.0f);
++    });
++    s->On(206, [rm](Context& c) { // SendVibrationValues(aruid, handles, values)
++        const auto aruid = PopAruid(c);
++        const auto raw_handles = c.ReadBuffer(0);
++        const auto raw_values = c.ReadBuffer(1);
++        const size_t n = raw_handles.size() / sizeof(Core::HID::VibrationDeviceHandle);
++        if (n != raw_values.size() / sizeof(Core::HID::VibrationValue)) return c.SetResult(ResultVibrationArraySizeMismatch.raw);
++        for (size_t i = 0; i < n; ++i) {
++            Core::HID::VibrationDeviceHandle h{};
++            Core::HID::VibrationValue v{};
++            std::memcpy(&h, raw_handles.data() + i * sizeof(h), sizeof(h));
++            std::memcpy(&v, raw_values.data() + i * sizeof(v), sizeof(v));
++            if (const Result r = rm->SendVibrationValue(aruid, h, v); r.IsError()) return c.SetResult(r.raw);
++        }
++    });
++    return s;
++}
++
++} // namespace
++
++std::shared_ptr<Service> MakeHidService(KernelCore& kernel) {
++    auto server = kernel.System().ServiceManager().GetService<IHidServer>("hid", true);
++    if (!server) return nullptr;
++    return HidServer(kernel, server->GetResourceManager());
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_mii.cpp b/src/core/hle/kernel/native_mii.cpp
 new file mode 100644
 index 0000000000..4a85402ceb
@@ -5043,10 +5328,10 @@ index 0000000000..3fef566612
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..df23b12598
+index 0000000000..17968c7428
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,369 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -5404,6 +5689,7 @@ index 0000000000..df23b12598
 +             return fs.Root("fsp-srv");
 +         }},
 +        {"pl:u", [&] { return MakeSharedFont(kernel); }},
++        {"hid", [&] { return MakeHidService(kernel); }},
 +        {"mii:e", [] { return MakeMiiService("mii:e", true); }},
 +        {"mii:u", [] { return MakeMiiService("mii:u", false); }},
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
@@ -5417,10 +5703,10 @@ index 0000000000..df23b12598
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..5c90833037
+index 0000000000..a4186f6a1a
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,44 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -5453,6 +5739,9 @@ index 0000000000..5c90833037
 +
 +/// The Mii database service around suyu's Mii library (native_mii.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeMiiService(const char* name, bool is_system);
++
++/// The controller service around hid_core's resource manager (native_hid_service.cpp).
++std::shared_ptr<KartRuntime::Service> MakeHidService(KernelCore& kernel);
 +
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);

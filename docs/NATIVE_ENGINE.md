@@ -589,6 +589,11 @@ sessions and suyu's HLE service code.
 - **Shared fonts** (`pl:u`): the font table of the engine's font loader (firmware fonts or stand-ins); the fonts' shared
   memory is still the emulated kernel's object (memory system calls are emulated), handed out as a copy handle.
   **Mii database** (`mii:e`, `mii:u`, `core/hle/kernel/native_mii.cpp`): the service around suyu's Mii library.
+- **Controllers** (`hid`, `core/hle/kernel/native_hid_service.cpp`): the service around hid_core's resource manager (the
+  input library: supported styles and pads, Joy-Con assignment, motion, rumble, the shared memory the SDK reads, the style-set
+  update events), about 35 commands. The "applet resource user id" argument is the sender's process id from the kernel, as the
+  emulated service read it (taking the message's value made the shared-memory lookup fail). Checked: 1P and 4P races (all
+  four players racing, 59.9 fps), back to the 12 baseline log errors and no shutdown panic.
 - Found on the way: reply values must sit at their natural alignment (a bool then a u32 puts the u32 at offset 4); packed,
   the font count read as 0x601 and the game waited forever.
 - Diagnostics: `KARTRECOMP_NATIVE_SERVICES_TRACE=1` (first call of each command) / `=2` (repeats too; the engine's logger folds
