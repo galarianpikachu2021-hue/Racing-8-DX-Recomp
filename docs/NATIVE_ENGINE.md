@@ -635,3 +635,8 @@ The GPU and device memory maps call into a rasterizer only when one is bound.
   library parts (audio_core, hid_core, the driver module) signal (`WaitSynchronization` / `ResetSignal`, ~200/s), thread
   creation and its bookkeeping (the threads themselves are host threads), the memory system calls and the handle table for
   those kernel objects (shared memory, transfer memory, events), and loading the game's process.
+- **Events** (same day): the events the library parts signal (audio rendered / device events, the controller style-set update
+  events, the driver's syncpoint events) reach the game as runtime "mirror" events (`MirrorKernelEvent`): `KReadableEvent::
+  Signal/Reset` update the mirror, a runtime ResetSignal resets the emulated event too. The game waits on and resets them
+  natively. The only emulated object it still waits on is a thread (waiting for a thread to end), logged once per kind
+  (`native services: the game waits on an emulated ...`).

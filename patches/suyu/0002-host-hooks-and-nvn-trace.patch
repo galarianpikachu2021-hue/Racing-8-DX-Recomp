@@ -4292,6 +4292,77 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/k_readable_event.cpp b/src/core/hle/kernel/k_readable_event.cpp
+index b3e09f725d..c47d534bf4 100644
+--- a/src/core/hle/kernel/k_readable_event.cpp
++++ b/src/core/hle/kernel/k_readable_event.cpp
+@@ -7,6 +7,7 @@
+ #include "common/assert.h"
+ #include "core/hle/kernel/k_event.h"
+ #include "core/hle/kernel/k_readable_event.h"
++#include "core/hle/kernel/native_services.h"
+ #include "core/hle/kernel/k_scheduler.h"
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/kernel/kernel.h"
+@@ -42,11 +43,17 @@ void KReadableEvent::Destroy(KernelCore& kernel) {
+ }
+ 
+ Result KReadableEvent::Signal(KernelCore& kernel) {
+-    KScopedSchedulerLock lk{kernel};
+-    if (!m_is_signaled) {
+-        m_is_signaled = true;
+-        this->NotifyAvailable(kernel);
++    bool changed = false;
++    {
++        KScopedSchedulerLock lk{kernel};
++        if (!m_is_signaled) {
++            m_is_signaled = true;
++            this->NotifyAvailable(kernel);
++            changed = true;
++        }
+     }
++    // kart-recomp: the game may wait on a runtime mirror of this event (native services).
++    if (changed) NativeServices::OnKernelEvent(this, true);
+     R_SUCCEED();
+ }
+ 
+@@ -56,12 +63,20 @@ Result KReadableEvent::Clear(KernelCore& kernel) {
+ }
+ 
+ Result KReadableEvent::Reset(KernelCore& kernel) {
+-    KScopedSchedulerLock lk{kernel};
++    {
++        KScopedSchedulerLock lk{kernel};
+ 
+-    R_UNLESS(m_is_signaled, ResultInvalidState);
++        R_UNLESS(m_is_signaled, ResultInvalidState);
+ 
+-    m_is_signaled = false;
++        m_is_signaled = false;
++    }
++    NativeServices::OnKernelEvent(this, false);
+     R_SUCCEED();
+ }
+ 
++bool KReadableEvent::IsSignaledUnlocked(KernelCore& kernel) const {
++    KScopedSchedulerLock lk{kernel};
++    return m_is_signaled;
++}
++
+ } // namespace Kernel
+diff --git a/src/core/hle/kernel/k_readable_event.h b/src/core/hle/kernel/k_readable_event.h
+index 7c9f734660..ade18287f2 100644
+--- a/src/core/hle/kernel/k_readable_event.h
++++ b/src/core/hle/kernel/k_readable_event.h
+@@ -34,6 +34,8 @@ public:
+     bool IsSignaled(KernelCore& kernel) const override;
+     void Destroy(KernelCore& kernel) override;
+     Result Reset(KernelCore& kernel);
++    /// kart-recomp: the state, taking the scheduler lock itself.
++    bool IsSignaledUnlocked(KernelCore& kernel) const;
+ 
+ private:
+     bool m_is_signaled{};
 diff --git a/src/core/hle/kernel/k_scheduler.cpp b/src/core/hle/kernel/k_scheduler.cpp
 index c1b0dcd033..06e7f29e62 100644
 --- a/src/core/hle/kernel/k_scheduler.cpp
@@ -4548,10 +4619,10 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
-index 0000000000..7774272163
+index 0000000000..2be964a76a
 --- /dev/null
 +++ b/src/core/hle/kernel/native_audio_service.cpp
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,222 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the audio renderer service ("audren:u") answered by the runtime. The renderer itself - voices, mixes, effects,
 +// sinks, the DSP command lists and the output to the host's audio device - is suyu's audio_core library; this replaces the
@@ -4575,6 +4646,7 @@ index 0000000000..7774272163
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/k_transfer_memory.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/audio/errors.h"
 +#include "core/hle/service/kernel_helpers.h"
@@ -4587,11 +4659,6 @@ index 0000000000..7774272163
 +using KartRuntime::Service;
 +using AudioCore::Renderer::AudioDevice;
 +
-+void PushKernelObject(KernelCore& kernel, Context& c, KAutoObject* object) {
-+    Handle h{};
-+    if (!object || GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, object).IsError()) return c.SetResult(0xD201);
-+    c.PushCopyHandle(h);
-+}
 +
 +/// One renderer session: audio_core's renderer, its event, the game's process held open while it runs.
 +struct RendererSession {
@@ -4650,7 +4717,7 @@ index 0000000000..7774272163
 +    s->When(7, [&kernel, r](Context& c) { // QuerySystemEvent
 +        if (r->renderer->GetSystem().GetExecutionMode() == AudioCore::ExecutionMode::Manual)
 +            return c.SetResult(::Service::Audio::ResultNotSupported.raw);
-+        PushKernelObject(kernel, c, &r->event->GetReadableEvent());
++        c.PushCopyHandle(MirrorKernelEvent(kernel, &r->event->GetReadableEvent()));
 +    });
 +    s->When(8, [r](Context& c) { r->renderer->GetSystem().SetRenderingTimeLimit(c.Pop<u32>()); });
 +    s->When(9, [r](Context& c) { c.Push<u32>(r->renderer->GetSystem().GetRenderingTimeLimit()); });
@@ -4696,7 +4763,7 @@ index 0000000000..7774272163
 +        if (c.WriteBufferSize(0) < sizeof(name)) return c.SetResult(::Service::Audio::ResultInsufficientBuffer.raw);
 +        c.WriteBuffer(&name, sizeof(name), 0);
 +    };
-+    auto event = [&kernel, st](Context& c) { PushKernelObject(kernel, c, &st->event->GetReadableEvent()); };
++    auto event = [&kernel, st](Context& c) { c.PushCopyHandle(MirrorKernelEvent(kernel, &st->event->GetReadableEvent())); };
 +    s->On(0, list);
 +    s->On(1, set_volume);
 +    s->On(2, get_volume);
@@ -4981,10 +5048,10 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_hid_service.cpp b/src/core/hle/kernel/native_hid_service.cpp
 new file mode 100644
-index 0000000000..4331af0a23
+index 0000000000..90c6e3304d
 --- /dev/null
 +++ b/src/core/hle/kernel/native_hid_service.cpp
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,279 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the controller service ("hid") answered by the runtime. The controller state - which pads and styles the game
 +// supports, Joy-Con assignment, motion, rumble, and the shared memory the SDK reads - is hid_core's resource manager (the input
@@ -5000,6 +5067,7 @@ index 0000000000..4331af0a23
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/k_shared_memory.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/hid/hid_server.h"
 +#include "core/hle/service/sm/sm.h"
@@ -5131,7 +5199,7 @@ index 0000000000..4331af0a23
 +        const auto aruid = PopAruid(c);
 +        Kernel::KReadableEvent* event = nullptr;
 +        if (const Result r = npad()->AcquireNpadStyleSetUpdateEventHandle(kernel, aruid, &event, id); r.IsError()) return c.SetResult(r.raw);
-+        PushKernelObject(kernel, c, event);
++        c.PushCopyHandle(MirrorKernelEvent(kernel, event)); // the game waits on it natively
 +    });
 +    s->On(107, [&kernel, npad](Context& c) { // DisconnectNpad(npad id, aruid)
 +        const auto id = c.Pop<NpadIdType>();
@@ -5390,10 +5458,10 @@ index 0000000000..4a85402ceb
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_nvdrv_service.cpp b/src/core/hle/kernel/native_nvdrv_service.cpp
 new file mode 100644
-index 0000000000..fcca507b9e
+index 0000000000..cf40baaec8
 --- /dev/null
 +++ b/src/core/hle/kernel/native_nvdrv_service.cpp
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,119 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the GPU driver service ("nvdrv") answered by the runtime. The driver devices themselves - graphics memory handles
 +// (nvmap), GPU address spaces, syncpoints and their events, the GPU channel, the video decoder - are suyu's driver code (the
@@ -5409,6 +5477,7 @@ index 0000000000..fcca507b9e
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/nvdrv/core/container.h"
 +#include "core/hle/service/nvdrv/nvdata.h"
@@ -5493,11 +5562,7 @@ index 0000000000..fcca507b9e
 +        if (!st->initialized) return result(c, NvResult::NotInitialized);
 +        Kernel::KEvent* event = nullptr;
 +        const NvResult r = nv->QueryEvent(fd, id, event);
-+        if (r == NvResult::Success && event) {
-+            Handle h{};
-+            if (GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, &event->GetReadableEvent()).IsError()) return c.SetResult(0xD201);
-+            c.PushCopyHandle(h);
-+        }
++        if (r == NvResult::Success && event) c.PushCopyHandle(MirrorKernelEvent(kernel, &event->GetReadableEvent()));
 +        result(c, r);
 +    });
 +    s->On(6, [result](Context& c) { result(c, NvResult::Success); }); // GetStatus
@@ -5518,10 +5583,10 @@ index 0000000000..fcca507b9e
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..6866458668
+index 0000000000..f8b2413dca
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,365 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5534,11 +5599,14 @@ index 0000000000..6866458668
 +#include <mutex>
 +#include <array>
 +#include <set>
++#include <unordered_map>
++#include <algorithm>
 +#include <sstream>
 +
 +#include "common/logging/log.h"
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/k_client_port.h"
 +#include "core/hle/kernel/k_client_session.h"
 +#include "core/hle/kernel/k_handle_table.h"
@@ -5557,6 +5625,7 @@ index 0000000000..6866458668
 +using KartRuntime::NativeKernel;
 +
 +std::atomic<KernelCore*> g_kernel{nullptr};
++std::atomic<u64> g_native_waits{0}, g_emulated_waits{0}, g_native_resets{0};
 +thread_local bool t_host_wait = false;
 +
 +Result ToResult(u32 r) {
@@ -5745,11 +5814,67 @@ index 0000000000..6866458668
 +    return Runtime(kernel).Close(handle) ? ResultSuccess : ResultInvalidHandle;
 +}
 +
++namespace {
++/// A runtime event that stands for an emulated one (see MirrorKernelEvent).
++class KernelEventMirror final : public KartRuntime::Event {
++public:
++    KernelEventMirror(KartRuntime::NativeKernel& k, KernelCore& kc, KReadableEvent* e) : Event{k, "kernel event"}, kernel{kc}, source{e} {
++        source->Open(kernel);
++    }
++    ~KernelEventMirror() override;
++    KernelCore& kernel;
++    KReadableEvent* source;
++};
++
++std::mutex g_mirrors_lock;
++std::atomic<bool> g_have_mirrors{false};
++std::unordered_map<KReadableEvent*, std::vector<KernelEventMirror*>> g_mirrors;
++
++KernelEventMirror::~KernelEventMirror() {
++    {
++        std::scoped_lock lk{g_mirrors_lock};
++        auto& list = g_mirrors[source];
++        list.erase(std::remove(list.begin(), list.end(), this), list.end());
++        if (list.empty()) g_mirrors.erase(source);
++    }
++    source->Close(kernel);
++}
++} // namespace
++
++u32 MirrorKernelEvent(KernelCore& kernel, KReadableEvent* event) {
++    auto& runtime = Runtime(kernel);
++    auto mirror = std::make_shared<KernelEventMirror>(runtime, kernel, event);
++    {
++        std::scoped_lock lk{g_mirrors_lock};
++        g_mirrors[event].push_back(mirror.get());
++        g_have_mirrors.store(true, std::memory_order_release);
++        // The state under the registry lock: a signal from now on reaches the mirror.
++        if (event->IsSignaledUnlocked(kernel)) mirror->Signal();
++    }
++    return runtime.Add(std::move(mirror));
++}
++
++void OnKernelEvent(KReadableEvent* event, bool signaled) {
++    if (!g_have_mirrors.load(std::memory_order_acquire)) return;
++    std::scoped_lock lk{g_mirrors_lock};
++    const auto it = g_mirrors.find(event);
++    if (it == g_mirrors.end()) return;
++    for (KernelEventMirror* m : it->second) {
++        if (signaled) m->Signal();
++        else m->Clear();
++    }
++}
++
 +Result ResetSignal(KernelCore& kernel, Svc::Handle handle) {
 +    auto event = Runtime(kernel).GetAs<KartRuntime::Event>(handle);
 +    if (!event) return ResultInvalidHandle;
 +    if (!event->IsSignaled()) return ResultInvalidState;
 +    event->Clear();
++    g_native_resets.fetch_add(1, std::memory_order_relaxed);
++    if (event->name == "kernel event") {
++        // The emulated event is reset too (its service reads that state).
++        (void)static_cast<KernelEventMirror*>(event.get())->source->Reset(kernel);
++    }
 +    return ResultSuccess;
 +}
 +
@@ -5761,8 +5886,12 @@ index 0000000000..6866458668
 +        any |= n;
 +        all &= n;
 +    }
-+    if (!any) return ResultSuccess;
++    if (!any) {
++        g_emulated_waits.fetch_add(1, std::memory_order_relaxed);
++        return ResultSuccess;
++    }
 +    *handled = true;
++    g_native_waits.fetch_add(1, std::memory_order_relaxed);
 +    auto& runtime = Runtime(kernel);
 +    if (!all) {
 +        // Native and emulated objects in one wait: not used by the game so far (every object it waits on together comes from
@@ -5812,6 +5941,8 @@ index 0000000000..6866458668
 +    // Handles stay valid (game threads may still be finishing a request); what must stop before the engine's own services
 +    // go is stopped here.
 +    StopAudioRenderers();
++    LOG_INFO(Service, "native services: waits answered by the runtime {}, by the emulated kernel {}; runtime event resets {}",
++             g_native_waits.load(), g_emulated_waits.load(), g_native_resets.load());
 +    (void)kernel;
 +}
 +
@@ -5823,10 +5954,10 @@ index 0000000000..6866458668
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..fcaa721368
+index 0000000000..99b108ad22
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,57 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -5848,6 +5979,7 @@ index 0000000000..fcaa721368
 +namespace Kernel {
 +class KernelCore;
 +class KThread;
++class KReadableEvent;
 +}
 +
 +namespace Kernel::NativeServices {
@@ -5875,6 +6007,12 @@ index 0000000000..fcaa721368
 +void Shutdown(KernelCore& kernel);
 +
 +KartRuntime::NativeKernel& Runtime(KernelCore& kernel);
++
++/// A runtime handle that mirrors an emulated kernel event signalled by the engine's library parts (audio_core, hid_core, the
++/// driver module): the game waits on it and resets it natively; the emulated event's signal and reset reach the mirror.
++u32 MirrorKernelEvent(KernelCore& kernel, KReadableEvent* event);
++/// From KReadableEvent::Signal / Reset.
++void OnKernelEvent(KReadableEvent* event, bool signaled);
 +
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
@@ -7002,10 +7140,20 @@ index 70d7a02099..4d7a6b61c3 100644
      auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
  
 diff --git a/src/core/hle/kernel/svc/svc_synchronization.cpp b/src/core/hle/kernel/svc/svc_synchronization.cpp
-index cd28750f38..7e08b2b68b 100644
+index cd28750f38..e26445cc6e 100644
 --- a/src/core/hle/kernel/svc/svc_synchronization.cpp
 +++ b/src/core/hle/kernel/svc/svc_synchronization.cpp
-@@ -11,6 +11,7 @@
+@@ -4,6 +4,9 @@
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <mutex>
++#include <set>
++#include <string>
+ #include "common/scope_exit.h"
+ #include "common/scratch_buffer.h"
+ #include "core/core.h"
+@@ -11,6 +14,7 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_readable_event.h"
  #include "core/hle/kernel/svc.h"
@@ -7013,7 +7161,7 @@ index cd28750f38..7e08b2b68b 100644
  #include "core/hle/kernel/svc_results.h"
  
  namespace Kernel::Svc {
-@@ -18,6 +19,7 @@ namespace Kernel::Svc {
+@@ -18,6 +22,7 @@ namespace Kernel::Svc {
  /// Close a handle
  Result CloseHandle(Core::System& system, Handle handle) {
      LOG_TRACE(Kernel_SVC, "Closing handle 0x{:08X}", handle);
@@ -7021,7 +7169,7 @@ index cd28750f38..7e08b2b68b 100644
  
      // Remove the handle.
      R_UNLESS(GetCurrentProcess(system.Kernel()).GetHandleTable().Remove(system.Kernel(), handle),
-@@ -29,6 +31,7 @@ Result CloseHandle(Core::System& system, Handle handle) {
+@@ -29,6 +34,7 @@ Result CloseHandle(Core::System& system, Handle handle) {
  /// Clears the signaled state of an event or process.
  Result ResetSignal(Core::System& system, Handle handle) {
      LOG_DEBUG(Kernel_SVC, "called handle 0x{:08X}", handle);
@@ -7029,7 +7177,7 @@ index cd28750f38..7e08b2b68b 100644
  
      // Get the current handle table.
      const auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
-@@ -61,6 +64,15 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
+@@ -61,6 +67,15 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
      // Ensure number of handles is valid.
      R_UNLESS(0 <= num_handles && num_handles <= Svc::ArgumentHandleCountMax, ResultOutOfRange);
  
@@ -7045,7 +7193,24 @@ index cd28750f38..7e08b2b68b 100644
      // Get the synchronization context.
      auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
      auto objs = GetCurrentThread(system.Kernel()).GetSynchronizationObjectBuffer();
-@@ -109,8 +121,8 @@ Result CancelSynchronization(Core::System& system, Handle handle) {
+@@ -73,6 +88,16 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
+ 
+         // Convert the handles to objects.
+         R_UNLESS(handle_table.GetMultipleObjects<KSynchronizationObject>(system.Kernel(), objs.data(), handles.data(), num_handles), ResultInvalidHandle);
++        // kart-recomp: which kinds of emulated objects the game still waits on (native services), once per kind.
++        if (NativeServices::Enabled()) {
++            static std::mutex m;
++            static std::set<std::string> seen;
++            for (auto i = 0; i < num_handles; ++i) {
++                const std::string kind{objs[i]->GetTypeObj().GetName()};
++                std::scoped_lock lk{m};
++                if (seen.insert(kind).second) LOG_INFO(Kernel_SVC, "native services: the game waits on an emulated {}", kind);
++            }
++        }
+     }
+ 
+     // Ensure handles are closed when we're done.
+@@ -109,8 +134,8 @@ Result CancelSynchronization(Core::System& system, Handle handle) {
      KScopedAutoObject thread = GetCurrentProcess(system.Kernel()).GetHandleTable().GetObject<KThread>(system.Kernel(), handle);
      R_UNLESS(thread.IsNotNull(), ResultInvalidHandle);
  
