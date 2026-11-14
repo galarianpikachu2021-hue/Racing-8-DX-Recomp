@@ -534,6 +534,9 @@ QImage Renderer::Render(const StoreData& mii, int width, int height) const {
     const bool flip = G("hair_flip") != 0;
     const QMatrix4x4 hair_at = place(hair_translate[static_cast<size_t>(face)], 1.0f, flip);
     Draw(t, LoadMesh(kForeheadNormal, hair), hair_at, vp, Material{skin});
+    // Fourteen styles wear a cap or a headband over the top of the head, in the Mii's favourite colour (without it the top
+    // of the head was simply missing).
+    Draw(t, LoadMesh(kHatNormal, hair), hair_at, vp, Material{favourite});
     Draw(t, LoadMesh(kHairNormal, hair), hair_at, vp, Material{Common(G("hair_color"))});
     const float nose_scale = 0.4f + 0.175f * static_cast<float>(G("nose_scale")), nose_dy = -1.5f * static_cast<float>(G("nose_y") - 8);
     const QMatrix4x4 nose_at = place(nose_translate[static_cast<size_t>(face)], nose_scale, false, nose_dy);
