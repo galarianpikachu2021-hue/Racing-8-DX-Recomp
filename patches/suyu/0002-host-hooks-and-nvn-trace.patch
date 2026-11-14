@@ -4408,10 +4408,10 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..c63ed2d043
+index 0000000000..e086c988c6
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,222 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -4591,28 +4591,32 @@ index 0000000000..c63ed2d043
 +        static std::atomic<bool> warned{false};
 +        if (!warned.exchange(true)) LOG_ERROR(Kernel, "native services: a wait mixes runtime and emulated handles; waiting on the runtime ones");
 +    }
-+    std::vector<std::shared_ptr<KartRuntime::Waitable>> objs;
-+    std::vector<s32> index_of;
-+    for (s32 i = 0; i < count; ++i) {
-+        if (!IsNative(handles[i])) continue;
-+        auto w = runtime.GetAs<KartRuntime::Waitable>(handles[i]);
-+        if (!w) return ResultInvalidHandle;
-+        objs.push_back(std::move(w));
-+        index_of.push_back(i);
-+    }
-+    // A CancelSynchronization that came while the thread was not waiting is kept by the thread (as the kernel does): it ends
-+    // this wait at once, whichever side the objects are on.
-+    KThread* self = GetCurrentThreadPointer(kernel);
-+    if (self->IsWaitCancelled()) {
-+        self->ClearWaitCancelled();
-+        return ResultCancelled;
-+    }
 +    s32 index = -1;
-+    const u32 r = runtime.WaitAny(GetCurrentThreadPointer(kernel)->GetId(), objs, timeout_ns, &index);
-+    if (r == KartRuntime::KernelResult::Success) *out_index = index_of[index];
++    u32 r = 0;
++    {
++        std::vector<std::shared_ptr<KartRuntime::Waitable>> objs;
++        std::vector<s32> index_of;
++        for (s32 i = 0; i < count; ++i) {
++            if (!IsNative(handles[i])) continue;
++            auto w = runtime.GetAs<KartRuntime::Waitable>(handles[i]);
++            if (!w) return ResultInvalidHandle;
++            objs.push_back(std::move(w));
++            index_of.push_back(i);
++        }
++        // A CancelSynchronization that came while the thread was not waiting is kept by the thread (as the kernel does): it
++        // ends this wait at once, whichever side the objects are on.
++        KThread* self = GetCurrentThreadPointer(kernel);
++        if (self->IsWaitCancelled()) {
++            self->ClearWaitCancelled();
++            return ResultCancelled;
++        }
++        r = runtime.WaitAny(self->GetId(), objs, timeout_ns, &index);
++        if (r == KartRuntime::KernelResult::Success) *out_index = index_of[index];
++    }
 +    if (r == KartRuntime::KernelResult::Cancelled) {
-+        // Termination or CancelSynchronization: the kernel answers the first with "termination requested".
-+        if (GetCurrentThreadPointer(kernel)->IsTerminationRequested()) return ResultTerminationRequested;
++        // A thread being terminated never returns to the game (on the console it stops in the kernel): exit here, as the
++        // emulated kernel's run loop would before the next instruction. Otherwise it was CancelSynchronization.
++        if (GetCurrentThreadPointer(kernel)->IsTerminationRequested()) GetCurrentThread(kernel).Exit(kernel);
 +        return ResultCancelled;
 +    }
 +    return ToResult(r);
@@ -4681,10 +4685,10 @@ index 0000000000..e3c9e31e9f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..3e6ed007c8
+index 0000000000..18df0d61a0
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,278 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -4701,9 +4705,27 @@ index 0000000000..3e6ed007c8
 +#include "core/file_sys/registered_cache.h"
 +#include "core/hle/kernel/kernel.h"
 +#include "core/hle/service/acc/profile_manager.h"
++#include "common/fs/fs.h"
++#include "common/fs/path_util.h"
++#include "core/file_sys/romfs.h"
++#include "core/file_sys/vfs/vfs.h"
++#include "core/file_sys/content_archive.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/service/apm/apm_controller.h"
++#include "core/hle/service/ns/language.h"
++#include "core/hle/service/set/settings_server.h"
++#include "core/hle/service/set/settings_types.h"
++#include "core/hle/service/sm/sm.h"
++#include "core/hle/service/vi/application_display_service.h"
++#include "core/hle/service/vi/container.h"
++#include "core/hle/service/vi/manager_root_service.h"
++#include "core/hle/service/vi/vi_types.h"
++#include "hid_core/frontend/emulated_controller.h"
++#include "hid_core/hid_core.h"
 +#include "core/loader/loader.h"
 +#include "kart_runtime/native_kernel.h"
 +#include "kart_runtime/services/account.h"
++#include "kart_runtime/services/applet.h"
 +#include "kart_runtime/services/system.h"
 +#include "kart_runtime/services/time.h"
 +
@@ -4761,7 +4783,156 @@ index 0000000000..3e6ed007c8
 +    return cfg;
 +}
 +
++
++std::function<bool(const std::string&)> g_open_url;
++KartRuntime::Services::Applets* g_applets = nullptr;
++
++u64 DesiredLanguage(Core::System& system) {
++    const FileSys::PatchManager pm{system.GetApplicationProcessProgramID(), system.GetFileSystemController(), system.GetContentProvider()};
++    auto control = pm.GetControlMetadata();
++    if (!control.first) {
++        const FileSys::PatchManager upd{FileSys::GetUpdateTitleID(system.GetApplicationProcessProgramID()), system.GetFileSystemController(),
++                                        system.GetContentProvider()};
++        control = upd.GetControlMetadata();
++    }
++    const u32 supported = control.first ? control.first->GetSupportedLanguages() : 0;
++    const auto code = Service::Set::GetLanguageCodeFromIndex(static_cast<size_t>(Settings::values.language_index.GetValue()));
++    const auto app = Service::NS::ConvertToApplicationLanguage(code);
++    if (!app) return 0;
++    const auto* priority = Service::NS::GetApplicationLanguagePriorityList(*app);
++    if (!priority) return 0;
++    for (const auto lang : *priority) {
++        const u32 flag = Service::NS::GetSupportedLanguageFlag(lang);
++        if (supported == 0 || (supported & flag) == flag) {
++            const auto out = Service::NS::ConvertToLanguageCode(lang);
++            return out ? static_cast<u64>(*out) : 0;
++        }
++    }
++    return 0;
++}
++
++std::array<char, 0x10> DisplayVersion(Core::System& system) {
++    std::array<char, 0x10> out{};
++    std::string v = system.GetApplicationDisplayVersionOverride();
++    if (v.empty()) {
++        const FileSys::PatchManager pm{system.GetApplicationProcessProgramID(), system.GetFileSystemController(), system.GetContentProvider()};
++        auto control = pm.GetControlMetadata();
++        if (!control.first) {
++            const FileSys::PatchManager upd{FileSys::GetUpdateTitleID(system.GetApplicationProcessProgramID()), system.GetFileSystemController(),
++                                            system.GetContentProvider()};
++            control = upd.GetControlMetadata();
++        }
++        if (control.first) v = control.first->GetVersionString();
++    }
++    std::memcpy(out.data(), v.data(), std::min(v.size(), out.size()));
++    return out;
++}
++
++/// The engine's controller reconfiguration for the controller applet (what the emulator's default controller applet did).
++AppletHooks::ControllerResult ControllerApplet(Core::System& system, const AppletHooks::ControllerArgs& a) {
++    auto& hid = system.HIDCore();
++    const size_t min_players = a.single ? 1 : static_cast<size_t>(std::max(a.min_players, 1));
++    const bool pro = a.style_set & 1, handheld = a.style_set & 2, dual = a.style_set & 4, left = a.style_set & 8, right = a.style_set & 16;
++    hid.GetEmulatedController(Core::HID::NpadIdType::Handheld)->Disconnect();
++    for (size_t index = 0; index < hid.available_controllers - 2; ++index) {
++        auto* controller = hid.GetEmulatedControllerByIndex(index);
++        controller->Disconnect();
++        if (index >= min_players) continue;
++        if (pro || a.style_set == 0) controller->SetNpadStyleIndex(Core::HID::NpadStyleIndex::Fullkey);
++        else if (dual) controller->SetNpadStyleIndex(Core::HID::NpadStyleIndex::JoyconDual);
++        else if (left && right) controller->SetNpadStyleIndex(index % 2 == 0 ? Core::HID::NpadStyleIndex::JoyconLeft : Core::HID::NpadStyleIndex::JoyconRight);
++        else if (index == 0 && a.single && handheld && !Settings::IsDockedMode()) controller->SetNpadStyleIndex(Core::HID::NpadStyleIndex::Handheld);
++        else continue;
++        controller->Connect(true);
++    }
++    return {a.single ? int8_t{1} : hid.GetPlayerCount(), static_cast<u32>(hid.GetFirstNpadId())};
++}
++
++/// The web applet: the game's offline pages are extracted once into the cache folder and opened in the system browser, web
++/// addresses are opened directly (what the engine's frontend web applet did).
++std::pair<u32, std::string> WebApplet(Core::System& system, const AppletHooks::WebRequest& r) {
++    if (r.shim_kind == 5) {
++        const bool opened = g_open_url && g_open_url(r.url);
++        LOG_INFO(Service_AM, "native services: web page {} opened in the system browser: {}", r.url, opened);
++        return {2, r.url}; // exit requested (as the frontend applet answered for web pages)
++    }
++    static constexpr std::array<const char*, 3> kinds{"manual", "legal_information", "system_data"};
++    const u32 kind = r.document_kind >= 1 && r.document_kind <= 3 ? r.document_kind : 1;
++    const u64 title = kind == 1 ? system.GetApplicationProcessProgramID() : r.title_id;
++    const auto cache = Common::FS::GetSuyuPath(Common::FS::SuyuPath::CacheDir) / fmt::format("offline_web_applet_{}/{:016X}", kinds[kind - 1], title);
++    const auto document = Common::FS::ConcatPathSafe(cache, fmt::format("{}{}", kind == 1 ? "html-document/" : "", r.document_path));
++    std::string page = Common::FS::PathToUTF8String(document);
++    if (const auto q = page.find_first_of("?#"); q != std::string::npos) page.resize(q);
++    if (!Common::FS::Exists(page)) {
++        FileSys::VirtualFile romfs;
++        const auto type = kind == 1 ? FileSys::ContentRecordType::HtmlDocument : kind == 2 ? FileSys::ContentRecordType::LegalInformation : FileSys::ContentRecordType::Data;
++        if (const auto nca = system.GetContentProvider().GetEntry(title, type)) {
++            const FileSys::PatchManager pm{title, system.GetFileSystemController(), system.GetContentProvider()};
++            romfs = pm.PatchRomFS(nca.get(), nca->GetRomFS(), type);
++        } else if (kind == 1) {
++            system.GetAppLoader().ReadManualRomFS(romfs);
++        }
++        if (!romfs) return {4, {}}; // window closed: nothing to show
++        const auto dir = system.GetFilesystem()->CreateDirectory(Common::FS::PathToUTF8String(cache), FileSys::OpenMode::ReadWrite);
++        FileSys::VfsRawCopyD(FileSys::ExtractRomFS(romfs), dir);
++    }
++    const std::string url = "file://" + Common::FS::PathToUTF8String(document);
++    const bool opened = g_open_url && g_open_url(url);
++    LOG_INFO(Service_AM, "native services: game page {} opened in the system browser: {}", url, opened);
++    return {0, url};
++}
++
++std::shared_ptr<KartRuntime::Service> MakeApplets(KartRuntime::NativeKernel& runtime, KernelCore& kernel) {
++    Core::System& system = kernel.System();
++    AppletHooks h;
++    h.aruid = GetCurrentProcess(kernel).GetProcessId();
++    {
++        struct {
++            u32 magic = 0xC79497CA;
++            u32 is_account_selected = 1;
++            Common::UUID user{};
++            std::array<u8, 0x70> pad{};
++        } lp;
++        if (const auto uuid = system.GetProfileManager().GetUser(static_cast<s32>(Settings::values.current_user))) lp.user = *uuid;
++        static_assert(sizeof(lp) == 0x88);
++        h.preselected_user.resize(sizeof(lp));
++        std::memcpy(h.preselected_user.data(), &lp, sizeof(lp));
++    }
++    h.desired_language = DesiredLanguage(system);
++    h.display_version = DisplayVersion(system);
++    h.docked = [] { return Settings::IsDockedMode(); };
++    h.performance_mode = [&system] { return static_cast<u32>(system.GetAPMController().GetCurrentPerformanceMode()); };
++    h.exit_locked = [&system](bool locked) { system.SetExitLocked(locked); };
++    h.terminate_result = [](u32 r) { LOG_WARNING(Service_AM, "native services: the game set its terminate result {:#x} ({:04}-{:04})", r, (r & 0x1FF) + 2000, (r >> 9) & 0x1FFF); };
++    const u64 aruid = h.aruid;
++    h.create_layer = [&system, aruid](u64* out) {
++        // The game's layer on the default display (the display service still makes the window's buffer queue).
++        std::shared_ptr<Service::VI::IApplicationDisplayService> display;
++        auto root = system.ServiceManager().GetService<Service::VI::IManagerRootService>("vi:m", true);
++        if (!root || root->GetDisplayService(&display, Service::VI::Policy::Compositor) != ResultSuccess || !display) return false;
++        const auto container = display->GetContainer();
++        u64 display_id = 0;
++        if (container->OpenDisplay(&display_id, Service::VI::DisplayName{"Default"}) != ResultSuccess) return false;
++        if (container->CreateManagedLayer(out, display_id, aruid) != ResultSuccess) return false;
++        (void)container->SetLayerVisibility(*out, true);
++        return true;
++    };
++    h.controller_applet = [&system](const AppletHooks::ControllerArgs& a) { return ControllerApplet(system, a); };
++    h.web_applet = [&system](const AppletHooks::WebRequest& r) { return WebApplet(system, r); };
++    static KartRuntime::Services::Applets applets{runtime, std::move(h)};
++    g_applets = &applets;
++    return applets.Root("appletOE");
++}
++
 +} // namespace
++
++void SetOpenUrlHandler(std::function<bool(const std::string&)> f) {
++    g_open_url = std::move(f);
++}
++
++void OnOperationModeChanged() {
++    if (g_applets) g_applets->OnOperationModeChanged();
++}
 +
 +std::shared_ptr<KartRuntime::Service> MakeService(KartRuntime::NativeKernel& runtime, KernelCore& kernel, const std::string& name) {
 +    static Time time;
@@ -4789,6 +4960,7 @@ index 0000000000..3e6ed007c8
 +        {"acc:u0", [&] { return MakeAccount("acc:u0", MakeAccountConfig(system)); }},
 +        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
 +        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
++        {"appletOE", [&] { return MakeApplets(runtime, kernel); }},
 +    };
 +    const auto it = factories.find(name);
 +    return it == factories.end() ? nullptr : it->second();
@@ -4797,14 +4969,15 @@ index 0000000000..3e6ed007c8
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..15f5144580
+index 0000000000..b179394405
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,28 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
 +
++#include <functional>
 +#include <memory>
 +#include <string>
 +
@@ -4820,6 +4993,11 @@ index 0000000000..15f5144580
 +namespace Kernel::NativeServices {
 +
 +/// The service object for `name`, or null when the runtime does not have it (the emulated one is used).
++/// How the web applet opens a page in the system browser (set by the frontend).
++void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
++/// The engine switched docked / handheld: the game gets its message.
++void OnOperationModeChanged();
++
 +std::shared_ptr<KartRuntime::Service> MakeService(KartRuntime::NativeKernel& runtime, KernelCore& kernel, const std::string& name);
 +
 +} // namespace Kernel::NativeServices
@@ -5603,6 +5781,26 @@ index 79c6ac2079..7a9c434d60 100644
      // When the input tick is positive, sleep.
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
+diff --git a/src/core/hle/service/am/applet_manager.cpp b/src/core/hle/service/am/applet_manager.cpp
+index 3dd2adc9c0..c17da80799 100644
+--- a/src/core/hle/service/am/applet_manager.cpp
++++ b/src/core/hle/service/am/applet_manager.cpp
+@@ -11,6 +11,7 @@
+ #include "core/hle/service/acc/profile_manager.h"
+ #include "core/hle/service/am/applet_data_broker.h"
+ #include "core/hle/service/am/applet_manager.h"
++#include "core/hle/kernel/native_services_list.h"
+ #include "core/hle/service/am/frontend/applet_cabinet.h"
+ #include "core/hle/service/am/frontend/applet_controller.h"
+ #include "core/hle/service/am/frontend/applet_mii_edit_types.h"
+@@ -251,6 +252,7 @@ void AppletManager::RequestExit() {
+ }
+ 
+ void AppletManager::OperationModeChanged() {
++    Kernel::NativeServices::OnOperationModeChanged(); // kart-recomp: the runtime's applet manager (native services)
+     std::scoped_lock lk{m_lock};
+     if (m_window_system) {
+         m_window_system->OnOperationModeChanged();
 diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
 index 8b7a1b642e..0b3cbf15f9 100644
 --- a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
@@ -10215,10 +10413,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..2fd4d30e30
+index 0000000000..7834e04f92
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,513 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -10337,6 +10535,8 @@ index 0000000000..2fd4d30e30
 +    /// A copy handle to `o` (events, shared memory).
 +    void PushCopyObject(std::shared_ptr<KernelObject> o);
 +    /// A move handle (raw kernel handle produced elsewhere, e.g. by the emulated kernel).
++    /// An interface object passed in by the client: a domain object id, or a session handle (move) on a plain session.
++    std::shared_ptr<Service> InputObject(size_t i = 0);
 +    void PushMoveHandle(uint32_t h) { reply.move_handles.push_back(h); }
 +    void PushCopyHandle(uint32_t h) { reply.copy_handles.push_back(h); }
 +
@@ -10714,6 +10914,17 @@ index 0000000000..2fd4d30e30
 +        reply.move_handles.push_back(kernel.OpenSession(std::move(s)));
 +    }
 +}
++inline std::shared_ptr<Service> Context::InputObject(size_t i) {
++    if (domain && session) {
++        if (i >= request.input_objects.size()) return nullptr;
++        std::scoped_lock lk{session->mutex};
++        const auto it = session->objects.find(request.input_objects[i]);
++        return it == session->objects.end() ? nullptr : it->second;
++    }
++    if (i >= request.move_handles.size()) return nullptr;
++    const auto s = kernel.GetAs<Session>(request.move_handles[i]);
++    return s ? s->state->target : nullptr;
++}
 +inline void Context::PushCopyObject(std::shared_ptr<KernelObject> o) {
 +    reply.copy_handles.push_back(kernel.Add(std::move(o)));
 +}
@@ -10855,6 +11066,486 @@ index 0000000000..bc29741ca2
 +    s->Ok(50);                                                      // CheckAddOnContentMountStatus
 +    return s;
 +}
++
++} // namespace KartRuntime::Services
+diff --git a/src/kart_runtime/services/applet.h b/src/kart_runtime/services/applet.h
+new file mode 100644
+index 0000000000..f15db695de
+--- /dev/null
++++ b/src/kart_runtime/services/applet.h
+@@ -0,0 +1,474 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the applet manager as an application sees it ("appletOE": IApplicationProxy and its interfaces)
++// (docs/NATIVE_ENGINE.md, "native services").
++//
++// What it does for the game: lifecycle messages (focus changed at start, operation / performance mode changed when the player
++// switches graphics quality, exit) behind one event, the launch parameter with the preselected user, the game's display layer,
++// the exit lock, and library applets - the controller applet (answered at once with the players the engine has connected), the
++// error applet and any other (finished at once with no output). The engine's side comes in through `AppletHooks`.
++#pragma once
++
++#include <array>
++#include <cstring>
++#include <deque>
++#include <functional>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++struct AppletHooks {
++    uint64_t aruid = 0;                       ///< the game's applet resource user id (its process id)
++    std::vector<uint8_t> preselected_user;    ///< launch parameter "account preselected user" (0x88 bytes)
++    uint64_t desired_language = 0;            ///< GetDesiredLanguage
++    std::array<char, 0x10> display_version{}; ///< GetDisplayVersion
++    std::function<bool()> docked;             ///< operation mode
++    std::function<uint32_t()> performance_mode;
++    std::function<bool(uint64_t*)> create_layer; ///< CreateManagedDisplayLayer
++    std::function<void(bool)> exit_locked;       ///< LockExit / UnlockExit
++    std::function<void(uint32_t)> terminate_result; ///< SetTerminateResult (the game is about to stop on an error)
++    struct ControllerArgs {
++        int min_players = 1, max_players = 4;
++        bool single = false;
++        uint32_t style_set = 0; ///< allowed controller kinds (bit 0 pro, 1 handheld, 2 dual Joy-Con, 3 left, 4 right)
++    };
++    struct ControllerResult {
++        int8_t player_count;
++        uint32_t selected_id;
++    };
++    std::function<ControllerResult(const ControllerArgs&)> controller_applet;
++    /// The web applet: an offline page of the game (its manual: document kind 1, a path inside the "html-document" archive;
++    /// 2 = legal information, 3 = a system data page, with `title_id`) or a web address. Returns the exit reason (0 end button,
++    /// 2 exit requested, 4 window closed) and the last address.
++    struct WebRequest {
++        uint32_t shim_kind = 0; ///< 1 shop, 2 login, 3 offline, 4 share, 5 web, 6 wifi, 7 lobby, 8 lhub
++        uint32_t document_kind = 0;
++        uint64_t title_id = 0;
++        std::string document_path, url;
++    };
++    std::function<std::pair<uint32_t, std::string>(const WebRequest&)> web_applet;
++};
++
++class Applets {
++public:
++    enum Message : uint32_t { Exit = 4, FocusStateChanged = 15, Resume = 16, OperationModeChanged = 30, PerformanceModeChanged = 31 };
++    static constexpr uint32_t ResultNoDataInChannel = 128 | (2u << 9);
++    static constexpr uint32_t ResultNoMessages = 128 | (3u << 9);
++
++    Applets(NativeKernel& k, AppletHooks h) : kernel{k}, hooks{std::move(h)}, message_event{std::make_shared<Event>(k, "applet message")} {
++        std::scoped_lock lk{mutex};
++        UpdateEventLocked(); // the first focus message waits from the start
++    }
++
++    /// The engine changed docked / handheld (graphics quality): the game gets a message when it asked for one.
++    void OnOperationModeChanged() {
++        std::scoped_lock lk{mutex};
++        if (operation_mode_notify) operation_mode_changed = true;
++        if (performance_mode_notify) performance_mode_changed = true;
++        UpdateEventLocked();
++    }
++    /// The engine asks the game to quit.
++    void RequestExit() {
++        std::scoped_lock lk{mutex};
++        exit_requested = true;
++        UpdateEventLocked();
++    }
++
++    std::shared_ptr<Service> Root(const char* name) {
++        auto s = std::make_shared<Service>(name);
++        s->On(0, [this](Context& c) { c.PushInterface(Proxy()); }); // OpenApplicationProxy
++        s->On(1, [this](Context& c) { c.PushInterface(Proxy()); }); // OpenApplicationProxyOld
++        return s;
++    }
++
++    /// An "IStorage": a byte buffer passed between the game and applets.
++    class Storage : public Service {
++    public:
++        explicit Storage(std::vector<uint8_t> d) : Service{"IStorage"}, data{std::move(d)} {
++            On(0, [this](Context& c) { c.PushInterface(Accessor()); }); // Open
++            On(1, [this](Context& c) { c.PushInterface(Accessor()); }); // OpenTransferStorage
++        }
++        std::vector<uint8_t> data;
++
++    private:
++        std::shared_ptr<Service> Accessor() {
++            auto a = std::make_shared<Service>("IStorageAccessor");
++            auto self = std::static_pointer_cast<Storage>(shared_from_this());
++            a->On(0, [self](Context& c) { c.Push<int64_t>(static_cast<int64_t>(self->data.size())); }); // GetSize
++            a->On(10, [self](Context& c) {                                                         // Write(offset, buffer)
++                const auto offset = c.Pop<int64_t>();
++                const auto in = c.ReadBuffer(0);
++                if (offset < 0 || static_cast<uint64_t>(offset) + in.size() > self->data.size()) return c.SetResult(128 | (503u << 9));
++                std::memcpy(self->data.data() + offset, in.data(), in.size());
++            });
++            a->On(11, [self](Context& c) { // Read(offset) -> buffer
++                const auto offset = c.Pop<int64_t>();
++                const size_t want = c.WriteBufferSize(0);
++                if (offset < 0 || static_cast<uint64_t>(offset) + want > self->data.size()) return c.SetResult(128 | (503u << 9));
++                c.WriteBuffer(self->data.data() + offset, want, 0);
++            });
++            return a;
++        }
++    };
++
++private:
++    std::shared_ptr<Service> Proxy() {
++        auto p = std::make_shared<Service>("IApplicationProxy");
++        p->On(0, [this](Context& c) { c.PushInterface(CommonStateGetter()); });
++        p->On(1, [this](Context& c) { c.PushInterface(SelfController()); });
++        p->On(2, [this](Context& c) { c.PushInterface(WindowController()); });
++        p->On(3, [](Context& c) { c.PushInterface(AudioController()); });
++        p->On(4, [](Context& c) { c.PushInterface(std::make_shared<Service>("IDisplayController")); });
++        p->On(10, [](Context& c) { c.PushInterface(std::make_shared<Service>("IProcessWindingController")); });
++        p->On(11, [this](Context& c) { c.PushInterface(LibraryAppletCreator()); });
++        p->On(20, [this](Context& c) { c.PushInterface(ApplicationFunctions()); });
++        p->On(1000, [](Context& c) { c.PushInterface(std::make_shared<Service>("IDebugFunctions")); });
++        return p;
++    }
++
++    std::shared_ptr<Service> CommonStateGetter() {
++        auto s = std::make_shared<Service>("ICommonStateGetter");
++        s->On(0, [this](Context& c) { c.PushCopyObject(message_event); }); // GetEventHandle
++        s->On(1, [this](Context& c) {                                      // ReceiveMessage
++            std::scoped_lock lk{mutex};
++            const uint32_t m = PopMessageLocked();
++            UpdateEventLocked();
++            if (m == 0) return c.SetResult(ResultNoMessages);
++            c.Push<uint32_t>(m);
++        });
++        s->On(5, [this](Context& c) { c.Push<uint8_t>(hooks.docked && !hooks.docked() ? 0 : 1); }); // GetOperationMode
++        s->On(6, [this](Context& c) { c.Push<uint32_t>(hooks.performance_mode ? hooks.performance_mode() : 1); });
++        s->On(8, [](Context& c) { c.Push<uint8_t>(0); });  // GetBootMode: normal
++        s->On(9, [](Context& c) { c.Push<uint8_t>(1); });  // GetCurrentFocusState: in focus
++        s->Ok(10);                                          // RequestToAcquireSleepLock
++        s->Ok(11);                                          // ReleaseSleepLock
++        s->On(50, [](Context& c) { c.Push<uint8_t>(0); }); // IsVrModeEnabled
++        s->Ok(51);                                          // SetVrModeEnabled
++        s->On(55, [](Context& c) { c.Push<uint8_t>(0); }); // IsInControllerFirmwareUpdateSection
++        s->On(60, [this](Context& c) {                      // GetDefaultDisplayResolution
++            const bool d = !hooks.docked || hooks.docked();
++            c.Push<int32_t>(d ? 1920 : 1280);
++            c.Push<int32_t>(d ? 1080 : 720);
++        });
++        s->On(200, [](Context& c) { c.Push<uint32_t>(0); }); // GetOperationModeSystemInfo
++        return s;
++    }
++
++    std::shared_ptr<Service> SelfController() {
++        auto s = std::make_shared<Service>("ISelfController");
++        s->On(1, [this](Context&) { if (hooks.exit_locked) hooks.exit_locked(true); });  // LockExit
++        s->On(2, [this](Context&) { if (hooks.exit_locked) hooks.exit_locked(false); }); // UnlockExit
++        s->On(9, [this](Context& c) { // GetLibraryAppletLaunchableEvent: applets can always be launched
++            if (!launchable) {
++                launchable = std::make_shared<Event>(kernel, "library applet launchable");
++                launchable->Signal();
++            }
++            c.PushCopyObject(launchable);
++        });
++        s->Ok(3);  // EnterFatalSection
++        s->Ok(4);  // LeaveFatalSection
++        s->Ok(10); // SetScreenShotPermission
++        s->On(11, [this](Context& c) { // SetOperationModeChangedNotification
++            std::scoped_lock lk{mutex};
++            operation_mode_notify = c.Pop<uint8_t>() != 0;
++        });
++        s->On(12, [this](Context& c) { // SetPerformanceModeChangedNotification
++            std::scoped_lock lk{mutex};
++            performance_mode_notify = c.Pop<uint8_t>() != 0;
++        });
++        s->On(13, [this](Context& c) { // SetFocusHandlingMode(notify, background, suspend)
++            std::scoped_lock lk{mutex};
++            focus_notify = c.Pop<uint8_t>() != 0;
++            UpdateEventLocked();
++        });
++        s->Ok(14); // SetRestartMessageEnabled
++        s->Ok(15); // SetScreenShotAppletIdentityInfo
++        s->Ok(16); // SetOutOfFocusSuspendingEnabled
++        s->Ok(19); // SetAlbumImageOrientation
++        s->On(40, [this](Context& c) { // CreateManagedDisplayLayer
++            uint64_t id = 0;
++            if (!hooks.create_layer || !hooks.create_layer(&id)) return c.SetResult(114 | (6u << 9)); // vi: operation failed
++            c.Push<uint64_t>(id);
++        });
++        s->On(44, [this](Context& c) { // CreateManagedDisplaySeparableLayer: one layer (as the emulator did)
++            uint64_t id = 0;
++            if (!hooks.create_layer || !hooks.create_layer(&id)) return c.SetResult(114 | (6u << 9));
++            c.Push<uint64_t>(id);
++            c.Push<uint64_t>(0);
++        });
++        s->Ok(50); // SetHandlesRequestToDisplay
++        s->Ok(51); // ApproveToDisplay
++        s->Ok(62); // SetIdleTimeDetectionExtension
++        s->On(63, [](Context& c) { c.Push<uint32_t>(0); }); // GetIdleTimeDetectionExtension
++        s->Ok(65); // ReportUserIsActive
++        s->Ok(68); // SetAutoSleepDisabled
++        s->On(69, [](Context& c) { c.Push<uint8_t>(0); }); // IsAutoSleepDisabled
++        s->On(90, [](Context& c) { c.Push<uint64_t>(0); }); // GetAccumulatedSuspendedTickValue
++        s->Ok(100); // SetAlbumImageTakenNotificationEnabled
++        return s;
++    }
++
++    std::shared_ptr<Service> WindowController() {
++        auto s = std::make_shared<Service>("IWindowController");
++        s->On(1, [this](Context& c) { c.Push<uint64_t>(hooks.aruid); }); // GetAppletResourceUserId
++        s->On(2, [](Context& c) { c.Push<uint64_t>(0); });               // GetAppletResourceUserIdOfCallerApplet
++        s->Ok(10);                                                       // AcquireForegroundRights
++        s->Ok(11);                                                       // ReleaseForegroundRights
++        s->Ok(12);                                                       // RejectToChangeIntoBackground
++        return s;
++    }
++
++    static std::shared_ptr<Service> AudioController() {
++        auto s = std::make_shared<Service>("IAudioController");
++        auto volume = std::make_shared<float>(1.0f);
++        s->On(0, [volume](Context& c) { *volume = c.Pop<float>(); });            // SetExpectedMasterVolume(main, library)
++        s->On(1, [volume](Context& c) { c.Push<float>(*volume); });              // GetMainAppletExpectedMasterVolume
++        s->On(2, [](Context& c) { c.Push<float>(1.0f); });                       // GetLibraryAppletExpectedMasterVolume
++        s->Ok(3);                                                                // ChangeMainAppletMasterVolume
++        s->Ok(4);                                                                // SetTransparentVolumeRate
++        return s;
++    }
++
++    std::shared_ptr<Service> ApplicationFunctions() {
++        auto s = std::make_shared<Service>("IApplicationFunctions");
++        s->On(1, [this](Context& c) { // PopLaunchParameter(kind)
++            const auto kind = c.Pop<uint32_t>();
++            std::scoped_lock lk{mutex};
++            if (kind != 2 || preselected_popped || hooks.preselected_user.empty()) return c.SetResult(ResultNoDataInChannel);
++            preselected_popped = true;
++            c.PushInterface(std::make_shared<Storage>(hooks.preselected_user));
++        });
++        s->On(21, [this](Context& c) { c.Push<uint64_t>(hooks.desired_language); }); // GetDesiredLanguage
++        s->On(22, [this](Context& c) { // SetTerminateResult: the game is stopping with this result (logged by the engine)
++            const auto r = c.Pop<uint32_t>();
++            if (hooks.terminate_result) hooks.terminate_result(r);
++        });
++        s->On(23, [this](Context& c) { c.Push(hooks.display_version); });            // GetDisplayVersion
++        s->Ok(30);                                                                    // BeginBlockingHomeButtonShortAndLongPressed
++        s->Ok(31);
++        s->Ok(32);
++        s->Ok(33);
++        s->On(40, [](Context& c) { c.Push<uint8_t>(1); });                      // NotifyRunning: became running
++        s->On(50, [](Context& c) { c.Push(std::array<uint8_t, 16>{}); });       // GetPseudoDeviceId
++        s->Ok(60);                                                              // SetMediaPlaybackStateForApplication
++        s->On(65, [](Context& c) { c.Push<uint8_t>(0); });                      // IsGamePlayRecordingSupported
++        s->Ok(66);                                                              // InitializeGamePlayRecording
++        s->Ok(67);                                                              // SetGamePlayRecordingState
++        s->Ok(90);                                                              // EnableApplicationCrashReport
++        s->Ok(100);
++        s->Ok(101);
++        s->Ok(102);
++        s->Ok(121); // ClearUserChannel
++        s->On(123, [](Context& c) { c.Push<int32_t>(0); }); // GetPreviousProgramIndex
++        return s;
++    }
++
++    /// One library applet run: storage channels in and out, events, finished at Start.
++    struct LibraryApplet {
++        uint32_t id = 0;
++        std::deque<std::shared_ptr<Storage>> in, out;
++        bool completed = false;
++        std::shared_ptr<Event> state_changed, out_data;
++    };
++
++    std::shared_ptr<Service> LibraryAppletCreator() {
++        auto s = std::make_shared<Service>("ILibraryAppletCreator");
++        auto create = [this](Context& c) { // CreateLibraryApplet(applet id, mode)
++            auto la = std::make_shared<LibraryApplet>();
++            la->id = c.Pop<uint32_t>();
++            la->state_changed = std::make_shared<Event>(kernel, "library applet state");
++            la->out_data = std::make_shared<Event>(kernel, "library applet out data");
++            c.PushInterface(Accessor(la));
++        };
++        s->On(0, create);
++        s->On(3, create); // CreateLibraryAppletEx
++        s->On(10, [](Context& c) { // CreateStorage(size)
++            const auto size = c.Pop<int64_t>();
++            if (size <= 0 || size > (64 << 20)) return c.SetResult(128 | (503u << 9));
++            c.PushInterface(std::make_shared<Storage>(std::vector<uint8_t>(static_cast<size_t>(size))));
++        });
++        return s;
++    }
++
++    std::shared_ptr<Service> Accessor(std::shared_ptr<LibraryApplet> la) {
++        auto s = std::make_shared<Service>("ILibraryAppletAccessor");
++        s->On(0, [la](Context& c) { c.PushCopyObject(la->state_changed); }); // GetAppletStateChangedEvent
++        s->On(1, [la](Context& c) { c.Push<uint8_t>(la->completed); });       // IsCompleted
++        s->On(10, [this, la](Context& c) { Run(*la); (void)c; });             // Start
++        s->On(20, [la](Context&) {                                             // RequestExit
++            la->completed = true;
++            la->state_changed->Signal();
++        });
++        s->On(25, [la](Context&) { // Terminate
++            la->completed = true;
++            la->state_changed->Signal();
++        });
++        s->Ok(30); // GetResult: success
++        s->Ok(50); // SetOutOfFocusApplicationSuspendingEnabled
++        s->Ok(60); // PresetLibraryAppletGpuTimeSliceZero
++        s->On(100, [la](Context& c) { // PushInData(storage)
++            auto obj = c.InputObject(0);
++            if (!obj || obj->name != "IStorage") return c.SetResult(128 | (503u << 9));
++            la->in.push_back(std::static_pointer_cast<Storage>(obj));
++        });
++        auto pop = [la](Context& c) { // PopOutData / PopInteractiveOutData
++            if (la->out.empty()) return c.SetResult(ResultNoDataInChannel);
++            auto st = la->out.front();
++            la->out.pop_front();
++            if (la->out.empty()) la->out_data->Clear();
++            c.PushInterface(st);
++        };
++        s->On(101, pop);
++        s->On(103, [](Context&) {}); // PushInteractiveInData: nothing reads it
++        s->On(104, [](Context& c) { c.SetResult(ResultNoDataInChannel); });
++        s->On(105, [la](Context& c) { c.PushCopyObject(la->out_data); }); // GetPopOutDataEvent
++        s->On(106, [this](Context& c) { c.PushCopyObject(std::make_shared<Event>(kernel, "interactive out")); });
++        s->On(120, [la](Context& c) { // GetLibraryAppletInfo
++            c.Push<uint32_t>(la->id);
++            c.Push<uint32_t>(0);
++        });
++        return s;
++    }
++
++    /// Runs a library applet at once (the PC game shows no system applet screens).
++    void Run(LibraryApplet& la) {
++        constexpr uint32_t Controller = 0x0C;
++        if (la.id == Controller) {
++            // In: common arguments, ControllerSupportArgPrivate (0x14 bytes: mode at 10, allowed styles at 12), then the user
++            // argument (header: min players, max players, ..., single mode at 5). Other modes (firmware update, strap guide)
++            // finish with the same result.
++            AppletHooks::ControllerArgs args;
++            if (la.in.size() >= 2 && la.in[1]->data.size() >= 0x14) std::memcpy(&args.style_set, la.in[1]->data.data() + 12, 4);
++            if (la.in.size() >= 3 && la.in[2]->data.size() >= 7) {
++                args.min_players = static_cast<int8_t>(la.in[2]->data[0]);
++                args.max_players = static_cast<int8_t>(la.in[2]->data[1]);
++                args.single = la.in[2]->data[5] != 0;
++            }
++            AppletHooks::ControllerResult r{1, 0};
++            if (hooks.controller_applet) r = hooks.controller_applet(args);
++            struct {
++                int8_t player_count;
++                uint8_t pad[3];
++                uint32_t selected_id;
++                uint32_t result;
++            } info{r.player_count, {}, r.selected_id, 0};
++            std::vector<uint8_t> data(sizeof(info));
++            std::memcpy(data.data(), &info, sizeof(info));
++            la.out.push_back(std::make_shared<Storage>(std::move(data)));
++            la.out_data->Signal();
++        }
++        if (la.id == 0x13 || la.id == 0x14 || la.id == 0x17 || la.id == 0x18 || la.id == 0x19 || la.id == 0x35) RunWeb(la);
++        la.completed = true;
++        la.state_changed->Signal();
++    }
++
++    void RunWeb(LibraryApplet& la) {
++        uint32_t library_version = 0;
++        if (!la.in.empty() && la.in[0]->data.size() >= 12) std::memcpy(&library_version, la.in[0]->data.data() + 8, 4);
++        if (la.in.size() < 2 || la.in[1]->data.size() < 8) return;
++        const std::vector<uint8_t>& arg = la.in[1]->data;
++        AppletHooks::WebRequest req;
++        uint16_t entries = 0;
++        std::memcpy(&entries, arg.data(), 2);
++        std::memcpy(&req.shim_kind, arg.data() + 4, 4);
++        std::map<uint16_t, std::vector<uint8_t>> tlv;
++        size_t at = 8;
++        for (uint16_t i = 0; i < entries && at + 8 <= arg.size(); ++i) {
++            uint16_t type = 0, size = 0;
++            std::memcpy(&type, arg.data() + at, 2);
++            std::memcpy(&size, arg.data() + at + 2, 2);
++            at += 8;
++            if (at + size > arg.size()) break;
++            tlv[type].assign(arg.begin() + static_cast<std::ptrdiff_t>(at), arg.begin() + static_cast<std::ptrdiff_t>(at + size));
++            at += size;
++        }
++        auto str = [&](uint16_t t) {
++            const auto it = tlv.find(t);
++            return it == tlv.end() ? std::string{} : std::string(reinterpret_cast<const char*>(it->second.data()), strnlen(reinterpret_cast<const char*>(it->second.data()), it->second.size()));
++        };
++        auto raw = [&](uint16_t t, auto& v) {
++            if (const auto it = tlv.find(t); it != tlv.end()) std::memcpy(&v, it->second.data(), std::min(sizeof(v), it->second.size()));
++        };
++        req.url = str(0x1);
++        req.document_path = str(0x6);
++        raw(0x7, req.document_kind);
++        raw(req.document_kind == 3 ? 0x8 : 0x5, req.title_id);
++        std::pair<uint32_t, std::string> result{0, req.shim_kind == 5 ? req.url : req.document_path};
++        if ((req.shim_kind == 3 || req.shim_kind == 5) && hooks.web_applet) result = hooks.web_applet(req);
++        const bool tlv_output = (req.shim_kind == 4 && library_version >= 0x30000) || (req.shim_kind == 5 && library_version >= 0x80000) ||
++                                req.shim_kind == 8;
++        std::vector<uint8_t> out;
++        if (tlv_output) {
++            out.assign(0x2000, 0);
++            size_t o = 8;
++            uint16_t count = 0;
++            auto put = [&](uint16_t type, const void* data, size_t size) {
++                const uint16_t sz = static_cast<uint16_t>(size);
++                std::memcpy(out.data() + o, &type, 2);
++                std::memcpy(out.data() + o + 2, &sz, 2);
++                o += 8;
++                std::memcpy(out.data() + o, data, size);
++                o = (o + size + 7) & ~size_t{7};
++                ++count;
++            };
++            put(1, &result.first, 4);
++            put(2, result.second.c_str(), result.second.size() + 1);
++            const uint64_t len = result.second.size();
++            put(3, &len, 8);
++            std::memcpy(out.data(), &count, 2);
++            std::memcpy(out.data() + 4, &req.shim_kind, 4);
++        } else {
++            out.assign(0x1010, 0); // WebCommonReturnValue
++            std::memcpy(out.data(), &result.first, 4);
++            std::memcpy(out.data() + 8, result.second.data(), std::min<size_t>(result.second.size(), 0x1000));
++            const uint64_t len = result.second.size();
++            std::memcpy(out.data() + 0x1008, &len, 8);
++        }
++        la.out.push_back(std::make_shared<Storage>(std::move(out)));
++        la.out_data->Signal();
++    }
++
++    uint32_t PopMessageLocked() {
++        if (exit_requested != exit_acknowledged) {
++            exit_acknowledged = exit_requested;
++            return Exit;
++        }
++        if (focus_notify && focus_changed) {
++            focus_changed = false;
++            return FocusStateChanged;
++        }
++        if (operation_mode_changed) {
++            operation_mode_changed = false;
++            return OperationModeChanged;
++        }
++        if (performance_mode_changed) {
++            performance_mode_changed = false;
++            return PerformanceModeChanged;
++        }
++        return 0;
++    }
++    void UpdateEventLocked() {
++        const bool pending = (exit_requested != exit_acknowledged) || (focus_notify && focus_changed) || operation_mode_changed ||
++                             performance_mode_changed;
++        if (pending) message_event->Signal();
++        else message_event->Clear();
++    }
++
++    NativeKernel& kernel;
++    AppletHooks hooks;
++    std::shared_ptr<Event> message_event, launchable;
++    std::mutex mutex;
++    // Notifications are on until the game turns them off; the focus state message is waiting when the game starts.
++    bool focus_notify = true, focus_changed = true;
++    bool operation_mode_notify = true, operation_mode_changed = false;
++    bool performance_mode_notify = true, performance_mode_changed = false;
++    bool exit_requested = false, exit_acknowledged = false;
++    bool preselected_popped = false;
++};
 +
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/system.h b/src/kart_runtime/services/system.h

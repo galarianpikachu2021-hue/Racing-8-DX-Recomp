@@ -561,3 +561,14 @@ sessions and suyu's HLE service code.
 - Found on the way: a close message must not remove the client's handle (the SDK closes it afterwards and stops the game when
   that fails).
 - Checked: 1P race on 4.0.1 with 13 services on the runtime, 60 fps, the same 12 log errors as before.
+- **Applet manager** (`appletOE`, `kart_runtime/services/applet.h`): lifecycle messages behind one event (the focus message waits
+  at start, operation / performance mode changes from the engine's graphics-quality switch via
+  `AppletManager::OperationModeChanged`, exit), launch parameter (preselected user), desired language and display version (the
+  engine's rules from the game's control data), the game's display layer (still made in the emulated display service), exit lock,
+  terminate result (logged), and library applets: the controller applet answered at once with the engine's controller
+  reconfiguration (what the emulator's default controller applet did), the web applet (offline manual pages extracted into the
+  cache folder and opened in the system browser, web addresses opened directly; the frontend sets the opener with
+  `SetOpenUrlHandler`), any other applet finished at once with no output.
+- A thread whose runtime wait ends because it is being terminated now exits inside the wait (`KThread::Exit`), as the emulated
+  kernel's run loop does: returning the error to the game made the SDK stop with a panic at shutdown.
+- Checked: 1P race (60 fps), 4P split-screen through the controller applet (59.9 fps, 4 views), clean exits.
