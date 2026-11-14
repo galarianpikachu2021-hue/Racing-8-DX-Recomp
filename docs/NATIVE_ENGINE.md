@@ -471,3 +471,29 @@ cost is in the shape of the generated code (every instruction is a possible entr
 - Not done, with reasons: a smaller hot list (the list is every block that ran in the coverage runs; cutting it to the
   blocks of one profile risks -O0 code in whatever the profile did not visit), -O1 for the hot pieces (9% faster to compile,
   bigger code).
+
+## Native kernel step 2: locks, condition variables, address waits, sleeps, display queue (2026-11-14)
+
+On by default on Linux together with native threads (`KARTRECOMP_NATIVE_SYNC=0` turns it off; elsewhere opt-in with `=1`, and
+never without native threads).
+- `kart_runtime/sync_arbiter.h` (standalone, test `tests/test_sync_arbiter.cpp`, also clean under ThreadSanitizer) is what the
+  console kernel does for `ArbitrateLock/ArbitrateUnlock` (0x1A/0x1B), `WaitProcessWideKeyAtomic/SignalProcessWideKey`
+  (0x1C/0x1D), `WaitForAddress/SignalToAddress` (0x34/0x35, all three wait and all three signal kinds) and `SleepThread` with a
+  time (0x0B): the same rules and results (hand-over of the lock word with the wait bit, the condition key written before the
+  lock is released, best priority first, the "modify by waiting count" arithmetic, timeouts), with waiting threads blocked on
+  host condition variables and their virtual core given up meanwhile. The words are changed with host atomics in the game's
+  memory, which the game's own exclusive loads/stores see. A thread being terminated has its wait ended
+  (`OnTerminateRequested`, from `KThread::RequestTerminate`), so closing the game does not hang.
+- Adapter `core/hle/kernel/native_sync.{h,cpp}`: called from the five system calls before the emulated kernel's
+  `KConditionVariable` / `KAddressArbiter`. These carried 2.26 million of the 2.5 million system calls of a 150 s race; they no
+  longer touch the kernel's thread queues, scheduler lock or timers. Service threads (no game process) only sleep through it.
+- **Display queue** (`IHOSBinderDriver`) joins the calling-thread IPC list when native threads are on: a game thread that waits
+  for a free buffer gives its core up (`NativeThreads::BeginHostWait/EndHostWait` around the wait in `BufferQueueCore`, the core
+  taken back without the queue's lock held).
+- Checked: 1P race 4.0.1 and 3.0.4 (60 fps, same pictures, lap 2-3 reached), 4P split-screen 4.0.1 (59.8 fps, 0-2 seconds under
+  58), clean exit in under a second. The CPU is the same as before within noise (the kernel path was already cheap: HLE
+  kernel/services were 0.3% of the game threads).
+
+What is still the emulated kernel: `WaitSynchronization` / `ResetSignal` / `CancelSynchronization` on events (the game waits on
+service events: vsync, audio, GPU syncpoints), the IPC transport for the services that are answered on the calling thread, the
+handle table, the memory map system calls and thread creation bookkeeping (the threads themselves are host threads).

@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..663bb22f05 100644
+index 408daa6839..f8b59c2de5 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,22 @@ add_library(core STATIC
@@ -858,16 +858,18 @@ index 408daa6839..663bb22f05 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +357,8 @@ add_library(core STATIC
+@@ -339,6 +357,10 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
++    hle/kernel/native_sync.cpp
++    hle/kernel/native_sync.h
 +    hle/kernel/native_threads.cpp
 +    hle/kernel/native_threads.h
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1071,8 @@ add_library(core STATIC
+@@ -1051,6 +1073,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -876,7 +878,7 @@ index 408daa6839..663bb22f05 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1248,7 @@ else()
+@@ -1226,7 +1250,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -3958,18 +3960,19 @@ index c1b0dcd033..06e7f29e62 100644
      ASSERT(CanSchedule(kernel));
      ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
-index b0f33b44c7..9d4440d101 100644
+index b0f33b44c7..b3f379b3c9 100644
 --- a/src/core/hle/kernel/k_thread.cpp
 +++ b/src/core/hle/kernel/k_thread.cpp
-@@ -33,6 +33,7 @@
+@@ -33,6 +33,8 @@
  #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
  #include "core/hle/kernel/k_system_control.h"
  #include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/native_sync.h"
 +#include "core/hle/kernel/native_threads.h"
  #include "core/hle/kernel/k_thread_queue.h"
  #include "core/hle/kernel/k_worker_task_manager.h"
  #include "core/hle/kernel/kernel.h"
-@@ -270,6 +271,13 @@ namespace Kernel {
+@@ -270,6 +272,13 @@ namespace Kernel {
          // Initialize the thread.
          R_TRY(thread->Initialize(kernel, func, arg, user_stack_top, prio, core, owner, type));
  
@@ -3983,7 +3986,7 @@ index b0f33b44c7..9d4440d101 100644
          // Initialize emulation parameters.
          thread->m_host_context = std::make_shared<Common::Fiber>(std::move(init_func));
  
-@@ -307,7 +315,11 @@ namespace Kernel {
+@@ -307,7 +316,11 @@ namespace Kernel {
          system.Kernel().GlobalSchedulerContext().AddThread(thread);
          std::function<void()> func2{[&system, func_{std::move(func)}] {
              // Similar to UserModeThreadStarter.
@@ -3996,7 +3999,16 @@ index b0f33b44c7..9d4440d101 100644
  
              // Run the guest function.
              func_();
-@@ -1318,7 +1330,7 @@ namespace Kernel {
+@@ -1285,6 +1298,8 @@ namespace Kernel {
+             if (this->GetState() == ThreadState::Waiting) {
+                 m_wait_queue->CancelWait(kernel, this, ResultTerminationRequested, true);
+             }
++            // kart-recomp: a wait in the native synchronisation is not a kernel wait; end it too.
++            NativeSync::OnTerminateRequested(kernel, this);
+         }
+ 
+         return this->GetState();
+@@ -1318,7 +1333,7 @@ namespace Kernel {
  
      void KThread::RequestDummyThreadWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -4005,7 +4017,7 @@ index b0f33b44c7..9d4440d101 100644
  
          // We will block when the scheduler lock is released.
          std::scoped_lock lock{m_dummy_thread_mutex};
-@@ -1326,6 +1338,26 @@ namespace Kernel {
+@@ -1326,6 +1341,26 @@ namespace Kernel {
      }
  
      void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -4032,7 +4044,7 @@ index b0f33b44c7..9d4440d101 100644
          if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
              // Occurs in single core mode.
              return;
-@@ -1338,7 +1370,7 @@ namespace Kernel {
+@@ -1338,7 +1373,7 @@ namespace Kernel {
  
      void KThread::DummyThreadEndWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -4089,12 +4101,211 @@ index 6363a9e0ab..b613a6512a 100644
      const u32 core_id = impl->GetCurrentHostThreadID();
      if (core_id >= Core::Hardware::NUM_CPU_CORES) {
          return Core::Hardware::NUM_CPU_CORES - 1;
+diff --git a/src/core/hle/kernel/native_sync.cpp b/src/core/hle/kernel/native_sync.cpp
+new file mode 100644
+index 0000000000..d79575cf6e
+--- /dev/null
++++ b/src/core/hle/kernel/native_sync.cpp
+@@ -0,0 +1,152 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_sync.h"
++
++#include <atomic>
++#include <cstdlib>
++#include <mutex>
++
++#include "common/logging/log.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_threads.h"
++#include "core/hle/kernel/svc_results.h"
++#include "core/memory.h"
++#include "kart_runtime/sync_arbiter.h"
++
++namespace Kernel::NativeSync {
++namespace {
++
++using KartRuntime::SyncArbiter;
++
++std::atomic<KernelCore*> g_kernel{nullptr};
++std::atomic<bool> g_used{false};
++
++SyncArbiter& Arbiter(KernelCore& kernel, bool uses_memory = true) {
++    // The words are the calling thread's process memory (every caller is a thread of the game's process).
++    static SyncArbiter arbiter{{
++        [](u64 address) -> u32* {
++            KernelCore* k = g_kernel.load(std::memory_order_acquire);
++            return k ? reinterpret_cast<u32*>(GetCurrentMemory(*k).GetPointerSilent(address)) : nullptr;
++        },
++        [] { NativeThreads::BeginHostWait(); },
++        [] { NativeThreads::EndHostWait(); },
++    }};
++    if (!g_used.exchange(true, std::memory_order_acq_rel)) {
++        g_kernel.store(&kernel, std::memory_order_release);
++        LOG_INFO(Kernel, "native sync: locks, condition variables, address waits and sleeps are answered by the runtime");
++    } else if (!g_kernel.load(std::memory_order_acquire)) {
++        g_kernel.store(&kernel, std::memory_order_release);
++    }
++    // One process only: the queues are keyed by address. Say so if a second process ever uses the calls on memory. (The
++    // service threads' own processes only sleep, which touches no memory.)
++    if (!uses_memory) return arbiter;
++    static std::atomic<KProcess*> first{nullptr};
++    KProcess* process = GetCurrentProcessPointer(kernel);
++    KProcess* expected = nullptr;
++    if (process && !first.compare_exchange_strong(expected, process) && expected != process) {
++        static std::atomic<bool> warned{false};
++        if (!warned.exchange(true))
++            LOG_CRITICAL(Kernel, "native sync: a second process ({} \"{}\", first {} \"{}\") uses the synchronisation calls", process->GetProcessId(), process->GetName(), expected->GetProcessId(), expected->GetName());
++    }
++    return arbiter;
++}
++
++Result ToResult(SyncArbiter::Result r) {
++    switch (r) {
++    case SyncArbiter::Result::Success:
++        return ResultSuccess;
++    case SyncArbiter::Result::TimedOut:
++        return ResultTimedOut;
++    case SyncArbiter::Result::InvalidState:
++        return ResultInvalidState;
++    case SyncArbiter::Result::InvalidCurrentMemory:
++        return ResultInvalidCurrentMemory;
++    case SyncArbiter::Result::Cancelled:
++        return ResultTerminationRequested;
++    }
++    return ResultInvalidState;
++}
++
++int Priority(KernelCore& kernel) {
++    return GetCurrentThreadPointer(kernel)->GetPriority();
++}
++
++u64 Id(KernelCore& kernel) {
++    return GetCurrentThreadPointer(kernel)->GetId();
++}
++
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        if (!NativeThreads::Enabled()) return false; // a blocked fiber's host thread would stop a whole emulated core
++        const char* v = std::getenv("KARTRECOMP_NATIVE_SYNC");
++#ifdef __linux__
++        return !(v && *v == '0');
++#else
++        return v && *v == '1';
++#endif
++    }();
++    return on;
++}
++
++void OnTerminateRequested(KernelCore& kernel, KThread* thread) {
++    if (!Enabled() || !g_used.load(std::memory_order_relaxed)) return;
++    Arbiter(kernel).Cancel(thread->GetId());
++}
++
++Result ArbitrateLock(KernelCore& kernel, Svc::Handle owner, u64 address, u32 tag) {
++    return ToResult(Arbiter(kernel).LockWait(Id(kernel), address, owner, tag, Priority(kernel)));
++}
++
++Result ArbitrateUnlock(KernelCore& kernel, u64 address) {
++    return ToResult(Arbiter(kernel).Unlock(address));
++}
++
++Result WaitProcessWideKeyAtomic(KernelCore& kernel, u64 address, u64 cv_key, u32 tag, s64 timeout_ns) {
++    return ToResult(Arbiter(kernel).ConditionWait(Id(kernel), address, cv_key, tag, Priority(kernel), timeout_ns));
++}
++
++void SignalProcessWideKey(KernelCore& kernel, u64 cv_key, s32 count) {
++    Arbiter(kernel).ConditionSignal(cv_key, count);
++}
++
++void Sleep(KernelCore& kernel, s64 ns) {
++    Arbiter(kernel, false).Sleep(Id(kernel), ns);
++}
++
++Result WaitForAddress(KernelCore& kernel, u64 address, Svc::ArbitrationType type, s32 value, s64 timeout_ns) {
++    SyncArbiter::WaitType t = SyncArbiter::WaitType::Equal;
++    switch (type) {
++    case Svc::ArbitrationType::WaitIfLessThan:
++        t = SyncArbiter::WaitType::LessThan;
++        break;
++    case Svc::ArbitrationType::DecrementAndWaitIfLessThan:
++        t = SyncArbiter::WaitType::DecrementAndLessThan;
++        break;
++    case Svc::ArbitrationType::WaitIfEqual:
++        t = SyncArbiter::WaitType::Equal;
++        break;
++    }
++    return ToResult(Arbiter(kernel).AddressWait(Id(kernel), address, t, value, Priority(kernel), timeout_ns));
++}
++
++Result SignalToAddress(KernelCore& kernel, u64 address, Svc::SignalType type, s32 value, s32 count) {
++    SyncArbiter::SignalType t = SyncArbiter::SignalType::Signal;
++    switch (type) {
++    case Svc::SignalType::Signal:
++        t = SyncArbiter::SignalType::Signal;
++        break;
++    case Svc::SignalType::SignalAndIncrementIfEqual:
++        t = SyncArbiter::SignalType::IncrementIfEqual;
++        break;
++    case Svc::SignalType::SignalAndModifyByWaitingCountIfEqual:
++        t = SyncArbiter::SignalType::ModifyByWaitingCountIfEqual;
++        break;
++    }
++    return ToResult(Arbiter(kernel).AddressSignal(address, t, value, count));
++}
++
++} // namespace Kernel::NativeSync
+diff --git a/src/core/hle/kernel/native_sync.h b/src/core/hle/kernel/native_sync.h
+new file mode 100644
+index 0000000000..e8715b3d75
+--- /dev/null
++++ b/src/core/hle/kernel/native_sync.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native synchronisation (docs/NATIVE_ENGINE.md, "native kernel" step 4) - the suyu-side adapter of
++// kart_runtime/sync_arbiter.h. With native threads, the lock, condition-variable and address-wait system calls
++// (ArbitrateLock/Unlock, WaitProcessWideKeyAtomic/SignalProcessWideKey, WaitForAddress/SignalToAddress) are answered by the
++// runtime: the waiting game thread blocks on a host condition variable with its virtual core given up, instead of going through
++// the emulated kernel's thread queues and scheduler. Every user of these words goes through these calls (the game and the
++// SDK alike), so there is one implementation for all of them. KARTRECOMP_NATIVE_SYNC=0 turns it off.
++#pragma once
++
++#include "common/common_types.h"
++#include "core/hle/kernel/svc_types.h"
++#include "core/hle/result.h"
++
++namespace Kernel {
++class KernelCore;
++class KThread;
++}
++
++namespace Kernel::NativeSync {
++
++bool Enabled();
++
++/// `thread` is being terminated: ends its native wait, if any, and makes later ones return at once (as the kernel does).
++void OnTerminateRequested(KernelCore& kernel, KThread* thread);
++
++Result ArbitrateLock(KernelCore& kernel, Svc::Handle owner, u64 address, u32 tag);
++Result ArbitrateUnlock(KernelCore& kernel, u64 address);
++Result WaitProcessWideKeyAtomic(KernelCore& kernel, u64 address, u64 cv_key, u32 tag, s64 timeout_ns);
++void SignalProcessWideKey(KernelCore& kernel, u64 cv_key, s32 count);
++/// SleepThread with a positive time.
++void Sleep(KernelCore& kernel, s64 ns);
++Result WaitForAddress(KernelCore& kernel, u64 address, Svc::ArbitrationType type, s32 value, s64 timeout_ns);
++Result SignalToAddress(KernelCore& kernel, u64 address, Svc::SignalType type, s32 value, s32 count);
++
++} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..8c21366291
+index 0000000000..f846af96fa
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,251 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_threads.h"
 +
@@ -4139,6 +4350,7 @@ index 0000000000..8c21366291
 +std::atomic<int> g_parked{0};
 +thread_local int t_core = -1;
 +thread_local CoreScheduler::Thread* t_sched = nullptr;
++thread_local KThread* t_thread = nullptr;
 +KernelCore* g_kernel = nullptr;
 +
 +CoreScheduler& Scheduler() {
@@ -4223,6 +4435,7 @@ index 0000000000..8c21366291
 +    kernel.RegisterHostThread(thread);
 +    SetCurrentThread(kernel, thread);
 +    t_sched = sched;
++    t_thread = thread;
 +    Enter(kernel, thread);
 +    if (entry) {
 +        entry(); // enables dispatch, runs the service loop, exits the thread (never returns)
@@ -4302,6 +4515,16 @@ index 0000000000..8c21366291
 +    if (t_sched && t_core < 0) Enter(kernel, thread);
 +}
 +
++bool BeginHostWait() {
++    if (!g_kernel || !t_thread || !t_sched || t_core < 0) return false;
++    Leave(*g_kernel, t_thread);
++    return true;
++}
++
++void EndHostWait() {
++    if (g_kernel && t_thread && t_sched && t_core < 0) Enter(*g_kernel, t_thread);
++}
++
 +void Yield(KernelCore& kernel, KThread* thread) {
 +    if (!t_sched || t_core < 0) return;
 +    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).SaveContext(thread);
@@ -4336,10 +4559,10 @@ index 0000000000..8c21366291
 +} // namespace Kernel::NativeThreads
 diff --git a/src/core/hle/kernel/native_threads.h b/src/core/hle/kernel/native_threads.h
 new file mode 100644
-index 0000000000..4faef890e8
+index 0000000000..6412740164
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,55 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native threads (KARTRECOMP_NATIVE_THREADS=1), the suyu-side adapter of kart_runtime/core_scheduler.h
 +// (docs/NATIVE_ENGINE.md, "native threads").
@@ -4384,10 +4607,76 @@ index 0000000000..4faef890e8
 +void OnCoreChanged(KThread* thread);
 +/// Another thread made `thread` stop being runnable (suspension): interrupt it if it is executing game code.
 +void OnStoppedByOther(KernelCore& kernel, KThread* thread);
++/// A native thread about to block on the host outside the kernel (a service handler running on the caller's thread, e.g. the
++/// display queue waiting for a free buffer) gives its virtual core up meanwhile, so the core's other threads keep running.
++/// BeginHostWait returns false (and does nothing) on any other thread; EndHostWait takes the core back. Never call EndHostWait
++/// while holding a lock another game thread may need: it can wait for that thread's core.
++bool BeginHostWait();
++void EndHostWait();
++
 +/// The calling thread has terminated: releases its core and never returns.
 +[[noreturn]] void ExitCurrent(KernelCore& kernel, KThread* thread);
 +
 +} // namespace Kernel::NativeThreads
+diff --git a/src/core/hle/kernel/svc/svc_address_arbiter.cpp b/src/core/hle/kernel/svc/svc_address_arbiter.cpp
+index dbf76e61cd..9b998e65c3 100644
+--- a/src/core/hle/kernel/svc/svc_address_arbiter.cpp
++++ b/src/core/hle/kernel/svc/svc_address_arbiter.cpp
+@@ -10,6 +10,7 @@
+ #include "core/hle/kernel/k_memory_layout.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_sync.h"
+ #include "core/hle/kernel/svc.h"
+ #include "core/hle/kernel/svc_results.h"
+ #include "core/hle/kernel/svc_types.h"
+@@ -51,6 +52,7 @@ Result WaitForAddress(Core::System& system, u64 address, ArbitrationType arb_typ
+     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
+     R_UNLESS(Common::IsAligned(address, sizeof(s32)), ResultInvalidAddress);
+     R_UNLESS(IsValidArbitrationType(arb_type), ResultInvalidEnumValue);
++    if (NativeSync::Enabled()) R_RETURN(NativeSync::WaitForAddress(system.Kernel(), address, arb_type, value, timeout_ns));
+ 
+     // Convert timeout from nanoseconds to ticks.
+     s64 timeout{};
+@@ -92,6 +94,7 @@ Result SignalToAddress(Core::System& system, u64 address, SignalType signal_type
+     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
+     R_UNLESS(Common::IsAligned(address, sizeof(s32)), ResultInvalidAddress);
+     R_UNLESS(IsValidSignalType(signal_type), ResultInvalidEnumValue);
++    if (NativeSync::Enabled()) R_RETURN(NativeSync::SignalToAddress(system.Kernel(), address, signal_type, value, count));
+ 
+     LockTrace::Record(LockTrace::Ev::Signal,
+                       static_cast<u32>(GetCurrentThreadPointer(system.Kernel())->GetId()), address,
+diff --git a/src/core/hle/kernel/svc/svc_condition_variable.cpp b/src/core/hle/kernel/svc/svc_condition_variable.cpp
+index e3cb3ce8d1..712f525406 100644
+--- a/src/core/hle/kernel/svc/svc_condition_variable.cpp
++++ b/src/core/hle/kernel/svc/svc_condition_variable.cpp
+@@ -9,6 +9,7 @@
+ #include "core/hle/kernel/k_memory_layout.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_sync.h"
+ #include "core/hle/kernel/svc.h"
+ #include "core/hle/kernel/svc_results.h"
+ 
+@@ -23,6 +24,9 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
+     // Validate input.
+     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
+     R_UNLESS(Common::IsAligned(address, sizeof(s32)), ResultInvalidAddress);
++    if (NativeSync::Enabled())
++        R_RETURN(NativeSync::WaitProcessWideKeyAtomic(system.Kernel(), address, Common::AlignDown(cv_key, sizeof(u32)), tag,
++                                                      timeout_ns));
+ 
+     // Convert timeout from nanoseconds to ticks.
+     s64 timeout{};
+@@ -49,6 +53,8 @@ Result WaitProcessWideKeyAtomic(Core::System& system, u64 address, u64 cv_key, u
+ /// Signal process wide key
+ void SignalProcessWideKey(Core::System& system, u64 cv_key, s32 count) {
+     LOG_TRACE(Kernel_SVC, "called, cv_key={:#X}, count=0x{:08X}", cv_key, count);
++    if (NativeSync::Enabled())
++        return NativeSync::SignalProcessWideKey(system.Kernel(), Common::AlignDown(cv_key, sizeof(u32)), count);
+ 
+     // Signal the condition variable.
+     return GetCurrentProcess(system.Kernel())
 diff --git a/src/core/hle/kernel/svc/svc_info.cpp b/src/core/hle/kernel/svc/svc_info.cpp
 index c2e1195d03..864d1d69db 100644
 --- a/src/core/hle/kernel/svc/svc_info.cpp
@@ -4437,11 +4726,39 @@ index 94638e61ad..a55aa0a363 100644
      // Send the request.
      R_RETURN(session->SendSyncRequest(kernel, message, buffer_size));
  }
+diff --git a/src/core/hle/kernel/svc/svc_lock.cpp b/src/core/hle/kernel/svc/svc_lock.cpp
+index 4799d6bce9..d35face0b1 100644
+--- a/src/core/hle/kernel/svc/svc_lock.cpp
++++ b/src/core/hle/kernel/svc/svc_lock.cpp
+@@ -8,6 +8,7 @@
+ #include "core/hle/kernel/k_memory_layout.h"
+ #include "core/hle/kernel/k_lock_trace.h"
+ #include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/native_sync.h"
+ #include "core/hle/kernel/svc.h"
+ 
+ namespace Kernel::Svc {
+@@ -20,6 +21,7 @@ Result ArbitrateLock(Core::System& system, Handle thread_handle, u64 address, u3
+     // Validate the input address.
+     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
+     R_UNLESS(Common::IsAligned(address, sizeof(u32)), ResultInvalidAddress);
++    if (NativeSync::Enabled()) R_RETURN(NativeSync::ArbitrateLock(system.Kernel(), thread_handle, address, tag));
+ 
+     if (!LockTrace::Enabled()) {
+         R_RETURN(KConditionVariable::WaitForAddress(system.Kernel(), thread_handle, address, tag));
+@@ -42,6 +44,7 @@ Result ArbitrateUnlock(Core::System& system, u64 address) {
+     // Validate the input address.
+     R_UNLESS(!IsKernelAddress(address), ResultInvalidCurrentMemory);
+     R_UNLESS(Common::IsAligned(address, sizeof(u32)), ResultInvalidAddress);
++    if (NativeSync::Enabled()) R_RETURN(NativeSync::ArbitrateUnlock(system.Kernel(), address));
+ 
+     R_RETURN(KConditionVariable::SignalToAddress(system.Kernel(), address));
+ }
 diff --git a/src/core/hle/kernel/svc/svc_thread.cpp b/src/core/hle/kernel/svc/svc_thread.cpp
-index 79c6ac2079..c9ac4da74e 100644
+index 79c6ac2079..7a9c434d60 100644
 --- a/src/core/hle/kernel/svc/svc_thread.cpp
 +++ b/src/core/hle/kernel/svc/svc_thread.cpp
-@@ -5,6 +5,11 @@
+@@ -5,12 +5,18 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "common/scope_exit.h"
@@ -4453,7 +4770,14 @@ index 79c6ac2079..c9ac4da74e 100644
  #include "core/core.h"
  #include "core/core_timing.h"
  #include "core/hle/kernel/k_hardware_timer.h"
-@@ -123,6 +128,31 @@ void SleepThread(Core::System& system, s64 ns) {
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/k_scoped_resource_reservation.h"
+ #include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/native_sync.h"
+ #include "core/hle/kernel/svc.h"
+ 
+ namespace Kernel::Svc {
+@@ -123,6 +129,37 @@ void SleepThread(Core::System& system, s64 ns) {
  
      LOG_TRACE(Kernel_SVC, "called nanoseconds={}", ns);
  
@@ -4480,6 +4804,12 @@ index 79c6ac2079..c9ac4da74e 100644
 +            }
 +            seen.clear();
 +        }
++    }
++
++    // kart-recomp: native threads sleep on the host (their core given up), woken early only by termination.
++    if (ns > 0 && NativeSync::Enabled()) {
++        NativeSync::Sleep(kernel, ns);
++        return;
 +    }
 +
      // When the input tick is positive, sleep.
@@ -4588,10 +4918,10 @@ index 1dec5ab984..e8ee5a0089 100644
          // mount point should be "mii:"
 diff --git a/src/core/hle/service/native_ipc.cpp b/src/core/hle/service/native_ipc.cpp
 new file mode 100644
-index 0000000000..24715b142c
+index 0000000000..6ef545c2f7
 --- /dev/null
 +++ b/src/core/hle/service/native_ipc.cpp
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,135 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/service/native_ipc.h"
 +
@@ -4608,6 +4938,7 @@ index 0000000000..24715b142c
 +#include "core/hle/kernel/k_server_session.h"
 +#include "core/hle/kernel/k_thread.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_threads.h"
 +#include "core/hle/ipc.h"
 +#include "core/hle/service/hle_ipc.h"
 +#include "core/memory.h"
@@ -4622,8 +4953,14 @@ index 0000000000..24715b142c
 +/// DequeueBuffer does: on the calling thread that would block a whole emulated core, so it waits for native threads). Every request
 +/// still runs under the service's own lock (ServiceFrameworkBase::LockService).
 +const std::set<std::string>& SafeServices() {
-+    static const std::set<std::string> safe{"ISystemClock",   "ITimeZoneService", "ISteadyClock", "hid",
-+                                            "IActiveVibrationDeviceList", "IAudioRenderer", "nvdrv"};
++    static const std::set<std::string> safe = [] {
++        std::set<std::string> out{"ISystemClock", "ITimeZoneService", "ISteadyClock", "hid",
++                                  "IActiveVibrationDeviceList", "IAudioRenderer", "nvdrv"};
++        // The display queue may wait for a free buffer. With native threads the waiting thread gives its virtual core up
++        // (NativeThreads::BeginHostWait in BufferQueueCore), so only its own thread waits, as on the console.
++        if (Kernel::NativeThreads::Enabled()) out.insert("IHOSBinderDriver");
++        return out;
++    }();
 +    return safe;
 +}
 +
@@ -4784,6 +5121,52 @@ index 885cc4b424..1b76552ee6 100644
          output_layers.emplace_back(Tegra::FramebufferConfig{
              .address = nvmap.GetHandleAddress(layer.buffer_handle),
              .offset = layer.offset,
+diff --git a/src/core/hle/service/nvnflinger/buffer_queue_core.cpp b/src/core/hle/service/nvnflinger/buffer_queue_core.cpp
+index 7ce65c51dd..e3bbe92bb4 100644
+--- a/src/core/hle/service/nvnflinger/buffer_queue_core.cpp
++++ b/src/core/hle/service/nvnflinger/buffer_queue_core.cpp
+@@ -10,6 +10,7 @@
+ #include "common/assert.h"
+ 
+ #include "core/hle/service/nvnflinger/buffer_queue_core.h"
++#include "core/hle/kernel/native_threads.h"
+ 
+ namespace Service::android {
+ 
+@@ -56,8 +57,16 @@ void BufferQueueCore::SignalDequeueCondition() {
+ }
+ 
+ bool BufferQueueCore::WaitForDequeueCondition(std::unique_lock<std::mutex>& lk) {
++    // kart-recomp: with native IPC the caller is a game thread; it gives its virtual core up while it waits, and takes it back
++    // without holding the queue's lock (the caller re-checks the slots after this returns).
++    const bool left = Kernel::NativeThreads::BeginHostWait();
+     dequeue_condition.wait(lk, [&] { return dequeue_possible.load(); });
+     dequeue_possible.store(false);
++    if (left) {
++        lk.unlock();
++        Kernel::NativeThreads::EndHostWait();
++        lk.lock();
++    }
+ 
+     return true;
+ }
+@@ -132,9 +141,16 @@ bool BufferQueueCore::StillTracking(const BufferItem& item) const {
+ }
+ 
+ void BufferQueueCore::WaitWhileAllocatingLocked() const {
++    if (!is_allocating) return;
++    const bool left = Kernel::NativeThreads::BeginHostWait();
+     while (is_allocating) {
+         is_allocating_condition.wait(mutex);
+     }
++    if (left) {
++        mutex.unlock();
++        Kernel::NativeThreads::EndHostWait();
++        mutex.lock();
++    }
+ }
+ 
+ } // namespace Service::android
 diff --git a/src/core/hle/service/nvnflinger/consumer_base.cpp b/src/core/hle/service/nvnflinger/consumer_base.cpp
 index fb3735988f..a02dba7d37 100644
 --- a/src/core/hle/service/nvnflinger/consumer_base.cpp
@@ -8354,6 +8737,364 @@ index 0000000000..6b0956610e
 +}
 +
 +} // namespace KartRuntime::DirectMemory
+diff --git a/src/kart_runtime/sync_arbiter.h b/src/kart_runtime/sync_arbiter.h
+new file mode 100644
+index 0000000000..a5c0ed8498
+--- /dev/null
++++ b/src/kart_runtime/sync_arbiter.h
+@@ -0,0 +1,352 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the console's user-mode synchronisation system calls, natively (docs/NATIVE_ENGINE.md, "native kernel").
++//
++// The game's locks, condition variables and light events are words in its own memory. Uncontended, the game changes them with
++// atomic instructions and never calls the system; only a contended lock, a wait or a wake-up does. This class is what the console
++// kernel does for those calls - same rules, same results - with host threads blocking on host condition variables:
++//
++//   ArbitrateLock / ArbitrateUnlock          LockWait / Unlock        (lock word: owner tag, bit 30 = "has waiters")
++//   WaitProcessWideKeyAtomic / SignalPWKey   ConditionWait / ConditionSignal
++//   WaitForAddress / SignalToAddress         AddressWait / AddressSignal (less-than, decrement-and-less-than, equal;
++//                                                                     signal, increment-if-equal, modify-by-count-if-equal)
++//
++// Waiters are woken best priority first (lower number = better), first come first served among equals. One lock guards all
++// queues, like the kernel's scheduler lock. The words are reached through `Resolve` (guest address -> host pointer, nullptr when
++// not mapped) and changed with host atomics, which the game's own exclusive loads/stores see. A thread about to block calls
++// `before_block` and, once woken and outside the lock, `after_block` (to give a virtual core up and take it back).
++//
++// Standard library only: no emulator types (tests: tests/test_sync_arbiter.cpp).
++#pragma once
++
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <functional>
++#include <list>
++#include <map>
++#include <mutex>
++#include <set>
++
++namespace KartRuntime {
++
++class SyncArbiter {
++public:
++    enum class Result { Success, TimedOut, InvalidState, InvalidCurrentMemory, Cancelled };
++
++    static constexpr uint32_t HandleWaitMask = 1u << 30;
++
++    struct Hooks {
++        std::function<uint32_t*(uint64_t)> resolve;
++        std::function<void()> before_block;
++        std::function<void()> after_block;
++    };
++
++    explicit SyncArbiter(Hooks hooks_) : hooks{std::move(hooks_)} {}
++
++    // --- mutexes ---------------------------------------------------------------------------------------------------------------
++
++    /// ArbitrateLock: the lock word at `addr` was seen as `owner_tag | HandleWaitMask`. If it still is, wait until the owner
++    /// hands the lock over (the word then holds `self_tag`).
++    Result LockWait(uint64_t id, uint64_t addr, uint32_t owner_tag, uint32_t self_tag, int priority) {
++        Waiter w{id, priority, self_tag};
++        {
++            std::unique_lock lk{mutex};
++            if (cancelled.contains(id)) return Result::Cancelled;
++            uint32_t* word = hooks.resolve(addr);
++            if (!word) return Result::InvalidCurrentMemory;
++            if (Load(word) != (owner_tag | HandleWaitMask)) return Result::Success;
++            w.lock_addr = addr;
++            Insert(lock_waiters[addr], &w);
++            Block(lk, w, -1);
++        }
++        if (hooks.after_block) hooks.after_block();
++        return w.result;
++    }
++
++    /// ArbitrateUnlock: hands the lock at `addr` to its best waiter (the word becomes that waiter's tag, with the wait bit if
++    /// more wait), or clears it.
++    Result Unlock(uint64_t addr) {
++        std::unique_lock lk{mutex};
++        uint32_t* word = hooks.resolve(addr);
++        if (!word) return Result::InvalidCurrentMemory;
++        HandOver(addr, word);
++        return Result::Success;
++    }
++
++    // --- condition variables ---------------------------------------------------------------------------------------------------
++
++    /// WaitProcessWideKeyAtomic: releases the lock at `lock_addr` (as Unlock), marks `cv_key` as waited on, and waits for a
++    /// signal; then waits to own the lock again (the word holds `self_tag` on success). `timeout_ns` < 0 waits forever, 0 does
++    /// not wait.
++    Result ConditionWait(uint64_t id, uint64_t lock_addr, uint64_t cv_key, uint32_t self_tag, int priority, int64_t timeout_ns) {
++        Waiter w{id, priority, self_tag};
++        {
++            std::unique_lock lk{mutex};
++            if (cancelled.contains(id)) return Result::Cancelled;
++            uint32_t* word = hooks.resolve(lock_addr);
++            uint32_t* key = hooks.resolve(cv_key);
++            if (!word || !key) return Result::InvalidCurrentMemory;
++            // The key first: once the lock is released another thread may take it and signal, and the game only makes the
++            // signal call when it sees the key set.
++            Store(key, 1);
++            std::atomic_thread_fence(std::memory_order_seq_cst);
++            HandOver(lock_addr, word, /*release_fence=*/false);
++            if (timeout_ns == 0) return Result::TimedOut;
++            w.cv_key = cv_key;
++            w.lock_addr = lock_addr;
++            Insert(cv_waiters[cv_key], &w);
++            if (!Block(lk, w, timeout_ns)) {
++                RemoveFromQueues(w);
++                lk.unlock();
++                if (hooks.after_block) hooks.after_block();
++                return Result::TimedOut;
++            }
++        }
++        if (hooks.after_block) hooks.after_block();
++        return w.result;
++    }
++
++    /// SignalProcessWideKey: wakes up to `count` waiters of `cv_key` (all when count <= 0). Each tries to take its lock: free ->
++    /// it owns it and runs; held -> it queues on the lock (the wait bit is set). The key word is cleared when nobody is left.
++    void ConditionSignal(uint64_t cv_key, int32_t count) {
++        std::unique_lock lk{mutex};
++        auto it = cv_waiters.find(cv_key);
++        int32_t woken = 0;
++        while (it != cv_waiters.end() && !it->second.empty() && (count <= 0 || woken < count)) {
++            Waiter* w = it->second.front();
++            it->second.pop_front();
++            w->cv_key = 0;
++            ++woken;
++            uint32_t* word = hooks.resolve(w->lock_addr);
++            if (!word) {
++                Wake(*w, Result::InvalidCurrentMemory);
++                continue;
++            }
++            // Take the lock if it is free, else mark it contended and wait for it.
++            uint32_t prev = Load(word);
++            for (;;) {
++                const uint32_t next = prev == 0 ? w->tag : (prev | HandleWaitMask);
++                if (__atomic_compare_exchange_n(word, &prev, next, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) break;
++            }
++            if (prev == 0) {
++                Wake(*w, Result::Success);
++            } else {
++                Insert(lock_waiters[w->lock_addr], w);
++            }
++        }
++        if (it == cv_waiters.end() || it->second.empty()) {
++            if (it != cv_waiters.end()) cv_waiters.erase(it);
++            if (uint32_t* key = hooks.resolve(cv_key)) Store(key, 0);
++        }
++    }
++
++    // --- address arbiter -------------------------------------------------------------------------------------------------------
++
++    enum class WaitType { LessThan, DecrementAndLessThan, Equal };
++    enum class SignalType { Signal, IncrementIfEqual, ModifyByWaitingCountIfEqual };
++
++    Result AddressWait(uint64_t id, uint64_t addr, WaitType type, int32_t value, int priority, int64_t timeout_ns) {
++        Waiter w{id, priority, 0};
++        {
++            std::unique_lock lk{mutex};
++            if (cancelled.contains(id)) return Result::Cancelled;
++            uint32_t* word = hooks.resolve(addr);
++            if (!word) return Result::InvalidCurrentMemory;
++            int32_t current = static_cast<int32_t>(Load(word));
++            if (type == WaitType::DecrementAndLessThan) {
++                uint32_t expected = static_cast<uint32_t>(current);
++                while (static_cast<int32_t>(expected) < value &&
++                       !__atomic_compare_exchange_n(word, &expected, expected - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
++                }
++                current = static_cast<int32_t>(expected);
++            }
++            const bool waits = type == WaitType::Equal ? current == value : current < value;
++            if (!waits) return Result::InvalidState;
++            if (timeout_ns == 0) return Result::TimedOut;
++            w.arb_addr = addr;
++            Insert(arb_waiters[addr], &w);
++            if (!Block(lk, w, timeout_ns)) {
++                RemoveFromQueues(w);
++                lk.unlock();
++                if (hooks.after_block) hooks.after_block();
++                return Result::TimedOut;
++            }
++        }
++        if (hooks.after_block) hooks.after_block();
++        return w.result;
++    }
++
++    Result AddressSignal(uint64_t addr, SignalType type, int32_t value, int32_t count) {
++        std::unique_lock lk{mutex};
++        auto it = arb_waiters.find(addr);
++        const size_t waiting = it == arb_waiters.end() ? 0 : it->second.size();
++        if (type != SignalType::Signal) {
++            uint32_t* word = hooks.resolve(addr);
++            if (!word) return Result::InvalidCurrentMemory;
++            int32_t new_value = value + 1;
++            if (type == SignalType::ModifyByWaitingCountIfEqual) {
++                // As the kernel: more waiters than will be woken -> value - 1 (count <= 0: all woken -> value - 2), else value;
++                // none waiting -> value + 1.
++                if (waiting == 0) {
++                    new_value = value + 1;
++                } else if (count <= 0) {
++                    new_value = value - 2;
++                } else {
++                    // The kernel counts the waiters after the first, stopping once it has seen `count` of them.
++                    const size_t others = waiting - 1;
++                    new_value = others < static_cast<size_t>(count) ? value - 1 : value;
++                }
++            }
++            uint32_t expected = static_cast<uint32_t>(value);
++            if (new_value != value) {
++                __atomic_compare_exchange_n(word, &expected, static_cast<uint32_t>(new_value), false, __ATOMIC_SEQ_CST,
++                                            __ATOMIC_SEQ_CST);
++            } else {
++                expected = Load(word);
++            }
++            if (static_cast<int32_t>(expected) != value) return Result::InvalidState;
++        }
++        int32_t woken = 0;
++        while (it != arb_waiters.end() && !it->second.empty() && (count <= 0 || woken < count)) {
++            Waiter* w = it->second.front();
++            it->second.pop_front();
++            w->arb_addr = 0;
++            Wake(*w, Result::Success);
++            ++woken;
++        }
++        if (it != arb_waiters.end() && it->second.empty()) arb_waiters.erase(it);
++        return Result::Success;
++    }
++
++    /// SleepThread with a positive time: the thread sleeps (its core given up) until the time passes or it is terminated.
++    Result Sleep(uint64_t id, int64_t ns) {
++        Waiter w{id, 0, 0};
++        {
++            std::unique_lock lk{mutex};
++            if (cancelled.contains(id)) return Result::Cancelled;
++            Insert(sleepers[id], &w);
++            const bool woken = Block(lk, w, ns);
++            if (!woken) RemoveFromQueues(w);
++        }
++        if (hooks.after_block) hooks.after_block();
++        return w.done ? w.result : Result::Success;
++    }
++
++    /// Thread `id` is being terminated: its current wait (if any) and every later one ends at once with Cancelled, as the
++    /// kernel ends a terminating thread's waits. Ids are never reused.
++    void Cancel(uint64_t id) {
++        std::unique_lock lk{mutex};
++        cancelled.insert(id);
++        for (auto* m : {&lock_waiters, &cv_waiters, &arb_waiters, &sleepers}) {
++            for (auto& [key, q] : *m) {
++                for (Waiter* w : q) {
++                    if (w->id != id) continue;
++                    Waiter* found = w;
++                    RemoveFromQueues(*found);
++                    Wake(*found, Result::Cancelled);
++                    return;
++                }
++            }
++        }
++    }
++
++    /// Waiters currently queued (tests and diagnostics).
++    size_t Waiting() {
++        std::scoped_lock lk{mutex};
++        size_t n = 0;
++        for (auto* m : {&lock_waiters, &cv_waiters, &arb_waiters})
++            for (auto& [k, q] : *m) n += q.size();
++        return n;
++    }
++
++private:
++    struct Waiter {
++        uint64_t id;
++        int priority;
++        uint32_t tag;
++        uint64_t lock_addr = 0; ///< queued on this lock (lock_waiters) when cv_key == 0
++        uint64_t cv_key = 0;    ///< queued on this condition variable
++        uint64_t arb_addr = 0;  ///< queued on this address (arbiter)
++        bool done = false;
++        Result result = Result::Success;
++        std::condition_variable cv;
++        Waiter(uint64_t i, int p, uint32_t t) : id{i}, priority{p}, tag{t} {}
++    };
++    using Queue = std::list<Waiter*>;
++
++    static uint32_t Load(uint32_t* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
++    static void Store(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
++
++    static void Insert(Queue& q, Waiter* w) {
++        auto it = q.begin();
++        while (it != q.end() && (*it)->priority <= w->priority) ++it;
++        q.insert(it, w);
++    }
++
++    void Wake(Waiter& w, Result r) {
++        w.result = r;
++        w.done = true;
++        w.cv.notify_one();
++    }
++
++    /// The lock at `addr` passes to its best waiter, or becomes free. Lock held.
++    void HandOver(uint64_t addr, uint32_t* word, bool release_fence = true) {
++        uint32_t next = 0;
++        auto it = lock_waiters.find(addr);
++        if (it != lock_waiters.end() && !it->second.empty()) {
++            Waiter* w = it->second.front();
++            it->second.pop_front();
++            next = w->tag | (it->second.empty() ? 0 : HandleWaitMask);
++            if (it->second.empty()) lock_waiters.erase(it);
++            w->lock_addr = 0;
++            if (release_fence) std::atomic_thread_fence(std::memory_order_seq_cst);
++            Store(word, next);
++            Wake(*w, Result::Success);
++            return;
++        }
++        if (release_fence) std::atomic_thread_fence(std::memory_order_seq_cst);
++        Store(word, next);
++    }
++
++    /// Blocks until woken (true) or the timeout passes (false, still queued). `lk` is held on return.
++    bool Block(std::unique_lock<std::mutex>& lk, Waiter& w, int64_t timeout_ns) {
++        if (hooks.before_block) {
++            lk.unlock();
++            hooks.before_block();
++            lk.lock();
++        }
++        if (timeout_ns < 0) {
++            w.cv.wait(lk, [&] { return w.done; });
++            return true;
++        }
++        const auto deadline = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout_ns);
++        return w.cv.wait_until(lk, deadline, [&] { return w.done; });
++    }
++
++    void RemoveFromQueues(Waiter& w) {
++        auto drop = [&](std::map<uint64_t, Queue>& m, uint64_t key) {
++            if (auto it = m.find(key); it != m.end()) {
++                it->second.remove(&w);
++                if (it->second.empty()) m.erase(it);
++            }
++        };
++        if (w.cv_key) {
++            drop(cv_waiters, w.cv_key);
++            w.cv_key = 0;
++        } else if (w.lock_addr) {
++            drop(lock_waiters, w.lock_addr);
++        }
++        if (w.arb_addr) drop(arb_waiters, w.arb_addr);
++        drop(sleepers, w.id);
++        w.lock_addr = 0;
++        w.arb_addr = 0;
++    }
++
++    Hooks hooks;
++    std::mutex mutex;
++    std::map<uint64_t, Queue> lock_waiters, cv_waiters, arb_waiters, sleepers; ///< sleepers by thread id
++    std::set<uint64_t> cancelled;
++};
++
++} // namespace KartRuntime
 diff --git a/src/kart_runtime/tests/build_and_run.sh b/src/kart_runtime/tests/build_and_run.sh
 new file mode 100755
 index 0000000000..a6681aba4f
@@ -8618,6 +9359,245 @@ index 0000000000..bbaebea55b
 +    return KartRuntime::DirectMemory::Install(nullptr, 0, nullptr) ? 1 : 0;
 +}
 +#endif
+diff --git a/src/kart_runtime/tests/test_sync_arbiter.cpp b/src/kart_runtime/tests/test_sync_arbiter.cpp
+new file mode 100644
+index 0000000000..0ee9d49577
+--- /dev/null
++++ b/src/kart_runtime/tests/test_sync_arbiter.cpp
+@@ -0,0 +1,233 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Tests for kart_runtime/sync_arbiter.h: the console's lock / condition variable / address-wait protocol (as the SDK's user-mode
++// side drives it) on many host threads.
++#include "../sync_arbiter.h"
++
++#include <cassert>
++#include <cstdio>
++#include <thread>
++#include <vector>
++
++using KartRuntime::SyncArbiter;
++
++namespace {
++
++uint32_t memory[64];
++std::atomic<int> blocks{0}, unblocks{0};
++
++SyncArbiter MakeArbiter() {
++    return SyncArbiter{{
++        [](uint64_t a) -> uint32_t* { return a >= 0x1000 && a < 0x1000 + sizeof(memory) ? &memory[(a - 0x1000) / 4] : nullptr; },
++        [] { blocks++; },
++        [] { unblocks++; },
++    }};
++}
++
++uint32_t* Word(uint64_t a) { return &memory[(a - 0x1000) / 4]; }
++
++// The SDK's mutex (nn::os::SdkMutex / InternalCriticalSection): fast path in user mode, system calls when contended.
++void Lock(SyncArbiter& arb, uint64_t addr, uint32_t tag, int prio) {
++    uint32_t* w = Word(addr);
++    for (;;) {
++        uint32_t cur = 0;
++        if (__atomic_compare_exchange_n(w, &cur, tag, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
++        if ((cur & ~SyncArbiter::HandleWaitMask) == tag) return; // owned (handed over)
++        const uint32_t marked = cur | SyncArbiter::HandleWaitMask;
++        if (cur != marked && !__atomic_compare_exchange_n(w, &cur, marked, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
++        arb.LockWait(tag, addr, marked & ~SyncArbiter::HandleWaitMask, tag, prio);
++        if ((__atomic_load_n(w, __ATOMIC_ACQUIRE) & ~SyncArbiter::HandleWaitMask) == tag) return;
++    }
++}
++
++void Unlock(SyncArbiter& arb, uint64_t addr, uint32_t tag) {
++    uint32_t* w = Word(addr);
++    uint32_t cur = tag;
++    if (__atomic_compare_exchange_n(w, &cur, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return;
++    arb.Unlock(addr);
++}
++
++void TestMutex() {
++    auto arb = MakeArbiter();
++    constexpr uint64_t lock = 0x1000;
++    long counter = 0;
++    std::vector<std::thread> ts;
++    for (int t = 0; t < 12; ++t) {
++        ts.emplace_back([&, t] {
++            const uint32_t tag = 0x100 + t;
++            for (int i = 0; i < 20000; ++i) {
++                Lock(arb, lock, tag, 44 + (t % 3));
++                const long c = counter;
++                if ((i & 63) == 0) std::this_thread::yield();
++                counter = c + 1;
++                Unlock(arb, lock, tag);
++            }
++        });
++    }
++    for (auto& t : ts) t.join();
++    assert(counter == 12 * 20000);
++    assert(*Word(lock) == 0);
++    assert(arb.Waiting() == 0);
++    std::printf("mutex: %ld increments, %d blocking waits\n", counter, blocks.load());
++}
++
++void TestConditionVariable() {
++    auto arb = MakeArbiter();
++    constexpr uint64_t lock = 0x1010, key = 0x1014;
++    int queue = 0, produced = 0, consumed = 0;
++    constexpr int kItems = 20000;
++    std::vector<std::thread> ts;
++    for (int c = 0; c < 4; ++c) {
++        ts.emplace_back([&, c] {
++            const uint32_t tag = 0x200 + c;
++            for (;;) {
++                Lock(arb, lock, tag, 44);
++                while (queue == 0 && consumed < kItems) {
++                    arb.ConditionWait(tag, lock, key, tag, 44, -1);
++                    Lock(arb, lock, tag, 44); // owned already when woken with the lock; else take it
++                }
++                if (consumed >= kItems) {
++                    Unlock(arb, lock, tag);
++                    arb.ConditionSignal(key, -1);
++                    return;
++                }
++                --queue;
++                __atomic_store_n(&consumed, consumed + 1, __ATOMIC_RELEASE);
++                Unlock(arb, lock, tag);
++            }
++        });
++    }
++    for (int p = 0; p < 2; ++p) {
++        ts.emplace_back([&, p] {
++            const uint32_t tag = 0x300 + p;
++            for (;;) {
++                Lock(arb, lock, tag, 44);
++                if (produced >= kItems) {
++                    Unlock(arb, lock, tag);
++                    return;
++                }
++                ++queue;
++                ++produced;
++                const bool signal = __atomic_load_n(Word(key), __ATOMIC_ACQUIRE) != 0;
++                Unlock(arb, lock, tag);
++                if (signal) arb.ConditionSignal(key, 1);
++            }
++        });
++    }
++    // Wake everyone at the end.
++    for (int i = 0; i < 200 && __atomic_load_n(&consumed, __ATOMIC_ACQUIRE) < kItems; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
++    arb.ConditionSignal(key, -1);
++    for (auto& t : ts) t.join();
++    assert(consumed == kItems && produced == kItems && queue == 0);
++    assert(arb.Waiting() == 0);
++    std::printf("condition variable: %d items through 2 producers / 4 consumers\n", consumed);
++
++    // Timeout: nobody signals.
++    const auto t0 = std::chrono::steady_clock::now();
++    Lock(arb, lock, 0x400, 44);
++    const auto r = arb.ConditionWait(0x400, lock, key, 0x400, 44, 20'000'000);
++    assert(r == SyncArbiter::Result::TimedOut);
++    assert(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(19));
++    assert(*Word(lock) == 0); // released by the wait
++    assert(arb.Waiting() == 0);
++    assert(arb.ConditionWait(0x400, lock, key, 0x400, 44, 0) == SyncArbiter::Result::TimedOut);
++}
++
++void TestPriorityOrder() {
++    auto arb = MakeArbiter();
++    constexpr uint64_t addr = 0x1020;
++    *Word(addr) = 0;
++    std::vector<int> order;
++    std::mutex order_lock;
++    std::vector<std::thread> ts;
++    const int prios[] = {50, 30, 40, 30, 20};
++    for (int i = 0; i < 5; ++i) {
++        ts.emplace_back([&, i] {
++            assert(arb.AddressWait(7, addr, SyncArbiter::WaitType::Equal, 0, prios[i], -1) == SyncArbiter::Result::Success);
++            std::scoped_lock lk{order_lock};
++            order.push_back(prios[i]);
++        });
++        while (arb.Waiting() < static_cast<size_t>(i + 1)) std::this_thread::yield();
++    }
++    for (int i = 0; i < 5; ++i) {
++        arb.AddressSignal(addr, SyncArbiter::SignalType::Signal, 0, 1);
++        while (true) {
++            std::scoped_lock lk{order_lock};
++            if (order.size() == static_cast<size_t>(i + 1)) break;
++        }
++    }
++    for (auto& t : ts) t.join();
++    const std::vector<int> expect{20, 30, 30, 40, 50};
++    assert(order == expect);
++    std::printf("address arbiter: woken best priority first\n");
++}
++
++void TestArbiterRules() {
++    auto arb = MakeArbiter();
++    constexpr uint64_t a = 0x1030;
++    using R = SyncArbiter::Result;
++    *Word(a) = 5;
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::Equal, 4, 44, -1) == R::InvalidState);
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::LessThan, 5, 44, -1) == R::InvalidState);
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::LessThan, 6, 44, 0) == R::TimedOut);
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::DecrementAndLessThan, 6, 44, 0) == R::TimedOut);
++    assert(*Word(a) == 4);
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::DecrementAndLessThan, 4, 44, 0) == R::InvalidState);
++    assert(*Word(a) == 4);
++    assert(arb.AddressSignal(a, SyncArbiter::SignalType::IncrementIfEqual, 3, 1) == R::InvalidState);
++    assert(arb.AddressSignal(a, SyncArbiter::SignalType::IncrementIfEqual, 4, 1) == R::Success);
++    assert(*Word(a) == 5);
++    // Modify by waiting count: nobody waiting -> value + 1.
++    assert(arb.AddressSignal(a, SyncArbiter::SignalType::ModifyByWaitingCountIfEqual, 5, 1) == R::Success);
++    assert(*Word(a) == 6);
++    // Two waiting, wake one -> one other left, not fewer than count (1) -> value unchanged; wake all -> value - 2.
++    std::vector<std::thread> ts;
++    for (int i = 0; i < 2; ++i) ts.emplace_back([&] { arb.AddressWait(7, a, SyncArbiter::WaitType::Equal, 6, 44, -1); });
++    while (arb.Waiting() < 2) std::this_thread::yield();
++    assert(arb.AddressSignal(a, SyncArbiter::SignalType::ModifyByWaitingCountIfEqual, 6, 1) == R::Success);
++    assert(*Word(a) == 6);
++    while (arb.Waiting() != 1) std::this_thread::yield();
++    assert(arb.AddressSignal(a, SyncArbiter::SignalType::ModifyByWaitingCountIfEqual, 6, 1) == R::Success);
++    assert(*Word(a) == 5); // the last waiter: no others -> value - 1
++    for (auto& t : ts) t.join();
++    // Timed wait expires and leaves no waiter behind.
++    assert(arb.AddressWait(7, a, SyncArbiter::WaitType::Equal, 5, 44, 5'000'000) == R::TimedOut);
++    assert(arb.Waiting() == 0);
++    assert(arb.AddressWait(7, 0x9000, SyncArbiter::WaitType::Equal, 0, 44, -1) == R::InvalidCurrentMemory);
++    std::printf("address arbiter: kernel rules for every wait and signal type\n");
++}
++
++void TestCancel() {
++    auto arb = MakeArbiter();
++    constexpr uint64_t a = 0x1040;
++    *Word(a) = 0;
++    using R = SyncArbiter::Result;
++    R got = R::Success;
++    std::thread t{[&] { got = arb.AddressWait(42, a, SyncArbiter::WaitType::Equal, 0, 44, -1); }};
++    while (arb.Waiting() < 1) std::this_thread::yield();
++    arb.Cancel(42);
++    t.join();
++    assert(got == R::Cancelled && arb.Waiting() == 0);
++    assert(arb.AddressWait(42, a, SyncArbiter::WaitType::Equal, 0, 44, -1) == R::Cancelled); // later waits end at once
++    const auto t0 = std::chrono::steady_clock::now();
++    assert(arb.Sleep(5, 10'000'000) == R::Success);
++    assert(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(9));
++    std::thread s{[&] { got = arb.Sleep(43, 10'000'000'000); }};
++    std::this_thread::sleep_for(std::chrono::milliseconds(20));
++    arb.Cancel(43);
++    s.join();
++    assert(got == R::Cancelled && arb.Waiting() == 0);
++    std::printf("cancel: a terminating thread's wait or sleep ends\n");
++}
++
++} // namespace
++
++int main() {
++    TestMutex();
++    TestConditionVariable();
++    TestPriorityOrder();
++    TestArbiterRules();
++    TestCancel();
++    assert(blocks.load() == unblocks.load());
++    std::printf("sync_arbiter: all tests passed (%d blocks)\n", blocks.load());
++    return 0;
++}
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 index 8fd46dffa7..1870c99abe 100644
 --- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
