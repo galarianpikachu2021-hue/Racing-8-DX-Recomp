@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..9eb702101c 100644
+index 408daa6839..b3205b3c73 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,7 +860,7 @@ index 408daa6839..9eb702101c 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,18 @@ add_library(core STATIC
+@@ -339,6 +359,19 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
@@ -870,6 +870,7 @@ index 408daa6839..9eb702101c 100644
 +    hle/kernel/native_fs_backend.cpp
 +    hle/kernel/native_hid_service.cpp
 +    hle/kernel/native_mii.cpp
++    hle/kernel/native_nvdrv_service.cpp
 +    hle/kernel/native_services.cpp
 +    hle/kernel/native_services.h
 +    hle/kernel/native_services_list.cpp
@@ -879,7 +880,7 @@ index 408daa6839..9eb702101c 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1083,8 @@ add_library(core STATIC
+@@ -1051,6 +1084,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -888,7 +889,7 @@ index 408daa6839..9eb702101c 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1260,7 @@ else()
+@@ -1226,7 +1261,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -5387,12 +5388,140 @@ index 0000000000..4a85402ceb
 +}
 +
 +} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_nvdrv_service.cpp b/src/core/hle/kernel/native_nvdrv_service.cpp
+new file mode 100644
+index 0000000000..fcca507b9e
+--- /dev/null
++++ b/src/core/hle/kernel/native_nvdrv_service.cpp
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the GPU driver service ("nvdrv") answered by the runtime. The driver devices themselves - graphics memory handles
++// (nvmap), GPU address spaces, syncpoints and their events, the GPU channel, the video decoder - are suyu's driver code (the
++// nvdrv module and its NvCore container), used as a library; this replaces the service around them.
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "common/string_util.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_event.h"
++#include "core/hle/kernel/k_handle_table.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_readable_event.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/nvdrv/core/container.h"
++#include "core/hle/service/nvdrv/nvdata.h"
++#include "core/hle/service/nvdrv/nvdrv.h"
++#include "core/hle/service/nvdrv/nvdrv_interface.h"
++#include "core/hle/service/sm/sm.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using KartRuntime::Context;
++using KartRuntime::Service;
++using ::Service::Nvidia::DeviceFD;
++using ::Service::Nvidia::Ioctl;
++using ::Service::Nvidia::NvResult;
++
++std::shared_ptr<Service> Driver(KernelCore& kernel, std::shared_ptr<::Service::Nvidia::Module> nv, const char* name) {
++    struct State {
++        bool initialized = false;
++        ::Service::Nvidia::NvCore::SessionId session{};
++    };
++    auto st = std::make_shared<State>();
++    auto s = std::make_shared<Service>(name);
++    auto result = [](Context& c, NvResult r) { c.Push<u32>(static_cast<u32>(r)); };
++    s->On(0, [nv, st, result](Context& c) { // Open(device path) -> fd, result
++        if (!st->initialized) {
++            c.Push<DeviceFD>(0);
++            return result(c, NvResult::NotInitialized);
++        }
++        const auto raw = c.ReadBuffer(0);
++        const std::string path = Common::StringFromBuffer(raw);
++        if (path == "/dev/nvhost-prof-gpu") {
++            c.Push<DeviceFD>(0);
++            return result(c, NvResult::NotSupported);
++        }
++        const DeviceFD fd = nv->Open(path, st->session);
++        c.Push<DeviceFD>(fd);
++        result(c, fd != ::Service::Nvidia::INVALID_NVDRV_FD ? NvResult::Success : NvResult::FileOperationFailed);
++    });
++    auto ioctl = [nv, st, result](Context& c, int kind) {
++        const auto fd = c.Pop<DeviceFD>();
++        const auto command = c.Pop<Ioctl>();
++        if (!st->initialized) return result(c, NvResult::NotInitialized);
++        const auto in = c.ReadBuffer(0);
++        std::vector<u8> out(c.WriteBufferSize(0));
++        NvResult r{};
++        if (kind == 1) {
++            r = nv->Ioctl1(fd, command, in, out);
++        } else if (kind == 2) {
++            const auto inline_in = c.ReadBuffer(1);
++            r = nv->Ioctl2(fd, command, in, inline_in, out);
++        } else {
++            std::vector<u8> inline_out(c.WriteBufferSize(1));
++            r = nv->Ioctl3(fd, command, in, out, inline_out);
++            if (command.is_out != 0 && !inline_out.empty()) c.WriteBuffer(inline_out.data(), inline_out.size(), 1);
++        }
++        if (command.is_out != 0 && !out.empty()) c.WriteBuffer(out.data(), out.size(), 0);
++        result(c, r);
++    };
++    s->On(1, [ioctl](Context& c) { ioctl(c, 1); });
++    s->On(11, [ioctl](Context& c) { ioctl(c, 2); });
++    s->On(12, [ioctl](Context& c) { ioctl(c, 3); });
++    s->On(2, [nv, st, result](Context& c) { // Close(fd)
++        const auto fd = c.Pop<DeviceFD>();
++        if (!st->initialized) return result(c, NvResult::NotInitialized);
++        result(c, nv->Close(fd));
++    });
++    s->On(3, [&kernel, nv, st, result](Context& c) { // Initialize(transfer memory size; process, transfer memory)
++        if (!st->initialized) {
++            if (c.request.copy_handles.empty()) return result(c, NvResult::BadParameter);
++            KScopedAutoObject process = GetCurrentProcess(kernel).GetHandleTable().GetObject<KProcess>(kernel, c.request.copy_handles[0]);
++            if (process.IsNull()) return result(c, NvResult::BadParameter);
++            st->session = nv->GetContainer().OpenSession(process.GetPointerUnsafe());
++            st->initialized = true;
++        }
++        result(c, NvResult::Success);
++    });
++    s->On(4, [&kernel, nv, st, result](Context& c) { // QueryEvent(fd, event id) -> event, result
++        const auto fd = c.Pop<DeviceFD>();
++        const auto id = c.Pop<u32>();
++        if (!st->initialized) return result(c, NvResult::NotInitialized);
++        Kernel::KEvent* event = nullptr;
++        const NvResult r = nv->QueryEvent(fd, id, event);
++        if (r == NvResult::Success && event) {
++            Handle h{};
++            if (GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, &event->GetReadableEvent()).IsError()) return c.SetResult(0xD201);
++            c.PushCopyHandle(h);
++        }
++        result(c, r);
++    });
++    s->On(6, [result](Context& c) { result(c, NvResult::Success); }); // GetStatus
++    s->On(8, [result](Context& c) { result(c, NvResult::Success); }); // SetAruid
++    s->Ok(9);                                                          // DumpGraphicsMemoryInfo
++    s->Ok(13);                                                         // SetGraphicsFirmwareMemoryMarginEnabled
++    return s;
++}
++
++} // namespace
++
++std::shared_ptr<Service> MakeNvdrvService(KernelCore& kernel, const char* name) {
++    auto iface = kernel.System().ServiceManager().GetService<::Service::Nvidia::NVDRV>("nvdrv", true);
++    if (!iface) return nullptr;
++    return Driver(kernel, iface->GetModule(), name);
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..c387bd1749
+index 0000000000..6866458668
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,299 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5403,12 +5532,18 @@ index 0000000000..c387bd1749
 +#include <functional>
 +#include <map>
 +#include <mutex>
++#include <array>
 +#include <set>
 +#include <sstream>
 +
 +#include "common/logging/log.h"
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/k_client_port.h"
++#include "core/hle/kernel/k_client_session.h"
++#include "core/hle/kernel/k_handle_table.h"
++#include "core/hle/service/sm/sm.h"
++#include "core/core.h"
 +#include "core/hle/kernel/kernel.h"
 +#include "core/hle/kernel/native_threads.h"
 +#include "core/hle/kernel/native_services_list.h"
@@ -5538,6 +5673,41 @@ index 0000000000..c387bd1749
 +    return runtime.OpenSession(std::move(service));
 +}
 +
++/// The service manager ("sm:"): GetService hands out a runtime session for the runtime's services and, for any other name, a
++/// session to the emulated service (until there are none: it logs which).
++std::optional<u32> ConnectToNamedPort(KernelCore& kernel, const std::string& name) {
++    if (!Enabled() || name != "sm:" || !ServiceWanted("sm:")) return std::nullopt;
++    auto& runtime = Runtime(kernel);
++    auto sm = std::make_shared<KartRuntime::Service>("sm:");
++    sm->Ok(0); // Initialize (RegisterClient)
++    sm->On(1, [&kernel](KartRuntime::Context& c) { // GetService(name)
++        const auto raw = c.Pop<std::array<char, 8>>();
++        std::string service;
++        for (const char ch : raw)
++            if (ch >= ' ' && ch <= '~') service.push_back(ch);
++        if (const auto h = OpenService(kernel, service)) return c.PushMoveHandle(*h);
++        // Not a runtime service: a session to the emulated one.
++        Kernel::KClientPort* port{};
++        if (const Result r = kernel.System().ServiceManager().GetServicePort(&port, service); r.IsError()) {
++            LOG_ERROR(Service, "native services: unknown service {}", service);
++            return c.SetResult(r.raw);
++        }
++        Kernel::KClientSession* session{};
++        if (const Result r = port->CreateSession(kernel, &session); r.IsError()) return c.SetResult(r.raw);
++        Svc::Handle h{};
++        const Result r = GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, session);
++        session->Close(kernel);
++        if (r.IsError()) return c.SetResult(r.raw);
++        static std::mutex m;
++        static std::set<std::string> logged;
++        std::scoped_lock lk{m};
++        if (logged.insert(service).second) LOG_WARNING(Service, "native services: {} is still the emulated service", service);
++        c.PushMoveHandle(h);
++    });
++    LOG_INFO(Service, "native services: the service manager is the runtime's");
++    return runtime.OpenSession(std::move(sm));
++}
++
 +Result SendSyncRequest(KernelCore& kernel, Svc::Handle handle) {
 +    auto& runtime = Runtime(kernel);
 +    KThread& thread = GetCurrentThread(kernel);
@@ -5653,10 +5823,10 @@ index 0000000000..c387bd1749
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..9324c4279a
+index 0000000000..fcaa721368
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,50 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -5687,6 +5857,9 @@ index 0000000000..9324c4279a
 +/// True when the runtime is asked to answer `name` (KARTRECOMP_NATIVE_SERVICES), whether or not it has that service.
 +bool ServiceWanted(const std::string& name);
 +
++/// ConnectToNamedPort: a runtime session for "sm:" (the runtime's service manager) when native services are on.
++std::optional<u32> ConnectToNamedPort(KernelCore& kernel, const std::string& name);
++
 +/// The service manager's GetService: a new runtime session handle when `name` is served by the runtime.
 +std::optional<u32> OpenService(KernelCore& kernel, const std::string& name);
 +
@@ -5706,10 +5879,10 @@ index 0000000000..9324c4279a
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..98c6e19f7f
+index 0000000000..24fa3970bc
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,371 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -6069,6 +6242,7 @@ index 0000000000..98c6e19f7f
 +        {"pl:u", [&] { return MakeSharedFont(kernel); }},
 +        {"hid", [&] { return MakeHidService(kernel); }},
 +        {"audren:u", [&] { return MakeAudioRendererService(kernel); }},
++        {"nvdrv", [&] { return MakeNvdrvService(kernel, "nvdrv"); }},
 +        {"mii:e", [] { return MakeMiiService("mii:e", true); }},
 +        {"mii:u", [] { return MakeMiiService("mii:u", false); }},
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
@@ -6082,10 +6256,10 @@ index 0000000000..98c6e19f7f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..0c3245c001
+index 0000000000..1d62b2e704
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,52 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -6126,6 +6300,9 @@ index 0000000000..0c3245c001
 +std::shared_ptr<KartRuntime::Service> MakeAudioRendererService(KernelCore& kernel);
 +/// Stops every renderer the runtime started (engine shutdown, before audio_core goes).
 +void StopAudioRenderers();
++
++/// The GPU driver service around suyu's driver module (native_nvdrv_service.cpp).
++std::shared_ptr<KartRuntime::Service> MakeNvdrvService(KernelCore& kernel, const char* name);
 +
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
@@ -6799,6 +6976,31 @@ index 4799d6bce9..d35face0b1 100644
  
      R_RETURN(KConditionVariable::SignalToAddress(system.Kernel(), address));
  }
+diff --git a/src/core/hle/kernel/svc/svc_port.cpp b/src/core/hle/kernel/svc/svc_port.cpp
+index 70d7a02099..4d7a6b61c3 100644
+--- a/src/core/hle/kernel/svc/svc_port.cpp
++++ b/src/core/hle/kernel/svc/svc_port.cpp
+@@ -12,6 +12,7 @@
+ #include "core/hle/kernel/k_object_name.h"
+ #include "core/hle/kernel/k_port.h"
+ #include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/native_services.h"
+ #include "core/hle/kernel/svc.h"
+ 
+ namespace Kernel::Svc {
+@@ -27,6 +28,12 @@ Result ConnectToNamedPort(Core::System& system, Handle* out, u64 user_name) {
+     // Validate that the name is valid.
+     R_UNLESS(name[sizeof(name) - 1] == '\x00', ResultOutOfRange);
+ 
++    // kart-recomp: the service manager is the runtime's (core/hle/kernel/native_services.h).
++    if (const auto native = NativeServices::ConnectToNamedPort(system.Kernel(), name.data())) {
++        *out = *native;
++        R_SUCCEED();
++    }
++
+     // Get the current handle table.
+     auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
+ 
 diff --git a/src/core/hle/kernel/svc/svc_synchronization.cpp b/src/core/hle/kernel/svc/svc_synchronization.cpp
 index cd28750f38..7e08b2b68b 100644
 --- a/src/core/hle/kernel/svc/svc_synchronization.cpp

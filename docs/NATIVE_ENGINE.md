@@ -622,3 +622,16 @@ The GPU and device memory maps call into a rasterizer only when one is bound.
   decoder device (`nvhost_nvdec`, suyu's Host1x + FFmpeg), which does not need the emulated GPU.
 - Checked: 1P race 4.0.1 and 3.0.4 (60 fps, pictures), 4P split-screen (59.9 fps), baseline log errors. Memory: 20-60 MB less
   resident in the effects race (noisy between snapshots).
+
+## Every service request is answered by the runtime (2026-11-14)
+
+- **GPU driver service** (`nvdrv`, `core/hle/kernel/native_nvdrv_service.cpp`): the service around suyu's driver module
+  (graphics memory handles, GPU address spaces, syncpoints and their events, the GPU channel, the video decoder), used as a
+  library.
+- **Service manager** (`sm:`): `ConnectToNamedPort("sm:")` returns a runtime session; GetService hands out runtime sessions,
+  and for a name the runtime does not have, a session to the emulated service (logged once per name: none in a race).
+- Result: a 1P race sends no request through the emulated IPC transport (`KARTRECOMP_IPC_TRACE=1` writes no trace at all),
+  60 fps, baseline log errors. What the emulated kernel still does for the game: the waits and resets on the events that the
+  library parts (audio_core, hid_core, the driver module) signal (`WaitSynchronization` / `ResetSignal`, ~200/s), thread
+  creation and its bookkeeping (the threads themselves are host threads), the memory system calls and the handle table for
+  those kernel objects (shared memory, transfer memory, events), and loading the game's process.
