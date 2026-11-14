@@ -35,8 +35,9 @@ public:
     /// missing from the picture (NeedsAstc says so).
     QByteArray AstcJob() const;
     bool NeedsAstc() const { return loaded && astc.empty(); }
-    /// Head and shoulders of `mii`, `width` x `height` pixels on a transparent background. Null image when nothing is loaded.
-    QImage Render(const StoreData& mii, int width, int height) const;
+    /// A picture of `mii`, `width` x `height` pixels on a transparent background. Null image when nothing is loaded.
+    /// `full_body` shows the whole figure, so the Mii's height and build can be seen; otherwise it is a portrait.
+    QImage Render(const StoreData& mii, int width, int height, bool full_body = false) const;
 
     struct Mesh {
         std::vector<std::array<float, 3>> pos, normal;

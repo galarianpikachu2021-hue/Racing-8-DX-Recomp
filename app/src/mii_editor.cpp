@@ -94,8 +94,11 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
         spin->setToolTip(tr("0 to %1").arg(f.max));
         groups[g]->addRow(tr(f.label), spin);
         spins[f.key] = spin;
-        connect(spin, &QSpinBox::valueChanged, this, [this] {
+        // Height and build change the body: the picture shows the whole figure while they are being changed, the face otherwise.
+        const bool body_value = std::string(f.key) == "height" || std::string(f.key) == "build";
+        connect(spin, &QSpinBox::valueChanged, this, [this, body_value] {
             if (!loading) setDirty(true);
+            show_body = body_value;
             updatePreview();
         });
     }
@@ -229,6 +232,7 @@ void MiiEditor::refreshList() {
 
 void MiiEditor::showMii(int row) {
     current = (row >= 0 && row < db.Count()) ? row : -1;
+    show_body = false;
     form->setEnabled(current >= 0 && !locked && has_firmware);
     if (current < 0) return;
     loading = true;
@@ -331,7 +335,7 @@ void MiiEditor::updatePreview() {
         if (!renderer.Loaded() || renderer.NeedsAstc() || !has_firmware) return;
         if (current < 0 || current >= db.Count()) return preview->setPixmap(QPixmap());
         const qreal ratio = devicePixelRatioF();
-        QImage img = renderer.Render(edited(), static_cast<int>(256 * ratio), static_cast<int>(316 * ratio));
+        QImage img = renderer.Render(edited(), static_cast<int>(256 * ratio), static_cast<int>(316 * ratio), show_body);
         img.setDevicePixelRatio(ratio);
         preview->setPixmap(QPixmap::fromImage(img));
     });

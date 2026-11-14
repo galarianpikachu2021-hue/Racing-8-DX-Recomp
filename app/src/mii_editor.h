@@ -71,5 +71,5 @@ private:
     QString engine, engine_dir;
     QStringList engine_args;
     QProcessEnvironment engine_env;
-    bool has_firmware = true, tried_extract = false, preview_queued = false;
+    bool has_firmware = true, tried_extract = false, preview_queued = false, show_body = false;
 };

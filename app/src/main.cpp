@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
             else if (kv[0] == QLatin1String("h")) h = kv[1].toInt();
             else if (Mii::FindField(kv[0].toUtf8().constData())) mii.Set(kv[0].toUtf8().constData(), kv[1].toInt());
         }
-        return renderer.Render(mii, w, h).save(a[3]) ? 0 : 4;
+        return renderer.Render(mii, w, h, a.contains(QStringLiteral("body=1"))).save(a[3]) ? 0 : 4;
     }
 
     MainWindow window;

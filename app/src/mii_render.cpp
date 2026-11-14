@@ -497,7 +497,7 @@ QImage Renderer::FaceTexture(const StoreData& mii, int size) const {
     return face.convertToFormat(QImage::Format_RGBA8888);
 }
 
-QImage Renderer::Render(const StoreData& mii, int width, int height) const {
+QImage Renderer::Render(const StoreData& mii, int width, int height, bool full_body) const {
     if (!loaded || width <= 0 || height <= 0) return {};
     const int ss = 2;
     Target t(width * ss, height * ss);
@@ -507,12 +507,22 @@ QImage Renderer::Render(const StoreData& mii, int width, int height) const {
     const Rgb skin = Colour(kFacelineColor[std::clamp(G("faceline_color"), 0, 9)]);
     const Rgb favourite = Colour(kFavoriteColor[std::clamp(G("favorite_color"), 0, 11)]);
 
+    // The body is not part of the firmware's Mii data (games bring their own), so it is a plain figure here; its size follows the
+    // console's rule for a Mii's height and build (0..127 each): the head never changes, the body is scaled under it.
+    const float tall = static_cast<float>(G("height")), wide = static_cast<float>(G("build"));
+    const float body_x = wide * (tall * 0.003671875f + 0.4f) / 127.0f + tall * 0.001796875f + 0.4f, body_y = tall * 0.006015625f + 0.5f;
+    const float body_height = 98.0f * body_y;
+
     QMatrix4x4 proj, view;
-    proj.perspective(15.0f, static_cast<float>(width) / static_cast<float>(height), 100.0f, 2000.0f);
-    // Framed like a Mii portrait: the head fills most of the picture, the shoulders just show below it.
-    const float look_y = 27.0f, distance = 455.0f * std::max(1.0f, 0.8f * static_cast<float>(height) / static_cast<float>(width));
+    proj.perspective(15.0f, static_cast<float>(width) / static_cast<float>(height), 100.0f, 4000.0f);
+    // Portrait: the head fills most of the picture and the shoulders just show. Full body: the whole figure, with the tallest
+    // Mii filling the picture, so a change of height is seen as a change of size.
+    const float fit = std::max(1.0f, 0.8f * static_cast<float>(height) / static_cast<float>(width));
+    const float tallest = 98.0f * (127.0f * 0.006015625f + 0.5f);
+    const float look_y = full_body ? (88.0f - tallest) * 0.5f : 27.0f;
+    const float distance = full_body ? (88.0f + tallest + 14.0f) / 0.2633f * fit : 455.0f * fit;
     view.lookAt(QVector3D(0, look_y, distance), QVector3D(0, look_y, 0), QVector3D(0, 1, 0));
-    const QMatrix4x4 vp = proj * view;
+    QMatrix4x4 vp = proj * view;
     const auto place = [](const std::array<float, 3>& at, float scale = 1.0f, bool flip = false, float dy = 0.0f, float dz = 0.0f) {
         QMatrix4x4 m;
         m.translate(at[0], at[1] + dy, at[2] + dz);
@@ -522,11 +532,36 @@ QImage Renderer::Render(const StoreData& mii, int width, int height) const {
     const std::array<float, 3> origin{0, 0, 0};
     const QMatrix4x4 identity;
 
-    // Shoulders: not part of the firmware's Mii data (games bring their own bodies), so a plain small body in the favourite
-    // colour, a little wider with the Mii's build. A Mii has no visible neck: the head sits on the body.
-    const float build = static_cast<float>(G("build")) / 127.0f;
-    Draw(t, Ellipsoid(0, -36.0f, -3.0f, 19.0f + 6.0f * build, 34.0f, 12.0f + 4.0f * build), identity, vp, Material{favourite});
+    {
+        const Mesh ball = Ellipsoid(0, 0, 0, 1, 1, 1);
+        const Rgb trousers{0.36f, 0.37f, 0.40f}, shoes{0.16f, 0.16f, 0.18f};
+        // One part of the figure: a stretched ball at a place in the body's own measures (neck at 0, feet at -98), then the
+        // body's scale. In full-body view the feet stand at the same place for every height.
+        const float lift = full_body ? body_height - tallest : 0.0f;
+        const auto part = [&](float x, float y, float z, float rx, float ry, float rz, float lean, const Rgb& colour) {
+            QMatrix4x4 m;
+            m.translate(0, lift, 0);
+            m.scale(body_x, body_y, body_x);
+            m.translate(x, y, z);
+            m.rotate(lean, 0, 0, 1);
+            m.scale(rx, ry, rz);
+            Draw(t, ball, m, vp, Material{colour});
+        };
+        part(0, -27.0f, -3.0f, 17.0f, 28.0f, 11.0f, 0, favourite); // body
+        for (const float side : {-1.0f, 1.0f}) {
+            part(side * 20.0f, -24.0f, -3.0f, 5.0f, 19.0f, 5.0f, side * 14.0f, favourite); // arm
+            part(side * 25.5f, -43.0f, -3.0f, 5.2f, 5.2f, 5.2f, 0, skin);                    // hand
+            part(side * 7.5f, -68.0f, -3.0f, 6.8f, 26.0f, 6.8f, 0, trousers);                // leg
+            part(side * 7.5f, -94.0f, 0.0f, 7.2f, 4.0f, 10.0f, 0, shoes);                    // shoe
+        }
+    }
 
+    // The head stands on the body: lower for a short Mii in the full-body view.
+    if (full_body) {
+        QMatrix4x4 lift;
+        lift.translate(0, body_height - tallest, 0);
+        vp = vp * lift;
+    }
     const QImage face_tex = FaceTexture(mii, 512), mask_tex = MaskTexture(mii, 512);
     Material face_mat{skin};
     face_mat.texture = &face_tex, face_mat.mirror = true;
