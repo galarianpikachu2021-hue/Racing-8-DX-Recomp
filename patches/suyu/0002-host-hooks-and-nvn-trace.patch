@@ -8137,13 +8137,19 @@ index 8b6d05a8dc..b50e5673d5 100644
          return ReportUnimplementedFunction(ctx, info);
  
 diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
-index 7bdd89905c..91bf44c682 100644
+index 7bdd89905c..63facc95e5 100644
 --- a/src/core/hle/service/services.cpp
 +++ b/src/core/hle/service/services.cpp
-@@ -5,72 +5,170 @@
+@@ -5,72 +5,176 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "core/hle/service/services.h"
++#include "core/hle/service/ns/platform_service_manager.h"
++#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/nvdrv/nvdrv_interface.h"
++#include "hid_core/resource_manager.h"
++#include "hid_core/resources/hid_firmware_settings.h"
++#include "core/hle/service/set/system_settings_server.h"
 +#include <set>
 +#include <sstream>
 +#include "core/hle/kernel/native_services.h"
@@ -8294,7 +8300,7 @@ index 7bdd89905c..91bf44c682 100644
 +    static const std::set<std::string, std::less<>> wanted = [] {
 +        std::set<std::string, std::less<>> out;
 +        const char* v = std::getenv("KARTRECOMP_HLE_SERVICES");
-+        std::string list = v ? v : (Kernel::NativeServices::Enabled() ? "sm,hid,nvservices,ns,settings" : "all");
++        std::string list = v ? v : (Kernel::NativeServices::Enabled() ? "none" : "all");
 +        std::stringstream in{list};
 +        for (std::string item; std::getline(in, item, ',');)
 +            if (!item.empty()) out.insert(item);
@@ -8311,7 +8317,7 @@ index 7bdd89905c..91bf44c682 100644
  Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                     std::stop_token token) {
      auto& kernel = system.Kernel();
-@@ -97,67 +195,144 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+@@ -97,67 +201,173 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          // which is the honest answer for a build that cannot provide one.
          {"jit",        &JIT::LoopProcess},
  #endif
@@ -8456,6 +8462,35 @@ index 7bdd89905c..91bf44c682 100644
 -        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
 +        if (StartModule(e.first))
 +            kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
++
++    // kart-recomp: library objects the runtime and the controller library look up, without their modules' server threads.
++    auto library = [&sm](const char* name, SessionRequestHandlerFactory factory) {
++        Kernel::KServerPort* port{};
++        if (sm->RegisterService(&port, name, 1, std::move(factory)).IsError()) LOG_ERROR(Service, "could not register {}", name);
++    };
++    // Built here, in dependency order (a registry lookup must not run inside another lookup's factory: the registry holds its
++    // lock while it calls one).
++    if (!StartModule("settings")) {
++        auto object = std::make_shared<Set::ISystemSettingsServer>(system);
++        library("set:sys", [object] { return object; });
++    }
++    if (!StartModule("hid")) {
++        // hid_core's resource manager (shared memory, pads, rumble, motion and its update work) behind an "hid" server object.
++        auto firmware = std::make_shared<HID::HidFirmwareSettings>(system);
++        auto rm = std::make_shared<HID::ResourceManager>(system, firmware);
++        rm->Initialize();
++        auto object = std::make_shared<HID::IHidServer>(system, rm, firmware);
++        library("hid", [object] { return object; });
++    }
++    if (!StartModule("nvservices")) {
++        // The GPU driver module behind an "nvdrv" interface object.
++        auto object = std::make_shared<Nvidia::NVDRV>(system, std::make_shared<Nvidia::Module>(system), "nvdrv");
++        library("nvdrv", [object] { return object; });
++    }
++    if (!StartModule("ns")) {
++        auto object = std::make_shared<NS::IPlatformServiceManager>(system, "pl:u");
++        library("pl:u", [object] { return object; });
++    }
  }
  
  } // namespace Service

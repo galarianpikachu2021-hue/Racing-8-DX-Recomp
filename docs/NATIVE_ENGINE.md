@@ -659,3 +659,9 @@ Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host t
 - Fixed: the runtime's objects were destroyed at process exit after the engine (a crash on closing, seen since the driver
   service moved to the runtime): they now live to the end of the process.
 - Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, keyless boot, clean exits (no core dumps).
+- **No emulated service module is started at all** (default with native services; `KARTRECOMP_HLE_SERVICES=<list>|all` to
+  start some). The library objects the runtime and the controller library look up are built once at boot, in dependency order,
+  and put in the registry without server threads: `set:sys` (system settings), `hid` (hid_core's resource manager and its
+  update work), `nvdrv` (the driver module), `pl:u` (the font loader). A registry lookup must not run inside another lookup's
+  factory (the registry holds its lock while calling one: that deadlocked at boot).
+- Checked: 1P 4.0.1 and 3.0.4, 4P split-screen (59.7 fps), keyless boot, clean exits; 149 -> 86 host threads.
