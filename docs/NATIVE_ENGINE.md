@@ -607,3 +607,18 @@ sessions and suyu's HLE service code.
   logged.
 - Known: at the INT stop the emulated services are torn down while game threads still run; a failed request there makes the
   game stop with a panic (only at shutdown, logged).
+
+## No emulated GPU (2026-11-14)
+
+With the native renderer and the native graphics queue (the Linux default) the emulated GPU (`Tegra::GPU`: its Null
+renderer, rasterizer, command processor, GPU thread) is no longer created; `KARTRECOMP_EMULATED_GPU=1` creates it anyway.
+`System::HasGPU()` guards its users: the GPU channel device (`nvhost_gpu`: no channel; a submission is not executed, but its
+fence advances as the GPU's puller would advance it, so waits on it end), the address-space device (no rasterizer bound), the
+display device, the CPU manager, the memory system's GPU-cache hooks, shader-cache precompile, screenshots, the window title.
+The GPU and device memory maps call into a rasterizer only when one is bound.
+- What the game's GPU driver still asks the driver service for (`KARTRECOMP_NVDRV_TRACE=1`, `<log dir>/nvdrv_trace.txt`): in
+  a race, graphics memory blocks created, allocated and mapped into GPU address space about 25 times a second (`nvmap`,
+  `nvhost_as_gpu`), syncpoint waits, and at boot the channel setup. Video (the title movie) goes through the hardware video
+  decoder device (`nvhost_nvdec`, suyu's Host1x + FFmpeg), which does not need the emulated GPU.
+- Checked: 1P race 4.0.1 and 3.0.4 (60 fps, pictures), 4P split-screen (59.9 fps), baseline log errors. Memory: 20-60 MB less
+  resident in the effects race (noisy between snapshots).

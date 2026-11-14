@@ -878,7 +878,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..c3b69279f9 100644
+index bca83ab630..cd79a29299 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,6 +1,15 @@
@@ -1115,6 +1115,15 @@ index bca83ab630..c3b69279f9 100644
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
+@@ -1227,7 +1403,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+ 
+     SuyuCmd::NativeStatusSnapshot display{};
+     SuyuCmd::TryGetNativeStatusSnapshot(display);
+-    if (display.game_running) {
++    if (display.game_running && system.HasGPU()) {
+         display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
+     }
+     const std::string title = SuyuCmd::FormatNativeTitle(display);
 @@ -1243,7 +1419,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
@@ -24524,7 +24533,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..19681e3a87 100644
+index 03f738eb63..0512b9bd58 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -25423,6 +25432,24 @@ index 03f738eb63..19681e3a87 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
+@@ -2059,7 +2420,7 @@ int main(int argc, char** argv) {
+     }
+ 
+     // Core is loaded, start the GPU (makes the GPU contexts current to this thread)
+-    system.GPU().Start();
++    if (system.HasGPU()) system.GPU().Start();
+     system.GetCpuManager().OnGpuReady();
+ 
+     // A game export is launched over and over by a player, always for the same
+@@ -2075,7 +2436,7 @@ int main(int argc, char** argv) {
+         Settings::values.use_disk_shader_cache.SetValue(false);
+     }
+ 
+-    if (Settings::values.use_disk_shader_cache.GetValue()) {
++    if (Settings::values.use_disk_shader_cache.GetValue() && system.HasGPU()) {
+         // Build the cached shaders on their own thread, as the Qt frontend does from its
+         // emulation thread. The progress callback runs on the shader workers, so it only
+         // records counts; the window belongs to this thread, which keeps it responding and
 @@ -2147,6 +2508,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
@@ -25480,7 +25507,12 @@ index 03f738eb63..19681e3a87 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2605,8 @@ int main(int argc, char** argv) {
+@@ -2204,12 +2601,12 @@ int main(int argc, char** argv) {
+             }
+         }
+ #endif
+-        if (capture_dir.empty() || system.Renderer().IsScreenshotPending() ||
++        if (capture_dir.empty() || !system.HasGPU() || system.Renderer().IsScreenshotPending() ||
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
