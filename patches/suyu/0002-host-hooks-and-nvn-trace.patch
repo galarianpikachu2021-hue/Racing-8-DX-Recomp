@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..1867bd5a48 100644
+index 408daa6839..9eb702101c 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,12 +860,13 @@ index 408daa6839..1867bd5a48 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,17 @@ add_library(core STATIC
+@@ -339,6 +359,18 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
 +    hle/kernel/native_sync.cpp
 +    hle/kernel/native_sync.h
++    hle/kernel/native_audio_service.cpp
 +    hle/kernel/native_fs_backend.cpp
 +    hle/kernel/native_hid_service.cpp
 +    hle/kernel/native_mii.cpp
@@ -878,7 +879,7 @@ index 408daa6839..1867bd5a48 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1082,8 @@ add_library(core STATIC
+@@ -1051,6 +1083,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -887,7 +888,7 @@ index 408daa6839..1867bd5a48 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1259,7 @@ else()
+@@ -1226,7 +1260,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -3576,6 +3577,26 @@ index 0000000000..49a539dcf1
 +void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
 +
 +} // namespace Core::SdkTrace
+diff --git a/src/core/core.cpp b/src/core/core.cpp
+index b15af176fe..29c2b8e43c 100644
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -15,6 +15,7 @@
+ #include "common/string_util.h"
+ #include "core/arm/exclusive_monitor.h"
+ #include "core/core.h"
++#include "core/hle/kernel/native_services.h"
+ #include "core/arm/recomp/arm_recomp.h"
+ 
+ #include "launch_timestamp_cache.h"
+@@ -434,6 +435,7 @@ struct System::Impl {
+         if (gpu_core) {
+             gpu_core->ShutdownThread();
+         }
++        Kernel::NativeServices::Shutdown(kernel); // kart-recomp: the runtime's service objects go first
+         kernel.CloseServices();
+         kernel.ShutdownCores();
+         services.reset();
 diff --git a/src/core/cpu_manager.cpp b/src/core/cpu_manager.cpp
 index 315b273ae8..5179cd2bb9 100644
 --- a/src/core/cpu_manager.cpp
@@ -4409,6 +4430,238 @@ index 6363a9e0ab..b613a6512a 100644
      const u32 core_id = impl->GetCurrentHostThreadID();
      if (core_id >= Core::Hardware::NUM_CPU_CORES) {
          return Core::Hardware::NUM_CPU_CORES - 1;
+diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
+new file mode 100644
+index 0000000000..7774272163
+--- /dev/null
++++ b/src/core/hle/kernel/native_audio_service.cpp
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the audio renderer service ("audren:u") answered by the runtime. The renderer itself - voices, mixes, effects,
++// sinks, the DSP command lists and the output to the host's audio device - is suyu's audio_core library; this replaces the
++// service around it. The renderer's "rendered" event is still an emulated kernel event (audio_core signals it), handed out as a
++// copy handle.
++#include <memory>
++#include <mutex>
++#include <vector>
++
++#include "audio_core/audio_render_manager.h"
++#include "audio_core/common/audio_renderer_parameter.h"
++#include "audio_core/renderer/audio_device.h"
++#include "audio_core/renderer/audio_renderer.h"
++#include "audio_core/audio_core.h"
++#include "audio_core/sink/sink.h"
++#include "common/string_util.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_event.h"
++#include "core/hle/kernel/k_handle_table.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_readable_event.h"
++#include "core/hle/kernel/k_transfer_memory.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/audio/errors.h"
++#include "core/hle/service/kernel_helpers.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using KartRuntime::Context;
++using KartRuntime::Service;
++using AudioCore::Renderer::AudioDevice;
++
++void PushKernelObject(KernelCore& kernel, Context& c, KAutoObject* object) {
++    Handle h{};
++    if (!object || GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, object).IsError()) return c.SetResult(0xD201);
++    c.PushCopyHandle(h);
++}
++
++/// One renderer session: audio_core's renderer, its event, the game's process held open while it runs.
++struct RendererSession {
++    RendererSession(Core::System& system, AudioCore::Renderer::Manager& manager)
++        : context{system, "native IAudioRenderer"}, event{context.CreateEvent("native IAudioRendererEvent")},
++          renderer{std::make_unique<AudioCore::Renderer::Renderer>(system, manager, event)} {}
++    ~RendererSession() {
++        if (renderer) renderer->Finalize();
++        renderer.reset();
++        context.CloseEvent(event);
++        if (process && kernel) process->Close(*kernel);
++    }
++    ::Service::KernelHelpers::ServiceContext context;
++    Kernel::KEvent* event;
++    std::unique_ptr<AudioCore::Renderer::Renderer> renderer;
++    Kernel::KProcess* process = nullptr;
++    KernelCore* kernel = nullptr;
++};
++
++std::mutex g_sessions_lock;
++std::vector<std::weak_ptr<RendererSession>> g_sessions;
++
++std::shared_ptr<Service> Renderer(KernelCore& kernel, std::shared_ptr<RendererSession> r) {
++    {
++        std::scoped_lock lk{g_sessions_lock};
++        g_sessions.push_back(r);
++    }
++    // A wrapper: after the engine stopped the renderer (shutdown), late requests answer "invalid state" instead of touching it.
++    struct Guarded : Service {
++        explicit Guarded(std::shared_ptr<RendererSession> rs) : Service{"IAudioRenderer"}, session{std::move(rs)} {}
++        void When(uint32_t cmd, Handler h) {
++            On(cmd, [rs = session, h = std::move(h)](Context& c) {
++                if (!rs->renderer) return c.SetResult(0xFA01);
++                h(c);
++            });
++        }
++        std::shared_ptr<RendererSession> session;
++    };
++    auto s = std::make_shared<Guarded>(r);
++    s->When(0, [r](Context& c) { c.Push<u32>(r->renderer->GetSystem().GetSampleRate()); });
++    s->When(1, [r](Context& c) { c.Push<u32>(r->renderer->GetSystem().GetSampleCount()); });
++    s->When(2, [r](Context& c) { c.Push<u32>(r->renderer->GetSystem().GetMixBufferCount()); });
++    s->When(3, [r](Context& c) { c.Push<u32>(!r->renderer->GetSystem().IsActive()); });
++    auto update = [r](Context& c) { // RequestUpdate(Auto): input -> output, performance
++        const auto input = c.ReadBuffer(0);
++        std::vector<u8> out(c.WriteBufferSize(0)), perf(c.WriteBufferSize(1));
++        const Result res = r->renderer->RequestUpdate(input, perf, out);
++        if (!out.empty()) c.WriteBuffer(out.data(), out.size(), 0);
++        if (!perf.empty()) c.WriteBuffer(perf.data(), perf.size(), 1);
++        if (res.IsError()) c.SetResult(res.raw);
++    };
++    s->When(4, update);
++    s->When(10, update);
++    s->When(5, [r](Context&) { r->renderer->Start(); });
++    s->When(6, [r](Context&) { r->renderer->Stop(); });
++    s->When(7, [&kernel, r](Context& c) { // QuerySystemEvent
++        if (r->renderer->GetSystem().GetExecutionMode() == AudioCore::ExecutionMode::Manual)
++            return c.SetResult(::Service::Audio::ResultNotSupported.raw);
++        PushKernelObject(kernel, c, &r->event->GetReadableEvent());
++    });
++    s->When(8, [r](Context& c) { r->renderer->GetSystem().SetRenderingTimeLimit(c.Pop<u32>()); });
++    s->When(9, [r](Context& c) { c.Push<u32>(r->renderer->GetSystem().GetRenderingTimeLimit()); });
++    s->When(12, [r](Context& c) { r->renderer->GetSystem().SetVoiceDropParameter(c.Pop<f32>()); });
++    s->When(13, [r](Context& c) { c.Push<f32>(r->renderer->GetSystem().GetVoiceDropParameter()); });
++    return s;
++}
++
++std::shared_ptr<Service> Device(KernelCore& kernel, u64 aruid, u32 revision) {
++    struct State {
++        State(Core::System& system, u64 aruid, u32 revision)
++            : context{system, "native IAudioDevice"}, impl{system, aruid, revision}, event{context.CreateEvent("native IAudioDeviceEvent")} {}
++        ~State() { context.CloseEvent(event); }
++        ::Service::KernelHelpers::ServiceContext context;
++        AudioDevice impl;
++        Kernel::KEvent* event;
++    };
++    Core::System& system = kernel.System();
++    auto st = std::make_shared<State>(system, aruid, revision);
++    st->event->Signal(kernel);
++    auto s = std::make_shared<Service>("IAudioDevice");
++    auto list = [st](Context& c) { // ListAudioDeviceName(Auto) -> names, count
++        std::vector<AudioDevice::AudioDeviceName> names(c.WriteBufferSize(0) / sizeof(AudioDevice::AudioDeviceName), AudioDevice::AudioDeviceName{""});
++        const u32 n = st->impl.ListAudioDeviceName(names);
++        if (n) c.WriteBuffer(names.data(), n * sizeof(AudioDevice::AudioDeviceName), 0);
++        c.Push<s32>(static_cast<s32>(n));
++    };
++    auto name_of = [](Context& c) {
++        const auto raw = c.ReadBuffer(0);
++        return std::string(reinterpret_cast<const char*>(raw.data()), strnlen(reinterpret_cast<const char*>(raw.data()), raw.size()));
++    };
++    auto set_volume = [st, name_of](Context& c) { // SetAudioDeviceOutputVolume(Auto)(name, volume)
++        const auto volume = c.Pop<f32>();
++        if (c.request.a.empty() && c.request.x.empty()) return c.SetResult(::Service::Audio::ResultInsufficientBuffer.raw);
++        if (name_of(c) == "AudioTvOutput") st->impl.SetDeviceVolumes(volume);
++    };
++    auto get_volume = [st, name_of](Context& c) {
++        const std::string name = name_of(c);
++        c.Push<f32>(name == "AudioTvOutput" ? st->impl.GetDeviceVolume(name) : 1.0f);
++    };
++    auto active_name = [](Context& c) {
++        const AudioDevice::AudioDeviceName name{"AudioTvOutput"};
++        if (c.WriteBufferSize(0) < sizeof(name)) return c.SetResult(::Service::Audio::ResultInsufficientBuffer.raw);
++        c.WriteBuffer(&name, sizeof(name), 0);
++    };
++    auto event = [&kernel, st](Context& c) { PushKernelObject(kernel, c, &st->event->GetReadableEvent()); };
++    s->On(0, list);
++    s->On(1, set_volume);
++    s->On(2, get_volume);
++    s->On(3, active_name);
++    s->On(4, [&kernel, st, event](Context& c) {
++        st->event->Signal(kernel);
++        event(c);
++    });
++    s->On(5, [&system](Context& c) { c.Push<u32>(system.AudioCore().GetOutputSink().GetSystemChannels()); });
++    s->On(6, list);
++    s->On(7, set_volume);
++    s->On(8, get_volume);
++    s->On(10, active_name);
++    s->On(11, event);
++    s->On(12, event);
++    s->On(13, active_name);
++    return s;
++}
++
++} // namespace
++
++void StopAudioRenderers() {
++    std::vector<std::shared_ptr<RendererSession>> live;
++    {
++        std::scoped_lock lk{g_sessions_lock};
++        for (auto& w : g_sessions)
++            if (auto s = w.lock()) live.push_back(std::move(s));
++        g_sessions.clear();
++    }
++    for (auto& s : live) {
++        if (s->renderer) {
++            s->renderer->Finalize();
++            s->renderer.reset();
++        }
++    }
++}
++
++std::shared_ptr<Service> MakeAudioRendererService(KernelCore& kernel) {
++    Core::System& system = kernel.System();
++    static AudioCore::Renderer::Manager manager{system};
++    auto s = std::make_shared<Service>("audren:u");
++    s->On(0, [&kernel, &system](Context& c) { // OpenAudioRenderer(params, transfer memory size, aruid; tmem, process)
++        const auto params = c.Pop<AudioCore::AudioRendererParameterInternal>();
++        const auto tmem_size = c.Pop<u64>();
++        c.Pop<u64>();
++        const u64 aruid = c.Pid();
++        if (c.request.copy_handles.size() < 2) return c.SetResult(0xE401);
++        auto& table = GetCurrentProcess(kernel).GetHandleTable();
++        KScopedAutoObject tmem = table.GetObject<KTransferMemory>(kernel, c.request.copy_handles[0]);
++        KScopedAutoObject process = table.GetObject<KProcess>(kernel, c.request.copy_handles[1]);
++        if (tmem.IsNull() || process.IsNull()) return c.SetResult(0xE401);
++        if (manager.GetSessionCount() + 1 > AudioCore::MaxRendererSessions) return c.SetResult(::Service::Audio::ResultOutOfSessions.raw);
++        const s32 session = manager.GetSessionId();
++        if (session == -1) return c.SetResult(::Service::Audio::ResultOutOfSessions.raw);
++        auto r = std::make_shared<RendererSession>(system, manager);
++        r->process = process.GetPointerUnsafe();
++        r->process->Open(kernel);
++        r->kernel = &kernel;
++        if (const Result res = r->renderer->Initialize(params, tmem.GetPointerUnsafe(), tmem_size, r->process, aruid, session); res.IsError())
++            return c.SetResult(res.raw);
++        c.PushInterface(Renderer(kernel, r));
++    });
++    s->On(1, [](Context& c) { // GetWorkBufferSize(params)
++        const auto params = c.Pop<AudioCore::AudioRendererParameterInternal>();
++        u64 size = 0;
++        if (const Result r = manager.GetWorkBufferSize(params, size); r.IsError()) return c.SetResult(r.raw);
++        c.Push(size);
++    });
++    s->On(2, [&kernel](Context& c) { // GetAudioDeviceService(aruid)
++        c.Pop<u64>();
++        c.PushInterface(Device(kernel, c.Pid(), 0x31564552)); // "REV1"
++    });
++    s->On(4, [&kernel](Context& c) { // GetAudioDeviceServiceWithRevisionInfo(revision, aruid)
++        const auto revision = c.Pop<u32>();
++        c.Pop<u64>();
++        c.PushInterface(Device(kernel, c.Pid(), revision));
++    });
++    return s;
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_fs_backend.cpp b/src/core/hle/kernel/native_fs_backend.cpp
 new file mode 100644
 index 0000000000..ac7edb8a03
@@ -5021,10 +5274,10 @@ index 0000000000..4a85402ceb
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..0c1ab10133
+index 0000000000..c387bd1749
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,258 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5269,6 +5522,14 @@ index 0000000000..0c1ab10133
 +    return Runtime(kernel).CancelWait(thread->GetId(), false);
 +}
 +
++void Shutdown(KernelCore& kernel) {
++    if (!Enabled()) return;
++    // Handles stay valid (game threads may still be finishing a request); what must stop before the engine's own services
++    // go is stopped here.
++    StopAudioRenderers();
++    (void)kernel;
++}
++
 +void OnTerminateRequested(KernelCore& kernel, KThread* thread) {
 +    if (!Enabled() || !thread) return;
 +    Runtime(kernel).Terminate(thread->GetId());
@@ -5277,10 +5538,10 @@ index 0000000000..0c1ab10133
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..3fef566612
+index 0000000000..9324c4279a
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -5322,16 +5583,18 @@ index 0000000000..3fef566612
 +/// True when it ended a runtime wait; otherwise the caller asks the emulated kernel (which keeps the request on the thread).
 +bool CancelSynchronization(KernelCore& kernel, KThread* thread);
 +void OnTerminateRequested(KernelCore& kernel, KThread* thread);
++/// The game process is stopping: releases the runtime's objects before the engine shuts its services down.
++void Shutdown(KernelCore& kernel);
 +
 +KartRuntime::NativeKernel& Runtime(KernelCore& kernel);
 +
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..17968c7428
+index 0000000000..98c6e19f7f
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,370 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -5690,6 +5953,7 @@ index 0000000000..17968c7428
 +         }},
 +        {"pl:u", [&] { return MakeSharedFont(kernel); }},
 +        {"hid", [&] { return MakeHidService(kernel); }},
++        {"audren:u", [&] { return MakeAudioRendererService(kernel); }},
 +        {"mii:e", [] { return MakeMiiService("mii:e", true); }},
 +        {"mii:u", [] { return MakeMiiService("mii:u", false); }},
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
@@ -5703,10 +5967,10 @@ index 0000000000..17968c7428
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..a4186f6a1a
+index 0000000000..0c3245c001
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,49 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -5742,6 +6006,11 @@ index 0000000000..a4186f6a1a
 +
 +/// The controller service around hid_core's resource manager (native_hid_service.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeHidService(KernelCore& kernel);
++
++/// The audio renderer service around audio_core (native_audio_service.cpp).
++std::shared_ptr<KartRuntime::Service> MakeAudioRendererService(KernelCore& kernel);
++/// Stops every renderer the runtime started (engine shutdown, before audio_core goes).
++void StopAudioRenderers();
 +
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
@@ -11207,10 +11476,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..a39c50ad1f
+index 0000000000..6d7d36b493
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,529 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -11449,6 +11718,16 @@ index 0000000000..a39c50ad1f
 +        dropped = std::move(table[index]);
 +        free_slots.insert(index);
 +        return true;
++    }
++    /// The process is gone: every object behind a handle is released (services finish their work, e.g. the audio renderer).
++    void CloseAll() {
++        std::vector<std::shared_ptr<KernelObject>> dropped;
++        {
++            std::scoped_lock lk{table_mutex};
++            dropped.swap(table);
++            free_slots.clear();
++        }
++        dropped.clear();
 +    }
 +    size_t HandleCount() {
 +        std::scoped_lock lk{table_mutex};

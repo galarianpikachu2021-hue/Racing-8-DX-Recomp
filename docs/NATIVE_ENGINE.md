@@ -594,6 +594,12 @@ sessions and suyu's HLE service code.
   update events), about 35 commands. The "applet resource user id" argument is the sender's process id from the kernel, as the
   emulated service read it (taking the message's value made the shared-memory lookup fail). Checked: 1P and 4P races (all
   four players racing, 59.9 fps), back to the 12 baseline log errors and no shutdown panic.
+- **Audio** (`audren:u`, `core/hle/kernel/native_audio_service.cpp`): the service around audio_core (renderer manager,
+  renderer sessions with the game's transfer memory and process taken from its own handle table, audio device names and
+  volume); RequestUpdate copies the game's input, output and performance buffers. The renderer's "rendered" event is still an
+  emulated kernel event signalled by audio_core. At engine shutdown the runtime stops its renderers before audio_core goes
+  (`NativeServices::Shutdown`, from `ShutdownMainProcess`), and late requests answer "invalid state". Checked: 1P race, 7,850
+  audio updates in 50 s all successful, baseline log errors, clean exit. **Not heard yet** (needs the user's ears).
 - Found on the way: reply values must sit at their natural alignment (a bool then a u32 puts the u32 at offset 4); packed,
   the font count read as 0x601 and the game waited forever.
 - Diagnostics: `KARTRECOMP_NATIVE_SERVICES_TRACE=1` (first call of each command) / `=2` (repeats too; the engine's logger folds
