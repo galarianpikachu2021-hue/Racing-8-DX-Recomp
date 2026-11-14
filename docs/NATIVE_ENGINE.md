@@ -537,3 +537,27 @@ On by default on Linux (`KARTRECOMP_NATIVE_FS=0` turns it off; elsewhere opt-in 
   rest are the system archives: fonts and Mii data). Save data, add-on content and system data keep the SDK path.
 - Checked: 1P races on 4.0.1 and 3.0.4 (60 fps, same pictures), the keyless "decrypted files" boot. Not checked: a run with
   mods (they come through the same RomFS image, so they should apply the same way).
+
+## Native services (2026-11-14)
+
+On by default on Linux (`KARTRECOMP_NATIVE_SERVICES=0` turns it off, or a comma list of service names picks some; elsewhere
+opt-in). The services a game opens through the service manager are answered by the runtime instead of the emulated kernel's
+sessions and suyu's HLE service code.
+- `kart_runtime/hipc.h`: the service message format (HIPC transport + CMIF commands: handle descriptor and process id, X/A/B/W/C
+  buffer descriptors, the 16-byte aligned raw data with "SFCI"/"SFCO", domain headers with object ids, control and close
+  messages), read and written as the SDK lays them out.
+- `kart_runtime/native_kernel.h`: handles (bit 30 set, so they cannot collide with the emulated kernel's), sessions and domains
+  (ConvertToDomain, Clone, QueryPointerBufferSize, object close), services as command tables answered on the calling thread,
+  events and WaitSynchronization on them (wait any, timeout, CancelSynchronization, termination). Test
+  `tests/test_native_kernel.cpp` builds requests as the SDK does and reads replies as the SDK does; clean under ASan/UBSan/TSan.
+- Adapter `core/hle/kernel/native_services.{h,cpp}`: `sm`'s GetService hands out a runtime session for a runtime service; the
+  system calls SendSyncRequest, CloseHandle, ResetSignal, WaitSynchronization and CancelSynchronization take runtime handles
+  first; thread termination ends runtime waits. `native_services_list.cpp` builds each service with the engine's settings
+  (language, region, the user profiles - their ids name the save data -, the DLC found among the player's files).
+- Services (`kart_runtime/services/`): clock (`time:u/a/s`: host wall clock, host time zone, steady clock since start),
+  `set` (language list and code, region), `apm` (performance sessions), `pctl`, `pctl:a/r/s` (no restrictions), `prepo:*` (play
+  reports accepted and dropped), `friend:*`, `lm` (game log dropped), `mm:u`, `acc:u0/u1` (profiles, account manager),
+  `aoc:u` (add-on content list and its event).
+- Found on the way: a close message must not remove the client's handle (the SDK closes it afterwards and stops the game when
+  that fails).
+- Checked: 1P race on 4.0.1 with 13 services on the runtime, 60 fps, the same 12 log errors as before.

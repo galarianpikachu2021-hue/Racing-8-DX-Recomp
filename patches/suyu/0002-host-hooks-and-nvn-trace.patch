@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..166a9f4c92 100644
+index 408daa6839..a7538c977a 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,18 +860,22 @@ index 408daa6839..166a9f4c92 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,10 @@ add_library(core STATIC
+@@ -339,6 +359,14 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
 +    hle/kernel/native_sync.cpp
 +    hle/kernel/native_sync.h
++    hle/kernel/native_services.cpp
++    hle/kernel/native_services.h
++    hle/kernel/native_services_list.cpp
++    hle/kernel/native_services_list.h
 +    hle/kernel/native_threads.cpp
 +    hle/kernel/native_threads.h
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1075,8 @@ add_library(core STATIC
+@@ -1051,6 +1079,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -880,7 +884,7 @@ index 408daa6839..166a9f4c92 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1252,7 @@ else()
+@@ -1226,7 +1256,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -4259,19 +4263,20 @@ index c1b0dcd033..06e7f29e62 100644
      ASSERT(CanSchedule(kernel));
      ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
-index b0f33b44c7..b3f379b3c9 100644
+index b0f33b44c7..d21d483cda 100644
 --- a/src/core/hle/kernel/k_thread.cpp
 +++ b/src/core/hle/kernel/k_thread.cpp
-@@ -33,6 +33,8 @@
+@@ -33,6 +33,9 @@
  #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
  #include "core/hle/kernel/k_system_control.h"
  #include "core/hle/kernel/k_thread.h"
 +#include "core/hle/kernel/native_sync.h"
++#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_threads.h"
  #include "core/hle/kernel/k_thread_queue.h"
  #include "core/hle/kernel/k_worker_task_manager.h"
  #include "core/hle/kernel/kernel.h"
-@@ -270,6 +272,13 @@ namespace Kernel {
+@@ -270,6 +273,13 @@ namespace Kernel {
          // Initialize the thread.
          R_TRY(thread->Initialize(kernel, func, arg, user_stack_top, prio, core, owner, type));
  
@@ -4285,7 +4290,7 @@ index b0f33b44c7..b3f379b3c9 100644
          // Initialize emulation parameters.
          thread->m_host_context = std::make_shared<Common::Fiber>(std::move(init_func));
  
-@@ -307,7 +316,11 @@ namespace Kernel {
+@@ -307,7 +317,11 @@ namespace Kernel {
          system.Kernel().GlobalSchedulerContext().AddThread(thread);
          std::function<void()> func2{[&system, func_{std::move(func)}] {
              // Similar to UserModeThreadStarter.
@@ -4298,16 +4303,17 @@ index b0f33b44c7..b3f379b3c9 100644
  
              // Run the guest function.
              func_();
-@@ -1285,6 +1298,8 @@ namespace Kernel {
+@@ -1285,6 +1299,9 @@ namespace Kernel {
              if (this->GetState() == ThreadState::Waiting) {
                  m_wait_queue->CancelWait(kernel, this, ResultTerminationRequested, true);
              }
 +            // kart-recomp: a wait in the native synchronisation is not a kernel wait; end it too.
 +            NativeSync::OnTerminateRequested(kernel, this);
++            NativeServices::OnTerminateRequested(kernel, this);
          }
  
          return this->GetState();
-@@ -1318,7 +1333,7 @@ namespace Kernel {
+@@ -1318,7 +1335,7 @@ namespace Kernel {
  
      void KThread::RequestDummyThreadWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -4316,7 +4322,7 @@ index b0f33b44c7..b3f379b3c9 100644
  
          // We will block when the scheduler lock is released.
          std::scoped_lock lock{m_dummy_thread_mutex};
-@@ -1326,6 +1341,26 @@ namespace Kernel {
+@@ -1326,6 +1343,26 @@ namespace Kernel {
      }
  
      void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -4343,7 +4349,7 @@ index b0f33b44c7..b3f379b3c9 100644
          if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
              // Occurs in single core mode.
              return;
-@@ -1338,7 +1373,7 @@ namespace Kernel {
+@@ -1338,7 +1375,7 @@ namespace Kernel {
  
      void KThread::DummyThreadEndWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -4400,6 +4406,423 @@ index 6363a9e0ab..b613a6512a 100644
      const u32 core_id = impl->GetCurrentHostThreadID();
      if (core_id >= Core::Hardware::NUM_CPU_CORES) {
          return Core::Hardware::NUM_CPU_CORES - 1;
+diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
+new file mode 100644
+index 0000000000..c63ed2d043
+--- /dev/null
++++ b/src/core/hle/kernel/native_services.cpp
+@@ -0,0 +1,218 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_services.h"
++
++#include <atomic>
++#include <cstdlib>
++#include <cstring>
++#include <functional>
++#include <map>
++#include <mutex>
++#include <set>
++#include <sstream>
++
++#include "common/logging/log.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_threads.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/kernel/svc_results.h"
++#include "core/memory.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using KartRuntime::NativeKernel;
++
++std::atomic<KernelCore*> g_kernel{nullptr};
++thread_local bool t_host_wait = false;
++
++Result ToResult(u32 r) {
++    return Result{r};
++}
++
++/// The services asked for: KARTRECOMP_NATIVE_SERVICES = "0" (none), "all" (default on Linux) or a comma list of names.
++bool Wanted(const std::string& name) {
++    static const std::set<std::string> list = [] {
++        std::set<std::string> out;
++        const char* v = std::getenv("KARTRECOMP_NATIVE_SERVICES");
++#ifdef __linux__
++        if (!v) v = "all";
++#endif
++        if (!v || std::strcmp(v, "0") == 0) return out;
++        std::istringstream in{v};
++        for (std::string item; std::getline(in, item, ',');)
++            if (!item.empty()) out.insert(item);
++        return out;
++    }();
++    return list.contains("all") || list.contains(name);
++}
++
++} // namespace
++
++NativeKernel& Runtime(KernelCore& kernel) {
++    static NativeKernel runtime{{
++        [](u64 addr, void* out, size_t n) {
++            KernelCore* k = g_kernel.load(std::memory_order_acquire);
++            if (!k) return false;
++            auto& mem = GetCurrentMemory(*k);
++            if (!mem.IsValidVirtualAddressRange(addr, n)) return false;
++            mem.ReadBlock(addr, out, n);
++            return true;
++        },
++        [](u64 addr, const void* in, size_t n) {
++            KernelCore* k = g_kernel.load(std::memory_order_acquire);
++            if (!k) return false;
++            auto& mem = GetCurrentMemory(*k);
++            if (!mem.IsValidVirtualAddressRange(addr, n)) return false;
++            mem.WriteBlock(addr, in, n);
++            return true;
++        },
++        [] { t_host_wait = NativeThreads::BeginHostWait(); },
++        [] {
++            if (t_host_wait) NativeThreads::EndHostWait();
++            t_host_wait = false;
++        },
++    }};
++    static std::once_flag once;
++    std::call_once(once, [&] {
++        g_kernel.store(&kernel, std::memory_order_release);
++        KartRuntime::Service::on_unknown = [](const std::string& service, u32 cmd) {
++            static std::mutex m;
++            static std::set<std::pair<std::string, u32>> seen;
++            std::scoped_lock lk{m};
++            if (seen.emplace(service, cmd).second)
++                LOG_WARNING(Service, "native services: {} command {} is not implemented (answered 'unknown command')", service, cmd);
++        };
++        if (std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")) {
++            KartRuntime::Service::on_call = [](const std::string& service, u32 cmd) {
++                static std::mutex m;
++                static std::map<std::pair<std::string, u32>, u64> counts;
++                std::scoped_lock lk{m};
++                if (counts[{service, cmd}]++ == 0) LOG_INFO(Service, "native services: first {} command {}", service, cmd);
++            };
++        }
++    });
++    return runtime;
++}
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_SERVICES");
++#ifdef __linux__
++        return !(v && std::strcmp(v, "0") == 0);
++#else
++        return v && std::strcmp(v, "0") != 0;
++#endif
++    }();
++    return on;
++}
++
++bool IsNative(Svc::Handle handle) {
++    return NativeKernel::IsNative(handle);
++}
++
++std::optional<u32> OpenService(KernelCore& kernel, const std::string& name) {
++    if (!Enabled() || !Wanted(name)) return std::nullopt;
++    auto& runtime = Runtime(kernel);
++    std::shared_ptr<KartRuntime::Service> service = MakeService(runtime, kernel, name);
++    if (!service) return std::nullopt;
++    static std::mutex m;
++    static std::set<std::string> logged;
++    {
++        std::scoped_lock lk{m};
++        if (logged.insert(name).second) LOG_INFO(Service, "native services: {} is answered by the runtime", name);
++    }
++    return runtime.OpenSession(std::move(service));
++}
++
++Result SendSyncRequest(KernelCore& kernel, Svc::Handle handle) {
++    auto& runtime = Runtime(kernel);
++    KThread& thread = GetCurrentThread(kernel);
++    auto& memory = GetCurrentMemory(kernel);
++    const u64 tls = GetInteger(thread.GetTlsAddress());
++    u8 msg[KartRuntime::Hipc::MessageSize];
++    memory.ReadBlock(tls, msg, sizeof(msg));
++    static const bool dump = std::getenv("KARTRECOMP_NATIVE_SERVICES_DUMP") != nullptr;
++    auto words = [&] {
++        std::string out;
++        for (int i = 0; i < 24; ++i) out += fmt::format("{:08X} ", reinterpret_cast<const u32*>(msg)[i]);
++        return out;
++    };
++    if (dump) LOG_INFO(Service, "native services: request on {:08X}: {}", handle, words());
++    const u32 r = runtime.SendSyncRequest(handle, msg);
++    if (dump) LOG_INFO(Service, "native services: reply {:X}: {}", r, words());
++    if (r != 0) LOG_ERROR(Service, "native services: request on handle {:08X} failed with {:X}", handle, r);
++    if (r == 0) memory.WriteBlock(tls, msg, sizeof(msg));
++    return ToResult(r);
++}
++
++Result CloseHandle(KernelCore& kernel, Svc::Handle handle) {
++    return Runtime(kernel).Close(handle) ? ResultSuccess : ResultInvalidHandle;
++}
++
++Result ResetSignal(KernelCore& kernel, Svc::Handle handle) {
++    auto event = Runtime(kernel).GetAs<KartRuntime::Event>(handle);
++    if (!event) return ResultInvalidHandle;
++    if (!event->IsSignaled()) return ResultInvalidState;
++    event->Clear();
++    return ResultSuccess;
++}
++
++Result WaitSynchronization(KernelCore& kernel, s32* out_index, const Svc::Handle* handles, s32 count, s64 timeout_ns, bool* handled) {
++    *handled = false;
++    bool any = false, all = count > 0;
++    for (s32 i = 0; i < count; ++i) {
++        const bool n = IsNative(handles[i]);
++        any |= n;
++        all &= n;
++    }
++    if (!any) return ResultSuccess;
++    *handled = true;
++    auto& runtime = Runtime(kernel);
++    if (!all) {
++        // Native and emulated objects in one wait: not used by the game so far (every object it waits on together comes from
++        // one side). Say so once, and wait on the native ones only.
++        static std::atomic<bool> warned{false};
++        if (!warned.exchange(true)) LOG_ERROR(Kernel, "native services: a wait mixes runtime and emulated handles; waiting on the runtime ones");
++    }
++    std::vector<std::shared_ptr<KartRuntime::Waitable>> objs;
++    std::vector<s32> index_of;
++    for (s32 i = 0; i < count; ++i) {
++        if (!IsNative(handles[i])) continue;
++        auto w = runtime.GetAs<KartRuntime::Waitable>(handles[i]);
++        if (!w) return ResultInvalidHandle;
++        objs.push_back(std::move(w));
++        index_of.push_back(i);
++    }
++    // A CancelSynchronization that came while the thread was not waiting is kept by the thread (as the kernel does): it ends
++    // this wait at once, whichever side the objects are on.
++    KThread* self = GetCurrentThreadPointer(kernel);
++    if (self->IsWaitCancelled()) {
++        self->ClearWaitCancelled();
++        return ResultCancelled;
++    }
++    s32 index = -1;
++    const u32 r = runtime.WaitAny(GetCurrentThreadPointer(kernel)->GetId(), objs, timeout_ns, &index);
++    if (r == KartRuntime::KernelResult::Success) *out_index = index_of[index];
++    if (r == KartRuntime::KernelResult::Cancelled) {
++        // Termination or CancelSynchronization: the kernel answers the first with "termination requested".
++        if (GetCurrentThreadPointer(kernel)->IsTerminationRequested()) return ResultTerminationRequested;
++        return ResultCancelled;
++    }
++    return ToResult(r);
++}
++
++bool CancelSynchronization(KernelCore& kernel, KThread* thread) {
++    if (!Enabled() || !thread) return false;
++    // Ends a native wait in progress; otherwise the emulated kernel's WaitCancel keeps the request on the thread.
++    return Runtime(kernel).CancelWait(thread->GetId(), false);
++}
++
++void OnTerminateRequested(KernelCore& kernel, KThread* thread) {
++    if (!Enabled() || !thread) return;
++    Runtime(kernel).Terminate(thread->GetId());
++}
++
++} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
+new file mode 100644
+index 0000000000..e3c9e31e9f
+--- /dev/null
++++ b/src/core/hle/kernel/native_services.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
++// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
++// service manager hands the game a runtime session handle for them, and SendSyncRequest / CloseHandle / WaitSynchronization /
++// ResetSignal / CancelSynchronization on runtime handles never reach the emulated kernel. Other handles go on as before.
++#pragma once
++
++#include <optional>
++#include <string>
++
++#include "common/common_types.h"
++#include "core/hle/kernel/svc_types.h"
++#include "core/hle/result.h"
++
++namespace KartRuntime {
++class NativeKernel;
++}
++
++namespace Kernel {
++class KernelCore;
++class KThread;
++}
++
++namespace Kernel::NativeServices {
++
++bool Enabled();
++bool IsNative(Svc::Handle handle);
++
++/// The service manager's GetService: a new runtime session handle when `name` is served by the runtime.
++std::optional<u32> OpenService(KernelCore& kernel, const std::string& name);
++
++Result SendSyncRequest(KernelCore& kernel, Svc::Handle handle);
++Result CloseHandle(KernelCore& kernel, Svc::Handle handle);
++Result ResetSignal(KernelCore& kernel, Svc::Handle handle);
++/// WaitSynchronization when any of the handles is a runtime handle (`*handled` false otherwise: the caller goes on).
++Result WaitSynchronization(KernelCore& kernel, s32* out_index, const Svc::Handle* handles, s32 count, s64 timeout_ns, bool* handled);
++/// True when it ended a runtime wait; otherwise the caller asks the emulated kernel (which keeps the request on the thread).
++bool CancelSynchronization(KernelCore& kernel, KThread* thread);
++void OnTerminateRequested(KernelCore& kernel, KThread* thread);
++
++KartRuntime::NativeKernel& Runtime(KernelCore& kernel);
++
++} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
+new file mode 100644
+index 0000000000..3e6ed007c8
+--- /dev/null
++++ b/src/core/hle/kernel/native_services_list.cpp
+@@ -0,0 +1,110 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_services_list.h"
++
++#include <algorithm>
++#include <functional>
++#include <map>
++
++#include "common/settings.h"
++#include "core/core.h"
++#include "core/file_sys/common_funcs.h"
++#include "core/file_sys/content_archive.h"
++#include "core/file_sys/control_metadata.h"
++#include "core/file_sys/patch_manager.h"
++#include "core/file_sys/registered_cache.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/service/acc/profile_manager.h"
++#include "core/loader/loader.h"
++#include "kart_runtime/native_kernel.h"
++#include "kart_runtime/services/account.h"
++#include "kart_runtime/services/system.h"
++#include "kart_runtime/services/time.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace KartRuntime::Services;
++
++SystemConfig MakeSystemConfig() {
++    SystemConfig cfg;
++    const auto lang = static_cast<size_t>(Settings::values.language_index.GetValue());
++    if (lang < LanguageCodes().size()) cfg.language = LanguageCodes()[lang];
++    cfg.region = static_cast<int>(Settings::values.region_index.GetValue());
++    cfg.docked = Settings::IsDockedMode();
++    return cfg;
++}
++
++AccountConfig MakeAccountConfig(Core::System& system) {
++    AccountConfig cfg;
++    const auto& pm = system.GetProfileManager();
++    const auto last = pm.GetLastOpenedUser();
++    for (size_t i = 0; i < pm.GetUserCount(); ++i) {
++        Service::Account::ProfileBase base{};
++        if (!pm.GetProfileBase(i, base)) continue;
++        UserProfile u;
++        std::memcpy(u.uuid.data(), &base.user_uuid, 16);
++        u.timestamp = base.timestamp;
++        const char* n = reinterpret_cast<const char*>(base.username.data());
++        u.name.assign(n, strnlen(n, base.username.size()));
++        if (base.user_uuid == last) cfg.users.insert(cfg.users.begin(), u); // the playing user first
++        else cfg.users.push_back(u);
++    }
++    cfg.account_id = last.Hash();
++    return cfg;
++}
++
++/// The DLC among the player's files (the same list the emulated "aoc:u" builds).
++AddOnConfig MakeAddOnConfig(Core::System& system) {
++    AddOnConfig cfg;
++    const u64 program = system.GetApplicationProcessProgramID();
++    const u64 base = FileSys::GetBaseTitleID(program);
++    const auto& rcu = system.GetContentProvider();
++    const auto& disabled = Settings::values.disabled_addons[base];
++    if (std::find(disabled.begin(), disabled.end(), "DLC") == disabled.end()) {
++        for (const auto& e : rcu.ListEntriesFilter(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data)) {
++            if (FileSys::GetBaseTitleID(e.title_id) != base) continue;
++            const auto nca = rcu.GetEntry(e.title_id, FileSys::ContentRecordType::Data);
++            if (!nca || nca->GetStatus() != Loader::ResultStatus::Success) continue;
++            cfg.contents.push_back(static_cast<u32>(FileSys::GetAOCID(e.title_id)));
++        }
++    }
++    const FileSys::PatchManager pm{program, system.GetFileSystemController(), system.GetContentProvider()};
++    const auto control = pm.GetControlMetadata();
++    cfg.base_id = control.first ? control.first->GetDLCBaseTitleId() : FileSys::GetAOCBaseTitleID(program);
++    return cfg;
++}
++
++} // namespace
++
++std::shared_ptr<KartRuntime::Service> MakeService(KartRuntime::NativeKernel& runtime, KernelCore& kernel, const std::string& name) {
++    static Time time;
++    Core::System& system = kernel.System();
++    using Factory = std::function<std::shared_ptr<KartRuntime::Service>()>;
++    const std::map<std::string, Factory> factories{
++        {"time:u", [] { return time.Static("time:u"); }},
++        {"time:a", [] { return time.Static("time:a"); }},
++        {"time:s", [] { return time.Static("time:s"); }},
++        {"set", [] { return MakeSettings(MakeSystemConfig()); }},
++        {"apm", [] { return MakeApm("apm"); }},
++        {"apm:am", [] { return MakeApm("apm:am"); }},
++        {"pctl", [] { return MakeParentalControl("pctl"); }},
++        {"pctl:a", [] { return MakeParentalControl("pctl:a"); }},
++        {"pctl:r", [] { return MakeParentalControl("pctl:r"); }},
++        {"pctl:s", [] { return MakeParentalControl("pctl:s"); }},
++        {"prepo:u", [] { return MakePlayReport("prepo:u"); }},
++        {"prepo:a", [] { return MakePlayReport("prepo:a"); }},
++        {"prepo:a2", [] { return MakePlayReport("prepo:a2"); }},
++        {"prepo:s", [] { return MakePlayReport("prepo:s"); }},
++        {"friend:u", [] { return MakeFriends("friend:u"); }},
++        {"friend:a", [] { return MakeFriends("friend:a"); }},
++        {"lm", [] { return MakeLog(); }},
++        {"mm:u", [] { return MakeMultimedia(); }},
++        {"acc:u0", [&] { return MakeAccount("acc:u0", MakeAccountConfig(system)); }},
++        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
++        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
++    };
++    const auto it = factories.find(name);
++    return it == factories.end() ? nullptr : it->second();
++}
++
++} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
+new file mode 100644
+index 0000000000..15f5144580
+--- /dev/null
++++ b/src/core/hle/kernel/native_services_list.h
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
++#pragma once
++
++#include <memory>
++#include <string>
++
++namespace KartRuntime {
++class NativeKernel;
++class Service;
++}
++
++namespace Kernel {
++class KernelCore;
++}
++
++namespace Kernel::NativeServices {
++
++/// The service object for `name`, or null when the runtime does not have it (the emulated one is used).
++std::shared_ptr<KartRuntime::Service> MakeService(KartRuntime::NativeKernel& runtime, KernelCore& kernel, const std::string& name);
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_sync.cpp b/src/core/hle/kernel/native_sync.cpp
 new file mode 100644
 index 0000000000..d79575cf6e
@@ -4999,18 +5422,29 @@ index c2e1195d03..864d1d69db 100644
      }
      case InfoType::MesosphereCurrentProcess: {
 diff --git a/src/core/hle/kernel/svc/svc_ipc.cpp b/src/core/hle/kernel/svc/svc_ipc.cpp
-index 94638e61ad..a55aa0a363 100644
+index 94638e61ad..7eec536e5b 100644
 --- a/src/core/hle/kernel/svc/svc_ipc.cpp
 +++ b/src/core/hle/kernel/svc/svc_ipc.cpp
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,8 @@
  #include "core/hle/kernel/k_server_session.h"
  #include "core/hle/kernel/k_session.h"
  #include "core/hle/kernel/svc.h"
 +#include "core/hle/service/native_ipc.h"
++#include "core/hle/kernel/native_services.h"
  #include "core/hle/kernel/svc_results.h"
  
  namespace Kernel::Svc {
-@@ -29,6 +30,14 @@ Result SendSyncRequestImpl(KernelCore& kernel, uintptr_t message, size_t buffer_
+@@ -21,6 +23,9 @@ namespace Kernel::Svc {
+ namespace {
+ 
+ Result SendSyncRequestImpl(KernelCore& kernel, uintptr_t message, size_t buffer_size, Handle session_handle) {
++    // kart-recomp: sessions to native services (core/hle/kernel/native_services.h).
++    if (message == 0 && NativeServices::IsNative(session_handle)) R_RETURN(NativeServices::SendSyncRequest(kernel, session_handle));
++
+     // Get the client session.
+     KScopedAutoObject session = GetCurrentProcess(kernel).GetHandleTable().GetObject<KClientSession>(kernel, session_handle);
+     R_UNLESS(session.IsNotNull(), ResultInvalidHandle);
+@@ -29,6 +34,14 @@ Result SendSyncRequestImpl(KernelCore& kernel, uintptr_t message, size_t buffer_
      KScopedAutoObject parent = {kernel, session->GetParent()};
      ASSERT(parent.IsNotNull());
  
@@ -5053,6 +5487,61 @@ index 4799d6bce9..d35face0b1 100644
  
      R_RETURN(KConditionVariable::SignalToAddress(system.Kernel(), address));
  }
+diff --git a/src/core/hle/kernel/svc/svc_synchronization.cpp b/src/core/hle/kernel/svc/svc_synchronization.cpp
+index cd28750f38..7e08b2b68b 100644
+--- a/src/core/hle/kernel/svc/svc_synchronization.cpp
++++ b/src/core/hle/kernel/svc/svc_synchronization.cpp
+@@ -11,6 +11,7 @@
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/k_readable_event.h"
+ #include "core/hle/kernel/svc.h"
++#include "core/hle/kernel/native_services.h"
+ #include "core/hle/kernel/svc_results.h"
+ 
+ namespace Kernel::Svc {
+@@ -18,6 +19,7 @@ namespace Kernel::Svc {
+ /// Close a handle
+ Result CloseHandle(Core::System& system, Handle handle) {
+     LOG_TRACE(Kernel_SVC, "Closing handle 0x{:08X}", handle);
++    if (NativeServices::IsNative(handle)) R_RETURN(NativeServices::CloseHandle(system.Kernel(), handle));
+ 
+     // Remove the handle.
+     R_UNLESS(GetCurrentProcess(system.Kernel()).GetHandleTable().Remove(system.Kernel(), handle),
+@@ -29,6 +31,7 @@ Result CloseHandle(Core::System& system, Handle handle) {
+ /// Clears the signaled state of an event or process.
+ Result ResetSignal(Core::System& system, Handle handle) {
+     LOG_DEBUG(Kernel_SVC, "called handle 0x{:08X}", handle);
++    if (NativeServices::IsNative(handle)) R_RETURN(NativeServices::ResetSignal(system.Kernel(), handle));
+ 
+     // Get the current handle table.
+     const auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
+@@ -61,6 +64,15 @@ Result WaitSynchronization(Core::System& system, int32_t* out_index, u64 user_ha
+     // Ensure number of handles is valid.
+     R_UNLESS(0 <= num_handles && num_handles <= Svc::ArgumentHandleCountMax, ResultOutOfRange);
+ 
++    // kart-recomp: runtime handles (native services' events) wait in the runtime.
++    if (NativeServices::Enabled() && num_handles > 0) {
++        std::array<Handle, Svc::ArgumentHandleCountMax> native_handles{};
++        R_UNLESS(GetCurrentMemory(system.Kernel()).ReadBlock(user_handles, native_handles.data(), sizeof(Handle) * num_handles), ResultInvalidPointer);
++        bool handled = false;
++        const Result r = NativeServices::WaitSynchronization(system.Kernel(), out_index, native_handles.data(), num_handles, timeout_ns, &handled);
++        if (handled) R_RETURN(r);
++    }
++
+     // Get the synchronization context.
+     auto& handle_table = GetCurrentProcess(system.Kernel()).GetHandleTable();
+     auto objs = GetCurrentThread(system.Kernel()).GetSynchronizationObjectBuffer();
+@@ -109,8 +121,8 @@ Result CancelSynchronization(Core::System& system, Handle handle) {
+     KScopedAutoObject thread = GetCurrentProcess(system.Kernel()).GetHandleTable().GetObject<KThread>(system.Kernel(), handle);
+     R_UNLESS(thread.IsNotNull(), ResultInvalidHandle);
+ 
+-    // Cancel the thread's wait.
+-    thread->WaitCancel(system.Kernel());
++    // Cancel the thread's wait (a runtime wait first: kart-recomp native services).
++    if (!NativeServices::CancelSynchronization(system.Kernel(), thread.GetPointerUnsafe())) thread->WaitCancel(system.Kernel());
+     R_SUCCEED();
+ }
+ 
 diff --git a/src/core/hle/kernel/svc/svc_thread.cpp b/src/core/hle/kernel/svc/svc_thread.cpp
 index 79c6ac2079..7a9c434d60 100644
 --- a/src/core/hle/kernel/svc/svc_thread.cpp
@@ -5697,6 +6186,38 @@ index ae07565196..3cd1665b8a 100644
  }
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
+diff --git a/src/core/hle/service/sm/sm.cpp b/src/core/hle/service/sm/sm.cpp
+index ac2e821e11..eef44770a1 100644
+--- a/src/core/hle/service/sm/sm.cpp
++++ b/src/core/hle/service/sm/sm.cpp
+@@ -18,6 +18,7 @@
+ #include "core/hle/service/ipc_helpers.h"
+ #include "core/hle/service/server_manager.h"
+ #include "core/hle/service/sm/sm.h"
++#include "core/hle/kernel/native_services.h"
+ #include "core/hle/service/sm/sm_controller.h"
+ 
+ namespace Service::SM {
+@@ -129,7 +130,19 @@ void SM::Initialize(HLERequestContext& ctx) {
+     rb.Push(ResultSuccess);
+ }
+ 
++static std::string PopServiceName(IPC::RequestParser& rp);
++
+ void SM::GetServiceCmif(HLERequestContext& ctx) {
++    // kart-recomp: services the runtime answers get a runtime session (core/hle/kernel/native_services.h).
++    if (ctx.GetManager()->GetIsInitializedForSm() && Kernel::NativeServices::Enabled()) {
++        IPC::RequestParser peek{ctx};
++        if (const auto handle = Kernel::NativeServices::OpenService(kernel, PopServiceName(peek))) {
++            IPC::ResponseBuilder rb{ctx, 2, 0, 1, IPC::ResponseBuilder::Flags::AlwaysMoveHandles};
++            rb.Push(ResultSuccess);
++            ctx.CommandBuffer()[3] = *handle; // header (2 words), handle descriptor, then the move handle: a raw runtime handle
++            return;
++        }
++    }
+     Kernel::KClientSession* client_session{};
+     auto result = GetServiceImpl(&client_session, ctx);
+     if (ctx.GetIsDeferred()) {
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
 index 622b67a83c..131af6f100 100644
 --- a/src/core/hle/service/vi/conductor.cpp
@@ -9204,6 +9725,236 @@ index 0000000000..6b0956610e
 +}
 +
 +} // namespace KartRuntime::DirectMemory
+diff --git a/src/kart_runtime/hipc.h b/src/kart_runtime/hipc.h
+new file mode 100644
+index 0000000000..ee66c9a722
+--- /dev/null
++++ b/src/kart_runtime/hipc.h
+@@ -0,0 +1,224 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the console's service message format (HIPC transport + CMIF commands), read and written natively
++// (docs/NATIVE_ENGINE.md, "native services").
++//
++// A game thread sends a service request by writing a message into the first 0x100 bytes of its thread-local area and calling
++// SendSyncRequest; the reply is written back into the same place. The message is:
++//   word 0: type (bits 0-15: 4 request, 5 control, 6/7 the same with context, 2 close), number of X / A / B / W buffer
++//           descriptors (4 bits each from bit 16)
++//   word 1: size of the raw data in words (bits 0-9), C buffer mode (bits 10-13), handle descriptor present (bit 31)
++//   [handle descriptor: send process id (bit 0), copy handle count (bits 1-4), move handle count (bits 5-8); then the process id
++//    (8 bytes) when sent, the copy handles, the move handles]
++//   X descriptors (8 bytes each), A, B, W descriptors (12 bytes each)
++//   raw data, starting at the next 16-byte boundary: [domain header (16 bytes) when the session is a domain]
++//           "SFCI", version, command id (u64), arguments...  (replies: "SFCO", version, result (u64), values...)
++//           [domain input object ids after the arguments; domain output object ids after the reply values]
++//   C descriptors (8 bytes each) after the raw data.
++//
++// Request parses one message; Reply writes one. Standard library only (tests: tests/test_hipc.cpp).
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++namespace KartRuntime::Hipc {
++
++constexpr size_t MessageSize = 0x100;
++constexpr uint32_t MagicIn = 0x49434653;  // "SFCI"
++constexpr uint32_t MagicOut = 0x4F434653; // "SFCO"
++
++enum class Type : uint16_t { Close = 2, Request = 4, Control = 5, RequestWithContext = 6, ControlWithContext = 7 };
++enum class DomainCommand : uint8_t { SendMessage = 1, CloseObject = 2 };
++enum class Control : uint32_t { ConvertToDomain = 0, CopyFromDomain = 1, Clone = 2, QueryPointerBufferSize = 3, CloneEx = 4 };
++
++struct Buffer {
++    uint64_t address = 0;
++    uint64_t size = 0;
++    uint32_t extra = 0; ///< X: the descriptor's index ("counter"); A/B/W: the mapping flags
++};
++
++/// One parsed request.
++struct Request {
++    Type type{};
++    bool valid = false;
++    bool has_pid = false;
++    uint64_t pid = 0;
++    std::vector<uint32_t> copy_handles, move_handles;
++    std::vector<Buffer> x, a, b, w, c;
++    uint32_t c_mode = 0; ///< 0 none, 1 inline, 2 one descriptor, n>2: n-2 descriptors
++    // Domain sessions only.
++    bool has_domain = false;
++    DomainCommand domain_command{};
++    uint32_t object_id = 0;
++    std::vector<uint32_t> input_objects;
++    // CMIF payload.
++    uint32_t command = 0;
++    std::vector<uint8_t> data; ///< the arguments after the "SFCI" header
++
++    /// Reads a message. `domain`: the session is a domain (request messages carry the domain header).
++    static Request Parse(const uint8_t* msg, bool domain) {
++        Request r;
++        uint32_t w[MessageSize / 4];
++        std::memcpy(w, msg, MessageSize);
++        size_t i = 0;
++        r.type = static_cast<Type>(w[0] & 0xFFFF);
++        const uint32_t nx = (w[0] >> 16) & 15, na = (w[0] >> 20) & 15, nb = (w[0] >> 24) & 15, nw = (w[0] >> 28) & 15;
++        const uint32_t data_words = w[1] & 0x3FF;
++        r.c_mode = (w[1] >> 10) & 15;
++        const bool handles = (w[1] >> 31) != 0;
++        i = 2;
++        if (r.type == Type::Close) {
++            r.valid = true;
++            return r;
++        }
++        if (handles) {
++            const uint32_t h = w[i++];
++            r.has_pid = h & 1;
++            const uint32_t ncopy = (h >> 1) & 15, nmove = (h >> 5) & 15;
++            if (r.has_pid) {
++                r.pid = w[i] | (uint64_t{w[i + 1]} << 32);
++                i += 2;
++            }
++            for (uint32_t k = 0; k < ncopy && i < 64; ++k) r.copy_handles.push_back(w[i++]);
++            for (uint32_t k = 0; k < nmove && i < 64; ++k) r.move_handles.push_back(w[i++]);
++        }
++        for (uint32_t k = 0; k < nx && i + 1 < 64; ++k, i += 2) {
++            const uint32_t d = w[i];
++            Buffer bf;
++            bf.extra = (d & 0x3F) | (((d >> 9) & 7) << 9);
++            bf.address = w[i + 1] | (uint64_t((d >> 12) & 15) << 32) | (uint64_t((d >> 6) & 7) << 36);
++            bf.size = d >> 16;
++            r.x.push_back(bf);
++        }
++        auto abw = [&](uint32_t n, std::vector<Buffer>& out) {
++            for (uint32_t k = 0; k < n && i + 2 < 64; ++k, i += 3) {
++                const uint32_t f = w[i + 2];
++                Buffer bf;
++                bf.size = w[i] | (uint64_t((f >> 24) & 15) << 32);
++                bf.address = w[i + 1] | (uint64_t((f >> 28) & 15) << 32) | (uint64_t((f >> 2) & 7) << 36);
++                bf.extra = f & 3;
++                out.push_back(bf);
++            }
++        };
++        abw(na, r.a);
++        abw(nb, r.b);
++        abw(nw, r.w);
++        const size_t raw_start = i;
++        const size_t c_start = raw_start + data_words;
++        size_t p = (i + 3) & ~size_t{3};
++        if (domain && (r.type == Type::Request || r.type == Type::RequestWithContext)) {
++            if (p + 4 > 64) return r;
++            r.has_domain = true;
++            r.domain_command = static_cast<DomainCommand>(w[p] & 0xFF);
++            const uint32_t nobj = (w[p] >> 8) & 0xFF;
++            const uint32_t payload_bytes = w[p] >> 16;
++            r.object_id = w[p + 1];
++            p += 4;
++            if (r.domain_command == DomainCommand::CloseObject) {
++                r.valid = true;
++                return r;
++            }
++            const size_t obj_at = p + payload_bytes / 4;
++            for (uint32_t k = 0; k < nobj && obj_at + k < 64; ++k) r.input_objects.push_back(w[obj_at + k]);
++            if (payload_bytes < 16 || p + payload_bytes / 4 > 64) return r;
++            if (w[p] != MagicIn) return r;
++            r.command = w[p + 2];
++            r.data.assign(msg + (p + 4) * 4, msg + p * 4 + payload_bytes);
++        } else {
++            if (p + 4 > 64) return r;
++            if (w[p] != MagicIn) return r;
++            r.command = w[p + 2];
++            // The arguments run to the end of the raw data (minus the header and the alignment padding).
++            const size_t end = std::min<size_t>(c_start, 64);
++            if (end > p + 4) r.data.assign(msg + (p + 4) * 4, msg + end * 4);
++        }
++        if (r.c_mode >= 2) {
++            const uint32_t nc = r.c_mode == 2 ? 1 : r.c_mode - 2;
++            for (uint32_t k = 0; k < nc && c_start + 2 * k + 1 < 64; ++k) {
++                const uint32_t lo = w[c_start + 2 * k], hi = w[c_start + 2 * k + 1];
++                r.c.push_back({lo | (uint64_t(hi & 0xFFFF) << 32), hi >> 16, 0});
++            }
++        }
++        r.valid = true;
++        return r;
++    }
++};
++
++/// One reply, written over the request.
++struct Reply {
++    uint32_t result = 0;
++    std::vector<uint8_t> data; ///< values after the result
++    std::vector<uint32_t> copy_handles, move_handles;
++    std::vector<uint32_t> out_objects; ///< domain object ids (domain sessions only)
++
++    template <typename T>
++    void Push(const T& v) {
++        const size_t at = data.size();
++        data.resize(at + sizeof(T));
++        std::memcpy(data.data() + at, &v, sizeof(T));
++    }
++    /// Pads the values to a multiple of `align` bytes (the SDK reads 8-byte values at aligned places).
++    void Align(size_t align) { data.resize((data.size() + align - 1) / align * align); }
++
++    /// Writes the message. `domain`: the request came with a domain header (the reply then carries one).
++    void Write(uint8_t* msg, bool domain) const {
++        uint32_t w[MessageSize / 4]{};
++        const size_t value_words = (data.size() + 3) / 4;
++        // Raw data: 16 bytes of alignment padding + [domain header] + "SFCO" header (16) + values + [object ids].
++        const uint32_t raw_words = static_cast<uint32_t>(4 + (domain ? 4 + out_objects.size() : 0) + 4 + value_words);
++        w[0] = 0;
++        w[1] = raw_words;
++        size_t i = 2;
++        if (!copy_handles.empty() || !move_handles.empty()) {
++            w[1] |= 1u << 31;
++            w[i++] = static_cast<uint32_t>(copy_handles.size() << 1 | move_handles.size() << 5);
++            for (const uint32_t h : copy_handles) w[i++] = h;
++            for (const uint32_t h : move_handles) w[i++] = h;
++        }
++        i = (i + 3) & ~size_t{3};
++        if (domain) {
++            w[i] = static_cast<uint32_t>(out_objects.size());
++            i += 4;
++        }
++        w[i] = MagicOut;
++        w[i + 1] = 0;
++        w[i + 2] = result;
++        w[i + 3] = 0;
++        i += 4;
++        if (!data.empty()) std::memcpy(&w[i], data.data(), std::min(data.size(), (64 - i) * 4));
++        i += value_words;
++        if (domain)
++            for (const uint32_t o : out_objects) w[i++] = o;
++        std::memcpy(msg, w, MessageSize);
++    }
++};
++
++/// Reads arguments in order, each at its natural alignment (as the SDK lays them out).
++class Args {
++public:
++    explicit Args(const std::vector<uint8_t>& d) : data{d} {}
++    template <typename T>
++    T Pop() {
++        pos = (pos + alignof(T) - 1) / alignof(T) * alignof(T);
++        T v{};
++        if (pos + sizeof(T) <= data.size()) std::memcpy(&v, data.data() + pos, sizeof(T));
++        pos += sizeof(T);
++        return v;
++    }
++    template <typename T>
++    T PopRaw() { // packed structures: no alignment
++        T v{};
++        if (pos + sizeof(T) <= data.size()) std::memcpy(&v, data.data() + pos, sizeof(T));
++        pos += sizeof(T);
++        return v;
++    }
++    void Skip(size_t n) { pos += n; }
++
++private:
++    const std::vector<uint8_t>& data;
++    size_t pos = 0;
++};
++
++} // namespace KartRuntime::Hipc
 diff --git a/src/kart_runtime/native_fs.h b/src/kart_runtime/native_fs.h
 new file mode 100644
 index 0000000000..6fcddd551f
@@ -9462,6 +10213,1001 @@ index 0000000000..6fcddd551f
 +};
 +
 +} // namespace KartRuntime
+diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
+new file mode 100644
+index 0000000000..2fd4d30e30
+--- /dev/null
++++ b/src/kart_runtime/native_kernel.h
+@@ -0,0 +1,500 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
++// (docs/NATIVE_ENGINE.md, "native services").
++//
++// Handles: the console kernel's handles are (linear id << 15 | table index) with the top two bits clear; ours have bit 30 set,
++// so they can live next to the emulated kernel's while services move over one at a time (`IsNative`).
++// Sessions: a session leads to one service object, or - after ConvertToDomain - to a table of objects addressed by id
++// ("domain"), as on the console. Requests are answered synchronously on the calling thread.
++// Events: the readable side of a console event: signalled by its service, cleared by ResetSignal (or by the service), waited
++// on with WaitSynchronization together with other events.
++//
++// Standard library only (tests: tests/test_native_kernel.cpp).
++#pragma once
++
++#include <algorithm>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <functional>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <set>
++#include <string>
++#include <type_traits>
++#include <vector>
++
++#include "hipc.h"
++
++namespace KartRuntime {
++
++// Result codes (module 1 = kernel).
++namespace KernelResult {
++constexpr uint32_t Success = 0;
++constexpr uint32_t TimedOut = 0xEA01;
++constexpr uint32_t Cancelled = 0xEC01;
++constexpr uint32_t OutOfRange = 0xEE01;
++constexpr uint32_t InvalidHandle = 0xE401;
++constexpr uint32_t InvalidState = 0xFA01;
++constexpr uint32_t SessionClosed = 0xF601;
++} // namespace KernelResult
++
++/// Result codes of the service framework (module 10 = cmif).
++namespace CmifResult {
++constexpr uint32_t UnknownCommand = 0x25A0A; // 10 | (301 << 9)
++constexpr uint32_t InvalidObject = 0x1A80A;  // 10 | (212 << 9)
++} // namespace CmifResult
++
++enum class ObjectType { Event, Service, Session, SharedMemory, Other };
++
++/// Objects behind handles. Types are told apart by `Type()` (the engine builds without RTTI).
++class KernelObject : public std::enable_shared_from_this<KernelObject> {
++public:
++    virtual ~KernelObject() = default;
++    virtual const char* Kind() const = 0;
++    virtual ObjectType Type() const = 0;
++    virtual bool IsWaitable() const { return false; }
++};
++
++class NativeKernel;
++
++/// A waitable object (events).
++class Waitable : public KernelObject {
++public:
++    bool IsSignaled() const;
++    bool IsWaitable() const override { return true; }
++
++protected:
++    friend class NativeKernel;
++    friend class Event;
++    explicit Waitable(NativeKernel& k) : kernel{k} {}
++    NativeKernel& kernel;
++    bool signaled = false; ///< guarded by the kernel's wait lock
++};
++
++/// The readable side of an event, plus Signal/Clear for its service.
++class Event : public Waitable {
++public:
++    explicit Event(NativeKernel& k, std::string n = {}) : Waitable{k}, name{std::move(n)} {}
++    const char* Kind() const override { return "event"; }
++    static constexpr ObjectType StaticType = ObjectType::Event;
++    ObjectType Type() const override { return StaticType; }
++    void Signal();
++    void Clear();
++    const std::string name;
++};
++
++class Service;
++
++/// What a service sees of one request: the parsed message, guest memory, and the reply it fills in.
++class Context {
++public:
++    Context(NativeKernel& k, const Hipc::Request& r) : kernel{k}, request{r}, args{r.data} {}
++    NativeKernel& kernel;
++    const Hipc::Request& request;
++    Hipc::Args args;
++    Hipc::Reply reply;
++    uint32_t Command() const { return request.command; }
++    uint64_t Pid() const { return request.pid; }
++
++    template <typename T>
++    T Pop() { return args.Pop<T>(); }
++    template <typename T>
++    void Push(const T& v) { reply.Push(v); }
++    void SetResult(uint32_t r) { reply.result = r; }
++
++    /// An input buffer: A (mapped) or X (pointer) number `i` - the "auto select" rule: whichever has a size.
++    std::vector<uint8_t> ReadBuffer(size_t i = 0) const;
++    /// An output buffer: B (mapped) or C (receive list) number `i`; returns how many bytes were written.
++    size_t WriteBuffer(const void* src, size_t size, size_t i = 0);
++    size_t WriteBufferSize(size_t i = 0) const;
++    uint64_t ReadBufferAddress(size_t i = 0) const;
++
++    /// A new interface object: a domain object id when the session is a domain, otherwise a new session (move handle).
++    void PushInterface(std::shared_ptr<Service> s);
++    /// A copy handle to `o` (events, shared memory).
++    void PushCopyObject(std::shared_ptr<KernelObject> o);
++    /// A move handle (raw kernel handle produced elsewhere, e.g. by the emulated kernel).
++    void PushMoveHandle(uint32_t h) { reply.move_handles.push_back(h); }
++    void PushCopyHandle(uint32_t h) { reply.copy_handles.push_back(h); }
++
++    // Set by the kernel while it runs the request.
++    struct SessionState* session = nullptr;
++    bool domain = false;
++};
++
++/// A service object (an IPC interface). Commands by id; unknown ones answer "unknown command".
++class Service : public KernelObject {
++public:
++    using Handler = std::function<void(Context&)>;
++    explicit Service(std::string n) : name{std::move(n)} {}
++    const char* Kind() const override { return "service"; }
++    static constexpr ObjectType StaticType = ObjectType::Service;
++    ObjectType Type() const override { return StaticType; }
++    const std::string name;
++
++    void Handle(Context& ctx) {
++        std::unique_lock lk{mutex, std::defer_lock};
++        if (serialize) lk.lock();
++        if (const auto it = handlers.find(ctx.Command()); it != handlers.end()) {
++            ctx.SetResult(0);
++            if (on_call) on_call(name, ctx.Command());
++            it->second(ctx);
++            ++calls;
++        } else {
++            ctx.SetResult(CmifResult::UnknownCommand);
++            ++unknown;
++            if (on_unknown) on_unknown(name, ctx.Command());
++        }
++    }
++    void On(uint32_t cmd, Handler h) { handlers[cmd] = std::move(h); }
++    /// A command that only answers success (the game only needs the call to succeed).
++    void Ok(uint32_t cmd) { handlers[cmd] = [](Context&) {}; }
++    bool Has(uint32_t cmd) const { return handlers.contains(cmd); }
++
++    uint64_t calls = 0, unknown = 0;
++    bool serialize = true; ///< one request at a time (the console's services are single-threaded per session)
++    static inline std::function<void(const std::string&, uint32_t)> on_unknown, on_call;
++
++private:
++    std::mutex mutex;
++    std::map<uint32_t, Handler> handlers;
++};
++
++struct SessionState {
++    std::shared_ptr<Service> target;     ///< plain session
++    bool domain = false;
++    std::map<uint32_t, std::shared_ptr<Service>> objects; ///< domain objects by id
++    uint32_t next_object = 1;
++    bool closed = false;
++    std::mutex mutex;
++};
++
++/// A client session handle's object.
++class Session : public KernelObject {
++public:
++    explicit Session(std::shared_ptr<SessionState> s) : state{std::move(s)} {}
++    const char* Kind() const override { return "session"; }
++    static constexpr ObjectType StaticType = ObjectType::Session;
++    ObjectType Type() const override { return StaticType; }
++    std::shared_ptr<SessionState> state;
++};
++
++class NativeKernel {
++public:
++    struct Hooks {
++        std::function<bool(uint64_t addr, void* out, size_t n)> read;        ///< guest memory
++        std::function<bool(uint64_t addr, const void* in, size_t n)> write;  ///< guest memory
++        std::function<void()> before_block, after_block; ///< a thread is about to wait / has stopped waiting
++    };
++    explicit NativeKernel(Hooks h) : hooks{std::move(h)} {}
++
++    static constexpr uint32_t HandleBit = 1u << 30;
++    static bool IsNative(uint32_t handle) { return (handle & 0xC0000000u) == HandleBit; }
++
++    // ---- handle table
++    uint32_t Add(std::shared_ptr<KernelObject> o) {
++        std::scoped_lock lk{table_mutex};
++        uint32_t index = 0;
++        if (!free_slots.empty()) {
++            index = *free_slots.begin();
++            free_slots.erase(free_slots.begin());
++        } else {
++            index = static_cast<uint32_t>(table.size());
++            table.emplace_back();
++        }
++        table[index] = std::move(o);
++        return HandleBit | (index + 1);
++    }
++    std::shared_ptr<KernelObject> Get(uint32_t handle) {
++        std::scoped_lock lk{table_mutex};
++        if (!IsNative(handle)) return nullptr;
++        const uint32_t index = (handle & ~HandleBit) - 1;
++        return index < table.size() ? table[index] : nullptr;
++    }
++    template <typename T>
++    std::shared_ptr<T> GetAs(uint32_t handle) {
++        std::shared_ptr<KernelObject> o = Get(handle);
++        if (!o) return nullptr;
++        if constexpr (std::is_same_v<T, Waitable>) {
++            if (!o->IsWaitable()) return nullptr;
++        } else {
++            if (o->Type() != T::StaticType) return nullptr;
++        }
++        return std::static_pointer_cast<T>(o);
++    }
++    bool Close(uint32_t handle) {
++        std::shared_ptr<KernelObject> dropped; // released outside the lock
++        std::scoped_lock lk{table_mutex};
++        if (!IsNative(handle)) return false;
++        const uint32_t index = (handle & ~HandleBit) - 1;
++        if (index >= table.size() || !table[index]) return false;
++        dropped = std::move(table[index]);
++        free_slots.insert(index);
++        return true;
++    }
++    size_t HandleCount() {
++        std::scoped_lock lk{table_mutex};
++        return table.size() - free_slots.size();
++    }
++
++    /// A new session to `service`: the client handle.
++    uint32_t OpenSession(std::shared_ptr<Service> service) {
++        auto st = std::make_shared<SessionState>();
++        st->target = std::move(service);
++        return Add(std::make_shared<Session>(std::move(st)));
++    }
++
++    /// SendSyncRequest on one of our sessions: reads the message at `msg` (0x100 bytes, host copy of the thread's TLS), answers
++    /// it, writes the reply back. Returns the system call result.
++    uint32_t SendSyncRequest(uint32_t handle, uint8_t* msg) {
++        const auto session = GetAs<Session>(handle);
++        if (!session) return KernelResult::InvalidHandle;
++        SessionState& st = *session->state;
++        const bool domain = st.domain;
++        const Hipc::Request req = Hipc::Request::Parse(msg, domain);
++        if (!req.valid) return KernelResult::InvalidState;
++        if (req.type == Hipc::Type::Close) {
++            // The server side goes; the client closes its handle itself afterwards (CloseHandle), as on the console.
++            std::shared_ptr<Service> gone;
++            std::map<uint32_t, std::shared_ptr<Service>> gone_objects;
++            {
++                std::scoped_lock lk{st.mutex};
++                gone = std::move(st.target);
++                gone_objects.swap(st.objects);
++                st.closed = true;
++            }
++            Hipc::Reply{}.Write(msg, false);
++            return KernelResult::Success;
++        }
++        if (st.closed) return KernelResult::SessionClosed;
++        Context ctx{*this, req};
++        ctx.session = &st;
++        ctx.domain = domain && req.has_domain;
++        if (req.type == Hipc::Type::Control || req.type == Hipc::Type::ControlWithContext) {
++            HandleControl(ctx, handle, st);
++            ctx.reply.Write(msg, false);
++            return KernelResult::Success;
++        }
++        std::shared_ptr<Service> target;
++        if (domain) {
++            std::scoped_lock lk{st.mutex};
++            if (req.has_domain && req.domain_command == Hipc::DomainCommand::CloseObject) {
++                std::shared_ptr<Service> gone; // released after the lock
++                if (auto it = st.objects.find(req.object_id); it != st.objects.end()) {
++                    gone = std::move(it->second);
++                    st.objects.erase(it);
++                }
++                Hipc::Reply r;
++                r.Write(msg, false);
++                return KernelResult::Success;
++            }
++            if (const auto it = st.objects.find(req.object_id); it != st.objects.end()) target = it->second;
++        } else {
++            target = st.target;
++        }
++        if (!target) {
++            ctx.SetResult(CmifResult::InvalidObject);
++        } else {
++            target->Handle(ctx);
++        }
++        ctx.reply.Write(msg, ctx.domain);
++        return KernelResult::Success;
++    }
++
++    // ---- waiting
++    /// WaitSynchronization: index of a signalled object, or TimedOut / Cancelled. timeout_ns < 0: forever; 0: poll.
++    uint32_t WaitAny(uint64_t thread_id, const std::vector<std::shared_ptr<Waitable>>& objs, int64_t timeout_ns, int32_t* out_index) {
++        using Clock = std::chrono::steady_clock;
++        const auto deadline = timeout_ns > 0 ? Clock::now() + std::chrono::nanoseconds(timeout_ns) : Clock::time_point::max();
++        std::unique_lock lk{wait_mutex};
++        if (cancel_pending.erase(thread_id) || terminated.contains(thread_id)) return KernelResult::Cancelled;
++        for (size_t i = 0; i < objs.size(); ++i) {
++            if (objs[i]->signaled) {
++                *out_index = static_cast<int32_t>(i);
++                return KernelResult::Success;
++            }
++        }
++        if (timeout_ns == 0) return KernelResult::TimedOut;
++        Waiter me;
++        me.thread_id = thread_id;
++        for (const auto& o : objs) waiters[o.get()].push_back(&me);
++        by_thread[thread_id] = &me;
++        uint32_t result = KernelResult::TimedOut;
++        if (hooks.before_block) {
++            lk.unlock();
++            hooks.before_block();
++            lk.lock();
++        }
++        for (;;) {
++            if (me.cancelled) {
++                result = KernelResult::Cancelled;
++                break;
++            }
++            bool found = false;
++            for (size_t i = 0; i < objs.size(); ++i) {
++                if (objs[i]->signaled) {
++                    *out_index = static_cast<int32_t>(i);
++                    result = KernelResult::Success;
++                    found = true;
++                    break;
++                }
++            }
++            if (found) break;
++            if (deadline == Clock::time_point::max()) {
++                me.cv.wait(lk);
++            } else if (me.cv.wait_until(lk, deadline) == std::cv_status::timeout) {
++                // One last look, then give up.
++                for (size_t i = 0; i < objs.size(); ++i)
++                    if (objs[i]->signaled) {
++                        *out_index = static_cast<int32_t>(i);
++                        result = KernelResult::Success;
++                        found = true;
++                        break;
++                    }
++                if (!found) result = me.cancelled ? KernelResult::Cancelled : KernelResult::TimedOut;
++                break;
++            }
++        }
++        for (const auto& o : objs) {
++            auto& list = waiters[o.get()];
++            list.erase(std::remove(list.begin(), list.end(), &me), list.end());
++            if (list.empty()) waiters.erase(o.get());
++        }
++        by_thread.erase(thread_id);
++        lk.unlock();
++        if (hooks.after_block) hooks.after_block();
++        return result;
++    }
++
++    /// CancelSynchronization: the thread's current wait ends with Cancelled; when it is not waiting, its next wait does (unless
++    /// `remember` is false: then the caller keeps that state itself). True when a wait was ended.
++    bool CancelWait(uint64_t thread_id, bool remember = true) {
++        std::scoped_lock lk{wait_mutex};
++        if (const auto it = by_thread.find(thread_id); it != by_thread.end()) {
++            it->second->cancelled = true;
++            it->second->cv.notify_one();
++            return true;
++        }
++        if (remember) cancel_pending.insert(thread_id);
++        return false;
++    }
++    /// A thread that is being terminated: end its wait, and every later one, at once.
++    void Terminate(uint64_t thread_id) {
++        std::scoped_lock lk{wait_mutex};
++        terminated.insert(thread_id);
++        if (const auto it = by_thread.find(thread_id); it != by_thread.end()) {
++            it->second->cancelled = true;
++            it->second->cv.notify_one();
++        }
++    }
++    size_t Waiting() {
++        std::scoped_lock lk{wait_mutex};
++        return by_thread.size();
++    }
++
++    bool Read(uint64_t addr, void* out, size_t n) { return hooks.read && hooks.read(addr, out, n); }
++    bool Write(uint64_t addr, const void* in, size_t n) { return hooks.write && hooks.write(addr, in, n); }
++
++private:
++    friend class Waitable;
++    friend class Event;
++    struct Waiter {
++        uint64_t thread_id = 0;
++        bool cancelled = false;
++        std::condition_variable cv;
++    };
++
++    void SetSignaled(Waitable* o, bool s) {
++        std::scoped_lock lk{wait_mutex};
++        o->signaled = s;
++        if (!s) return;
++        if (const auto it = waiters.find(o); it != waiters.end())
++            for (Waiter* w : it->second) w->cv.notify_one();
++    }
++
++    void HandleControl(Context& ctx, uint32_t handle, SessionState& st) {
++        switch (static_cast<Hipc::Control>(ctx.Command())) {
++        case Hipc::Control::ConvertToDomain: {
++            std::scoped_lock lk{st.mutex};
++            uint32_t id = 0;
++            if (!st.domain) {
++                st.domain = true;
++                id = st.next_object++;
++                st.objects[id] = st.target;
++            }
++            ctx.Push<uint32_t>(id);
++            break;
++        }
++        case Hipc::Control::Clone:
++        case Hipc::Control::CloneEx: {
++            // A second client handle to the same session (same domain table).
++            const auto obj = Get(handle);
++            ctx.PushMoveHandle(Add(obj));
++            break;
++        }
++        case Hipc::Control::QueryPointerBufferSize:
++            ctx.Push<uint16_t>(0x8000);
++            break;
++        default:
++            ctx.SetResult(CmifResult::UnknownCommand);
++            break;
++        }
++    }
++
++    Hooks hooks;
++    std::mutex table_mutex;
++    std::vector<std::shared_ptr<KernelObject>> table;
++    std::set<uint32_t> free_slots;
++
++    std::mutex wait_mutex;
++    std::map<const Waitable*, std::vector<Waiter*>> waiters;
++    std::map<uint64_t, Waiter*> by_thread;
++    std::set<uint64_t> cancel_pending, terminated;
++};
++
++inline bool Waitable::IsSignaled() const { return signaled; }
++inline void Event::Signal() { kernel.SetSignaled(this, true); }
++inline void Event::Clear() { kernel.SetSignaled(this, false); }
++
++inline std::vector<uint8_t> Context::ReadBuffer(size_t i) const {
++    const Hipc::Buffer* b = nullptr;
++    if (i < request.a.size() && request.a[i].size) b = &request.a[i];
++    else if (i < request.x.size()) b = &request.x[i];
++    if (!b) return {};
++    std::vector<uint8_t> out(b->size);
++    if (!out.empty() && !kernel.Read(b->address, out.data(), out.size())) out.clear();
++    return out;
++}
++inline uint64_t Context::ReadBufferAddress(size_t i) const {
++    if (i < request.a.size() && request.a[i].size) return request.a[i].address;
++    return i < request.x.size() ? request.x[i].address : 0;
++}
++inline size_t Context::WriteBufferSize(size_t i) const {
++    if (i < request.b.size() && request.b[i].size) return request.b[i].size;
++    return i < request.c.size() ? request.c[i].size : 0;
++}
++inline size_t Context::WriteBuffer(const void* src, size_t size, size_t i) {
++    const Hipc::Buffer* b = nullptr;
++    if (i < request.b.size() && request.b[i].size) b = &request.b[i];
++    else if (i < request.c.size()) b = &request.c[i];
++    if (!b) return 0;
++    size = std::min<size_t>(size, b->size);
++    return size && kernel.Write(b->address, src, size) ? size : 0;
++}
++inline void Context::PushInterface(std::shared_ptr<Service> s) {
++    if (domain && session) {
++        std::scoped_lock lk{session->mutex};
++        const uint32_t id = session->next_object++;
++        session->objects[id] = std::move(s);
++        reply.out_objects.push_back(id);
++    } else {
++        reply.move_handles.push_back(kernel.OpenSession(std::move(s)));
++    }
++}
++inline void Context::PushCopyObject(std::shared_ptr<KernelObject> o) {
++    reply.copy_handles.push_back(kernel.Add(std::move(o)));
++}
++
++} // namespace KartRuntime
+diff --git a/src/kart_runtime/services/account.h b/src/kart_runtime/services/account.h
+new file mode 100644
+index 0000000000..bc29741ca2
+--- /dev/null
++++ b/src/kart_runtime/services/account.h
+@@ -0,0 +1,132 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: user accounts ("acc:u0", "acc:u1") and add-on content ("aoc:u") (docs/NATIVE_ENGINE.md, "native services").
++// The users are the engine's profiles (their ids name the save data, so they must stay the same); add-on content is the list of
++// DLC the engine found among the player's files.
++#pragma once
++
++#include <array>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++struct UserProfile {
++    std::array<uint8_t, 16> uuid{};
++    std::string name;
++    uint64_t timestamp = 0;
++};
++
++struct AccountConfig {
++    std::vector<UserProfile> users; ///< every user; the first one is the one playing ("open")
++    uint64_t account_id = 0;        ///< what GetAccountId reports for the playing user
++};
++
++struct AddOnConfig {
++    uint64_t base_id = 0;              ///< GetAddOnContentBaseId
++    std::vector<uint32_t> contents;    ///< add-on content indices the game may mount
++};
++
++inline std::shared_ptr<Service> MakeAccount(const char* name, const AccountConfig& cfg) {
++    struct ProfileBase {
++        std::array<uint8_t, 16> uuid;
++        uint64_t timestamp;
++        std::array<char, 0x20> name;
++    };
++    static_assert(sizeof(ProfileBase) == 0x38);
++    auto base_of = [](const UserProfile& u) {
++        ProfileBase b{};
++        b.uuid = u.uuid;
++        b.timestamp = u.timestamp;
++        std::memcpy(b.name.data(), u.name.data(), std::min(u.name.size(), b.name.size()));
++        return b;
++    };
++    auto find = [cfg](const std::array<uint8_t, 16>& id) -> const UserProfile* {
++        for (const auto& u : cfg.users)
++            if (u.uuid == id) return &u;
++        return nullptr;
++    };
++    auto list = [](Context& c, const std::vector<UserProfile>& users) {
++        std::array<std::array<uint8_t, 16>, 8> ids{}; // 8 slots, unused ones zero
++        for (size_t i = 0; i < users.size() && i < ids.size(); ++i) ids[i] = users[i].uuid;
++        c.WriteBuffer(ids.data(), sizeof(ids), 0);
++    };
++    std::vector<UserProfile> open;
++    if (!cfg.users.empty()) open.push_back(cfg.users.front());
++    const std::array<uint8_t, 16> last = open.empty() ? std::array<uint8_t, 16>{} : open.front().uuid;
++    const uint64_t hash = cfg.account_id;
++
++    auto s = std::make_shared<Service>(name);
++    s->On(0, [cfg](Context& c) { c.Push<uint32_t>(static_cast<uint32_t>(cfg.users.size())); }); // GetUserCount
++    s->On(1, [find](Context& c) { c.Push<uint8_t>(find(c.Pop<std::array<uint8_t, 16>>()) != nullptr); }); // GetUserExistence
++    s->On(2, [cfg, list](Context& c) { list(c, cfg.users); });                                     // ListAllUsers
++    s->On(3, [open, list](Context& c) { list(c, open); });                                          // ListOpenUsers
++    s->On(4, [last](Context& c) { c.Push(last); });                                                 // GetLastOpenedUser
++    s->On(5, [find, base_of](Context& c) { // GetProfile(uuid)
++        const UserProfile* u = find(c.Pop<std::array<uint8_t, 16>>());
++        const UserProfile user = u ? *u : UserProfile{};
++        auto p = std::make_shared<Service>("IProfile");
++        p->On(0, [user, base_of](Context& pc) { // Get: base + user data
++            std::array<uint8_t, 0x80> data{};
++            pc.WriteBuffer(data.data(), data.size(), 0);
++            pc.Push(base_of(user));
++        });
++        p->On(1, [user, base_of](Context& pc) { pc.Push(base_of(user)); }); // GetBase
++        p->On(10, [](Context& pc) { pc.Push<uint32_t>(0); });               // GetImageSize: no picture
++        p->On(11, [](Context& pc) { pc.Push<uint32_t>(0); });               // LoadImage
++        c.PushInterface(p);
++    });
++    s->On(50, [](Context& c) { c.Push<uint8_t>(0); }); // IsUserRegistrationRequestPermitted
++    s->On(51, [last](Context& c) { c.Push(last); });   // TrySelectUserWithoutInteraction
++    s->Ok(100);                                        // InitializeApplicationInfo
++    s->On(101, [hash](Context& c) { // GetBaasAccountManagerForApplication(uuid)
++        auto m = std::make_shared<Service>("IManagerForApplication");
++        m->Ok(0);                                                // CheckAvailability
++        m->On(1, [hash](Context& mc) { mc.Push<uint64_t>(hash); }); // GetAccountId
++        auto cache = [hash](Context& mc) { // GetNintendoAccountUserResourceCacheForApplication: an empty record
++            std::vector<uint8_t> base(0x68);
++            mc.WriteBuffer(base.data(), base.size(), 0);
++            if (mc.WriteBufferSize(1)) {
++                std::vector<uint8_t> extra(mc.WriteBufferSize(1));
++                mc.WriteBuffer(extra.data(), extra.size(), 1);
++            }
++            mc.Push<uint64_t>(hash);
++        };
++        m->On(130, cache);
++        m->On(136, cache);
++        m->Ok(160); // StoreOpenContext
++        c.PushInterface(m);
++    });
++    s->Ok(110); // StoreSaveDataThumbnail
++    s->Ok(111); // ClearSaveDataThumbnail
++    s->Ok(140); // InitializeApplicationInfoRestricted
++    s->Ok(150); // IsUserAccountSwitchLocked... (result only)
++    return s;
++}
++
++inline std::shared_ptr<Service> MakeAddOnContent(NativeKernel& kernel, const AddOnConfig& cfg) {
++    auto changed = std::make_shared<Event>(kernel, "aoc list changed");
++    auto s = std::make_shared<Service>("aoc:u");
++    s->On(2, [cfg](Context& c) { c.Push<uint32_t>(static_cast<uint32_t>(cfg.contents.size())); }); // CountAddOnContent
++    s->On(3, [cfg](Context& c) { // ListAddOnContent(offset, count)
++        const auto offset = c.Pop<uint32_t>();
++        const auto count = c.Pop<uint32_t>();
++        if (offset > cfg.contents.size()) return c.SetResult(0x1F4E3); // aoc: invalid argument
++        const size_t n = std::min<size_t>({cfg.contents.size() - offset, count, c.WriteBufferSize(0) / 4});
++        c.WriteBuffer(cfg.contents.data() + offset, n * 4, 0);
++        c.Push<uint32_t>(static_cast<uint32_t>(n));
++    });
++    s->On(5, [cfg](Context& c) { c.Push<uint64_t>(cfg.base_id); }); // GetAddOnContentBaseId
++    s->Ok(7);                                                       // PrepareAddOnContent
++    s->On(8, [changed](Context& c) { c.PushCopyObject(changed); }); // GetAddOnContentListChangedEvent
++    s->On(10, [changed](Context& c) { c.PushCopyObject(changed); }); // ...WithProcessId
++    s->Ok(11);                                                      // NotifyMountAddOnContent
++    s->Ok(12);                                                      // NotifyUnmountAddOnContent
++    s->Ok(50);                                                      // CheckAddOnContentMountStatus
++    return s;
++}
++
++} // namespace KartRuntime::Services
+diff --git a/src/kart_runtime/services/system.h b/src/kart_runtime/services/system.h
+new file mode 100644
+index 0000000000..69d3c3c986
+--- /dev/null
++++ b/src/kart_runtime/services/system.h
+@@ -0,0 +1,180 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the small system services a game opens at boot (docs/NATIVE_ENGINE.md, "native services"): settings
++// ("set"), performance mode ("apm"), parental controls ("pctl*"), play reports ("prepo:*"), friends ("friend:*"), the system
++// log ("lm") and multimedia clock requests ("mm:u"). On a PC there is nothing behind most of them: the answers are the ones an
++// unrestricted, offline console gives.
++#pragma once
++
++#include <array>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++struct SystemConfig {
++    std::string language = "en-US"; ///< the console's language (a code from LanguageCodes)
++    int region = 1;                  ///< 0 Japan, 1 USA, 2 Europe, 3 Australia, 4 HongKongTaiwanKorea, 5 China
++    bool docked = true;              ///< operation mode (docked = the higher quality)
++};
++
++/// The console's language list, in its order ("set" GetAvailableLanguageCodes).
++inline const std::vector<std::string>& LanguageCodes() {
++    static const std::vector<std::string> codes{"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt",
++                                                "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR", "pl", "th"};
++    return codes;
++}
++/// A language code as the console passes it: the characters in a u64, first character lowest.
++inline uint64_t PackLanguage(const std::string& code) {
++    uint64_t v = 0;
++    std::memcpy(&v, code.data(), std::min<size_t>(code.size(), 8));
++    return v;
++}
++
++inline std::shared_ptr<Service> MakeSettings(const SystemConfig& cfg) {
++    auto s = std::make_shared<Service>("set");
++    s->On(0, [cfg](Context& c) { c.Push<uint64_t>(PackLanguage(cfg.language)); }); // GetLanguageCode
++    auto list = [](Context& c, size_t max) {
++        std::vector<uint64_t> codes;
++        for (const auto& l : LanguageCodes()) codes.push_back(PackLanguage(l));
++        const size_t n = std::min({codes.size(), max, c.WriteBufferSize(0) / 8});
++        c.WriteBuffer(codes.data(), n * 8, 0);
++        c.Push<int32_t>(static_cast<int32_t>(n));
++    };
++    s->On(1, [list](Context& c) { list(c, 0xF); });  // GetAvailableLanguageCodes (pre-4.0 list size)
++    s->On(5, [list](Context& c) { list(c, 0x40); }); // GetAvailableLanguageCodes2
++    s->On(2, [](Context& c) { // MakeLanguageCode(index)
++        const auto i = c.Pop<uint32_t>();
++        if (i >= LanguageCodes().size()) return c.SetResult(105 | (625u << 9)); // set: out of range
++        c.Push<uint64_t>(PackLanguage(LanguageCodes()[i]));
++    });
++    s->On(3, [](Context& c) { c.Push<int32_t>(0xF); });  // GetAvailableLanguageCodeCount
++    s->On(6, [](Context& c) { c.Push<int32_t>(static_cast<int32_t>(LanguageCodes().size())); }); // ...Count2
++    s->On(4, [cfg](Context& c) { c.Push<int32_t>(cfg.region); }); // GetRegionCode
++    s->On(8, [](Context& c) { c.Push<int32_t>(0); });            // GetQuestFlag
++    return s;
++}
++
++inline std::shared_ptr<Service> MakeApm(const char* name) {
++    auto s = std::make_shared<Service>(name);
++    auto session = [] {
++        auto ss = std::make_shared<Service>("apm ISession");
++        auto config = std::make_shared<std::map<uint32_t, uint32_t>>();
++        ss->On(0, [config](Context& c) { // SetPerformanceConfiguration(mode, config)
++            const auto mode = c.Pop<uint32_t>();
++            (*config)[mode] = c.Pop<uint32_t>();
++        });
++        ss->On(1, [config](Context& c) { // GetPerformanceConfiguration(mode)
++            const auto mode = c.Pop<uint32_t>();
++            const auto it = config->find(mode);
++            c.Push<uint32_t>(it != config->end() ? it->second : (mode == 1 ? 0x92220008u : 0x92220007u));
++        });
++        ss->Ok(2); // SetCpuOverclockEnabled
++        return ss;
++    };
++    s->On(0, [session](Context& c) { c.PushInterface(session()); }); // OpenSession
++    s->On(1, [](Context& c) { c.Push<uint32_t>(1); });             // GetPerformanceMode: boost (docked)
++    s->On(6, [](Context& c) { c.Push<uint8_t>(0); });              // IsCpuOverclockEnabled
++    return s;
++}
++
++inline std::shared_ptr<Service> MakeParentalControl(const char* name) {
++    auto s = std::make_shared<Service>(name);
++    auto service = [] {
++        auto ps = std::make_shared<Service>("IParentalControlService");
++        ps->Ok(1);                                                  // Initialize
++        ps->Ok(1001);                                               // CheckFreeCommunicationPermission
++        ps->Ok(1002);                                               // ConfirmLaunchApplicationPermission
++        ps->Ok(1013);                                               // ConfirmStereoVisionPermission
++        ps->Ok(1018);                                               // IsFreeCommunicationAvailable (result only: available)
++        ps->On(1031, [](Context& c) { c.Push<uint8_t>(0); });     // IsRestrictionEnabled: no
++        ps->Ok(1061);                                               // ConfirmStereoVisionRestrictionConfigurable
++        ps->Ok(1064);                                               // ResetConfirmedStereoVisionPermission
++        ps->On(1065, [](Context& c) { c.Push<uint8_t>(1); });     // IsStereoVisionPermitted: yes
++        return ps;
++    };
++    s->On(0, [service](Context& c) { c.PushInterface(service()); }); // CreateService
++    s->On(1, [service](Context& c) { c.PushInterface(service()); }); // CreateServiceWithoutInitialize
++    return s;
++}
++
++/// Play reports: accepted and dropped (the console uploads them; this is an offline PC game).
++inline std::shared_ptr<Service> MakePlayReport(const char* name) {
++    auto s = std::make_shared<Service>(name);
++    for (uint32_t cmd : {10100u, 10101u, 10102u, 10103u, 10104u, 10105u, 10106u, 10107u, 10200u, 10201u, 10300u, 10400u}) s->Ok(cmd);
++    return s;
++}
++
++inline std::shared_ptr<Service> MakeFriends(const char* name) {
++    auto s = std::make_shared<Service>(name);
++    s->On(0, [](Context& c) { c.PushInterface(std::make_shared<Service>("IFriendService")); });       // CreateFriendService
++    s->On(1, [](Context& c) { c.PushInterface(std::make_shared<Service>("INotificationService")); }); // CreateNotificationService
++    s->Ok(2); // CreateDaemonSuspendSessionService
++    return s;
++}
++
++/// The system log: the game's log lines are dropped (the engine has its own log).
++inline std::shared_ptr<Service> MakeLog() {
++    auto s = std::make_shared<Service>("lm");
++    s->On(0, [](Context& c) { // OpenLogger
++        auto logger = std::make_shared<Service>("ILogger");
++        logger->Ok(0); // Log
++        logger->Ok(1); // SetDestination
++        c.PushInterface(logger);
++    });
++    return s;
++}
++
++/// Multimedia clock requests: remembered and answered back (the host sets its own clocks).
++inline std::shared_ptr<Service> MakeMultimedia() {
++    struct State {
++        std::mutex m;
++        uint32_t next = 1;
++        std::map<uint32_t, uint32_t> min; ///< by request id
++        std::map<uint32_t, uint32_t> old; ///< by module (the old commands)
++    };
++    auto st = std::make_shared<State>();
++    auto s = std::make_shared<Service>("mm:u");
++    s->Ok(0); // InitializeOld
++    s->Ok(1); // FinalizeOld
++    s->On(2, [st](Context& c) { // SetAndWaitOld(module, min, max)
++        const auto module = c.Pop<uint32_t>();
++        std::scoped_lock lk{st->m};
++        st->old[module] = c.Pop<uint32_t>();
++    });
++    s->On(3, [st](Context& c) { // GetOld(module)
++        const auto module = c.Pop<uint32_t>();
++        std::scoped_lock lk{st->m};
++        c.Push<uint32_t>(st->old.contains(module) ? st->old[module] : 0);
++    });
++    s->On(4, [st](Context& c) { // Initialize(module, priority, clear mode) -> id
++        std::scoped_lock lk{st->m};
++        const uint32_t id = st->next++;
++        st->min[id] = 0;
++        c.Push<uint32_t>(id);
++    });
++    s->On(5, [st](Context& c) { // Finalize(id)
++        const auto id = c.Pop<uint32_t>();
++        std::scoped_lock lk{st->m};
++        st->min.erase(id);
++    });
++    s->On(6, [st](Context& c) { // SetAndWait(id, min, max)
++        const auto id = c.Pop<uint32_t>();
++        const auto min = c.Pop<uint32_t>();
++        std::scoped_lock lk{st->m};
++        if (st->min.contains(id)) st->min[id] = min;
++    });
++    s->On(7, [st](Context& c) { // Get(id)
++        const auto id = c.Pop<uint32_t>();
++        std::scoped_lock lk{st->m};
++        c.Push<uint32_t>(st->min.contains(id) ? st->min[id] : 0);
++    });
++    return s;
++}
++
++} // namespace KartRuntime::Services
+diff --git a/src/kart_runtime/services/time.h b/src/kart_runtime/services/time.h
+new file mode 100644
+index 0000000000..ee746c03f8
+--- /dev/null
++++ b/src/kart_runtime/services/time.h
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the clock services ("time:u", "time:a", "time:s") on the host clock (docs/NATIVE_ENGINE.md, "native services").
++//
++// The console has a steady clock (seconds since an arbitrary start, with a source id that changes when the clock is reset), and
++// system clocks that are the steady clock plus an offset ("context"). Here the steady clock is the host's monotonic clock since
++// the runtime started, the system clocks are the host's wall clock, and time zone conversion is the host's local time zone.
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstring>
++#include <ctime>
++#include <memory>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++class Time {
++public:
++    struct SteadyClockTimePoint {
++        int64_t time_point; ///< seconds
++        std::array<uint8_t, 16> source_id;
++    };
++    struct SystemClockContext {
++        int64_t offset;
++        SteadyClockTimePoint steady;
++    };
++    struct CalendarTime {
++        int16_t year;
++        int8_t month, day, hour, minute, second, pad;
++    };
++    struct CalendarAdditionalInfo {
++        int32_t day_of_week, day_of_year;
++        char name[8];
++        int32_t is_dst, ut_offset;
++    };
++    static_assert(sizeof(SystemClockContext) == 0x20 && sizeof(CalendarTime) == 8 && sizeof(CalendarAdditionalInfo) == 0x18);
++    static constexpr uint32_t ResultClockMismatch = 116 | (102u << 9);
++    static constexpr uint32_t ResultOutOfRange = 116 | (902u << 9);
++
++    Time() : start{std::chrono::steady_clock::now()} {
++        // A source id per run, as the console makes one per boot.
++        const uint64_t seed = static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count());
++        for (int i = 0; i < 16; ++i) source_id[i] = static_cast<uint8_t>((seed >> ((i % 8) * 8)) ^ (0x5Bu * i));
++    }
++
++    int64_t SteadySeconds() const {
++        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
++    }
++    static int64_t Posix() { return static_cast<int64_t>(std::time(nullptr)); }
++    SteadyClockTimePoint SteadyNow() const { return {SteadySeconds(), source_id}; }
++    SystemClockContext ClockContext() const {
++        const SteadyClockTimePoint now = SteadyNow();
++        return {Posix() - now.time_point, now};
++    }
++
++    /// Local calendar time of a POSIX time (the device's own time zone = the host's).
++    static bool ToCalendar(int64_t posix, CalendarTime& out, CalendarAdditionalInfo& info) {
++        const std::time_t t = static_cast<std::time_t>(posix);
++        std::tm tm{};
++        if (!localtime_r(&t, &tm)) return false;
++        out = {static_cast<int16_t>(tm.tm_year + 1900), static_cast<int8_t>(tm.tm_mon + 1), static_cast<int8_t>(tm.tm_mday),
++               static_cast<int8_t>(tm.tm_hour), static_cast<int8_t>(tm.tm_min), static_cast<int8_t>(tm.tm_sec), 0};
++        info = {};
++        info.day_of_week = tm.tm_wday;
++        info.day_of_year = tm.tm_yday;
++        if (tm.tm_zone) std::memcpy(info.name, tm.tm_zone, std::min(std::strlen(tm.tm_zone), sizeof(info.name)));
++        info.is_dst = tm.tm_isdst > 0;
++        info.ut_offset = static_cast<int32_t>(tm.tm_gmtoff);
++        return true;
++    }
++
++    std::shared_ptr<Service> SystemClock(const char* name) {
++        auto s = std::make_shared<Service>(name);
++        s->serialize = false;
++        s->On(0, [](Context& c) { c.Push<int64_t>(Posix()); }); // GetCurrentTime
++        s->Ok(1);                                                   // SetCurrentTime (ignored: the host owns the clock)
++        s->On(2, [this](Context& c) { c.Push(ClockContext()); });       // GetSystemClockContext
++        s->Ok(3);                                                   // SetSystemClockContext
++        return s;
++    }
++    std::shared_ptr<Service> SteadyClock() {
++        auto s = std::make_shared<Service>("ISteadyClock");
++        s->serialize = false;
++        s->On(0, [this](Context& c) { c.Push(SteadyNow()); });                // GetCurrentTimePoint
++        s->On(2, [](Context& c) { c.Push<int64_t>(0); });                      // GetTestOffset
++        s->On(100, [](Context& c) { c.Push<int64_t>(Posix()); });              // GetRtcValue
++        s->On(101, [](Context& c) { c.Push<uint8_t>(0); });                    // IsRtcResetDetected
++        s->On(102, [](Context& c) { c.Push<uint32_t>(0); });                   // GetSetupResultValue
++        s->On(200, [](Context& c) { c.Push<int64_t>(0); });                    // GetInternalOffset
++        return s;
++    }
++    std::shared_ptr<Service> TimeZone() {
++        auto s = std::make_shared<Service>("ITimeZoneService");
++        s->serialize = false;
++        s->On(0, [](Context& c) { // GetDeviceLocationName
++            std::array<char, 0x24> name{};
++            std::strncpy(name.data(), "UTC", name.size());
++            if (const char* tz = std::getenv("TZ"); tz && *tz) std::strncpy(name.data(), tz[0] == ':' ? tz + 1 : tz, name.size() - 1);
++            c.Push(name);
++        });
++        s->On(101, [](Context& c) { // ToCalendarTimeWithMyRule
++            CalendarTime t{};
++            CalendarAdditionalInfo i{};
++            if (!ToCalendar(c.Pop<int64_t>(), t, i)) return c.SetResult(ResultOutOfRange);
++            c.Push(t);
++            c.Push(i);
++        });
++        s->On(100, [](Context& c) { // ToCalendarTime (with a rule from LoadTimeZoneRule): the device's zone
++            CalendarTime t{};
++            CalendarAdditionalInfo i{};
++            if (!ToCalendar(c.Pop<int64_t>(), t, i)) return c.SetResult(ResultOutOfRange);
++            c.Push(t);
++            c.Push(i);
++        });
++        s->On(202, [](Context& c) { // ToPosixTimeWithMyRule: calendar time -> one POSIX time
++            const auto t = c.Pop<CalendarTime>();
++            std::tm tm{};
++            tm.tm_year = t.year - 1900;
++            tm.tm_mon = t.month - 1;
++            tm.tm_mday = t.day;
++            tm.tm_hour = t.hour;
++            tm.tm_min = t.minute;
++            tm.tm_sec = t.second;
++            tm.tm_isdst = -1;
++            const int64_t p = static_cast<int64_t>(std::mktime(&tm));
++            c.WriteBuffer(&p, sizeof(p), 0);
++            c.Push<uint32_t>(1);
++        });
++        return s;
++    }
++    std::shared_ptr<Service> Static(const char* name) {
++        auto s = std::make_shared<Service>(name);
++        s->serialize = false;
++        s->On(0, [this](Context& c) { c.PushInterface(SystemClock("ISystemClock")); });  // GetStandardUserSystemClock
++        s->On(1, [this](Context& c) { c.PushInterface(SystemClock("ISystemClock")); });  // GetStandardNetworkSystemClock
++        s->On(2, [this](Context& c) { c.PushInterface(SteadyClock()); });                // GetStandardSteadyClock
++        s->On(3, [this](Context& c) { c.PushInterface(TimeZone()); });                   // GetTimeZoneService
++        s->On(4, [this](Context& c) { c.PushInterface(SystemClock("ISystemClock")); });  // GetStandardLocalSystemClock
++        s->On(5, [this](Context& c) { c.PushInterface(SystemClock("ISystemClock")); });  // GetEphemeralNetworkSystemClock
++        s->On(100, [](Context& c) { c.Push<uint8_t>(1); });                              // IsStandardUserSystemClockAutomaticCorrectionEnabled
++        s->Ok(101);
++        s->On(300, [this](Context& c) { // CalculateMonotonicSystemClockBaseTimePoint
++            const auto ctx = c.Pop<SystemClockContext>();
++            if (ctx.steady.source_id != source_id) return c.SetResult(ResultClockMismatch);
++            c.Push<int64_t>(ctx.offset); // the system clock's time when the steady clock (= monotonic time) was 0
++        });
++        return s;
++    }
++
++    std::array<uint8_t, 16> source_id{};
++
++private:
++    std::chrono::steady_clock::time_point start;
++};
++
++} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/sync_arbiter.h b/src/kart_runtime/sync_arbiter.h
 new file mode 100644
 index 0000000000..a5c0ed8498
@@ -10202,6 +11948,320 @@ index 0000000000..adf06efe2d
 +    fs.CloseFile(h);
 +    assert(!fs.Handles("rom:/top.txt"));
 +    std::printf("native_fs: all tests passed\n");
++    return 0;
++}
+diff --git a/src/kart_runtime/tests/test_native_kernel.cpp b/src/kart_runtime/tests/test_native_kernel.cpp
+new file mode 100644
+index 0000000000..c0eee13eba
+--- /dev/null
++++ b/src/kart_runtime/tests/test_native_kernel.cpp
+@@ -0,0 +1,308 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Tests for kart_runtime/hipc.h and native_kernel.h: messages laid out as the console SDK writes them (the same layout libnx's
++// cmif.h documents), sessions, domains, buffers, events and waits.
++#include "../native_kernel.h"
++
++#include <cassert>
++#include <cstdio>
++#include <thread>
++
++using namespace KartRuntime;
++
++namespace {
++
++std::vector<uint8_t> guest(0x10000);
++
++NativeKernel MakeKernel() {
++    return NativeKernel{{
++        [](uint64_t a, void* out, size_t n) {
++            if (a < 0x1000 || a + n > 0x1000 + guest.size()) return false;
++            std::memcpy(out, guest.data() + (a - 0x1000), n);
++            return true;
++        },
++        [](uint64_t a, const void* in, size_t n) {
++            if (a < 0x1000 || a + n > 0x1000 + guest.size()) return false;
++            std::memcpy(guest.data() + (a - 0x1000), in, n);
++            return true;
++        },
++        {},
++        {},
++    }};
++}
++
++/// A request as the SDK builds it (libnx cmifMakeRequest layout).
++struct Builder {
++    uint32_t w[64]{};
++    size_t i = 2;
++    uint32_t type = 4;
++    std::vector<uint32_t> copies;
++    bool pid = false;
++    std::vector<std::pair<uint64_t, uint32_t>> xs, as, bs, cs;
++    std::vector<uint8_t> args;
++    bool domain = false;
++    uint32_t object = 0;
++    uint8_t domain_cmd = 1;
++    uint32_t cmd = 0;
++
++    void Build(uint8_t* msg) {
++        std::memset(w, 0, sizeof(w));
++        i = 2;
++        w[0] = type | (uint32_t(xs.size()) << 16) | (uint32_t(as.size()) << 20) | (uint32_t(bs.size()) << 24);
++        if (pid || !copies.empty()) {
++            w[1] |= 1u << 31;
++            w[i++] = (pid ? 1 : 0) | uint32_t(copies.size() << 1);
++            if (pid) i += 2;
++            for (auto h : copies) w[i++] = h;
++        }
++        for (auto [addr, size] : xs) {
++            w[i++] = (size << 16) | (uint32_t((addr >> 36) & 7) << 6) | (uint32_t((addr >> 32) & 15) << 12);
++            w[i++] = uint32_t(addr);
++        }
++        for (auto* list : {&as, &bs})
++            for (auto [addr, size] : *list) {
++                w[i++] = size;
++                w[i++] = uint32_t(addr);
++                w[i++] = (uint32_t((addr >> 36) & 7) << 2) | (uint32_t((addr >> 32) & 15) << 28);
++            }
++        const size_t raw = i;
++        size_t p = (i + 3) & ~size_t{3};
++        const size_t payload = 16 + args.size();
++        if (domain) {
++            w[p] = domain_cmd | (uint32_t(payload) << 16);
++            w[p + 1] = object;
++            p += 4;
++        }
++        w[p] = Hipc::MagicIn;
++        w[p + 2] = cmd;
++        if (!args.empty()) std::memcpy(&w[p + 4], args.data(), args.size());
++        const size_t end = p + 4 + (args.size() + 3) / 4;
++        w[1] |= uint32_t(end - raw + 4);
++        if (!cs.empty()) {
++            w[1] |= uint32_t(cs.size() == 1 ? 2 : cs.size() + 2) << 10;
++            size_t c = raw + (w[1] & 0x3FF);
++            for (auto [addr, size] : cs) {
++                w[c++] = uint32_t(addr);
++                w[c++] = uint32_t(addr >> 32) | (size << 16);
++            }
++        }
++        std::memcpy(msg, w, sizeof(w));
++    }
++};
++
++/// Reads a reply as the SDK does (libnx cmifParseResponse): result, values, handles, out objects.
++struct Parsed {
++    uint32_t result = 0;
++    std::vector<uint32_t> copies, moves, objects;
++    const uint8_t* values = nullptr;
++};
++Parsed ParseReply(const uint8_t* msg, bool domain, size_t value_size, size_t objects) {
++    uint32_t w[64];
++    std::memcpy(w, msg, sizeof(w));
++    Parsed r;
++    size_t i = 2;
++    if (w[1] >> 31) {
++        const uint32_t h = w[i++];
++        for (uint32_t k = 0; k < ((h >> 1) & 15); ++k) r.copies.push_back(w[i++]);
++        for (uint32_t k = 0; k < ((h >> 5) & 15); ++k) r.moves.push_back(w[i++]);
++    }
++    i = (i + 3) & ~size_t{3};
++    if (domain) {
++        assert(w[i] == objects);
++        i += 4;
++    }
++    assert(w[i] == Hipc::MagicOut);
++    r.result = w[i + 2];
++    r.values = msg + (i + 4) * 4;
++    for (size_t k = 0; k < objects; ++k) r.objects.push_back(w[i + 4 + (value_size + 3) / 4 + k]);
++    return r;
++}
++
++void TestMessages() {
++    NativeKernel k = MakeKernel();
++    auto svc = std::make_shared<Service>("test");
++    svc->On(7, [](Context& ctx) {
++        const auto a = ctx.Pop<uint32_t>();
++        const auto b = ctx.Pop<uint64_t>(); // 8-aligned: skips 4 bytes of padding
++        ctx.Push<uint64_t>(a + b);
++    });
++    svc->On(8, [](Context& ctx) { // echo the input buffer into the output buffer, reversed
++        auto in = ctx.ReadBuffer(0);
++        std::reverse(in.begin(), in.end());
++        ctx.Push<uint32_t>(static_cast<uint32_t>(ctx.WriteBuffer(in.data(), in.size(), 0)));
++    });
++    const uint32_t h = k.OpenSession(svc);
++    assert(NativeKernel::IsNative(h) && !NativeKernel::IsNative(0x0001'8001));
++
++    uint8_t msg[0x100];
++    Builder b;
++    b.cmd = 7;
++    b.args = {5, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0};
++    b.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == 0);
++    auto r = ParseReply(msg, false, 8, 0);
++    uint64_t v = 0;
++    std::memcpy(&v, r.values, 8);
++    assert(r.result == 0 && v == 15);
++
++    // X in, C out (pointer buffers), and A in, B out (mapped buffers) through the same "auto" accessors.
++    std::memcpy(guest.data() + 0x100, "abcdef", 6);
++    for (int mapped = 0; mapped < 2; ++mapped) {
++        Builder c;
++        c.cmd = 8;
++        if (mapped) {
++            c.as = {{0x1100, 6}};
++            c.bs = {{0x1200, 16}};
++        } else {
++            c.xs = {{0x1100, 6}};
++            c.cs = {{0x1200, 16}};
++        }
++        c.Build(msg);
++        assert(k.SendSyncRequest(h, msg) == 0);
++        r = ParseReply(msg, false, 4, 0);
++        uint32_t n = 0;
++        std::memcpy(&n, r.values, 4);
++        assert(r.result == 0 && n == 6 && std::memcmp(guest.data() + 0x200, "fedcba", 6) == 0);
++        std::memset(guest.data() + 0x200, 0, 6);
++    }
++
++    b.cmd = 99;
++    b.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == 0);
++    assert(ParseReply(msg, false, 0, 0).result == CmifResult::UnknownCommand);
++    assert(svc->unknown == 1);
++    std::printf("messages: arguments, pointer and mapped buffers, unknown commands\n");
++}
++
++void TestDomains() {
++    NativeKernel k = MakeKernel();
++    auto root = std::make_shared<Service>("root");
++    auto child_calls = std::make_shared<int>(0);
++    root->On(0, [child_calls](Context& ctx) {
++        auto child = std::make_shared<Service>("child");
++        child->On(1, [child_calls](Context& c) {
++            ++*child_calls;
++            c.Push<uint32_t>(0xC0FFEE);
++        });
++        ctx.PushInterface(child);
++    });
++    const uint32_t h = k.OpenSession(root);
++    uint8_t msg[0x100];
++
++    // Plain session: the interface comes back as a move handle to a new session.
++    Builder b;
++    b.cmd = 0;
++    b.Build(msg);
++    k.SendSyncRequest(h, msg);
++    auto r = ParseReply(msg, false, 0, 0);
++    assert(r.result == 0 && r.moves.size() == 1 && NativeKernel::IsNative(r.moves[0]));
++    Builder c;
++    c.cmd = 1;
++    c.Build(msg);
++    k.SendSyncRequest(r.moves[0], msg);
++    r = ParseReply(msg, false, 4, 0);
++    assert(r.result == 0 && *child_calls == 1);
++
++    // Control: convert to domain, query pointer buffer size.
++    Builder ctl;
++    ctl.type = 5;
++    ctl.cmd = 0;
++    ctl.Build(msg);
++    k.SendSyncRequest(h, msg);
++    r = ParseReply(msg, false, 4, 0);
++    uint32_t root_id = 0;
++    std::memcpy(&root_id, r.values, 4);
++    assert(r.result == 0 && root_id == 1);
++    ctl.cmd = 3;
++    ctl.Build(msg);
++    k.SendSyncRequest(h, msg);
++    assert(ParseReply(msg, false, 2, 0).result == 0);
++
++    // Domain: the interface comes back as an object id after the values.
++    Builder d;
++    d.domain = true;
++    d.object = root_id;
++    d.cmd = 0;
++    d.Build(msg);
++    k.SendSyncRequest(h, msg);
++    r = ParseReply(msg, true, 0, 1);
++    assert(r.result == 0 && r.objects.size() == 1 && r.objects[0] == 2 && r.moves.empty());
++    d.object = r.objects[0];
++    d.cmd = 1;
++    d.Build(msg);
++    k.SendSyncRequest(h, msg);
++    r = ParseReply(msg, true, 4, 0);
++    uint32_t v = 0;
++    std::memcpy(&v, r.values, 4);
++    assert(r.result == 0 && v == 0xC0FFEE && *child_calls == 2);
++    // Close the object; a request to it then fails.
++    d.domain_cmd = 2;
++    d.Build(msg);
++    k.SendSyncRequest(h, msg);
++    d.domain_cmd = 1;
++    d.Build(msg);
++    k.SendSyncRequest(h, msg);
++    assert(ParseReply(msg, true, 0, 0).result == CmifResult::InvalidObject);
++
++    // Close message on the session: the service side goes, the handle stays until CloseHandle.
++    const size_t before = k.HandleCount();
++    Builder close;
++    close.type = 2;
++    close.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == 0);
++    assert(k.HandleCount() == before && k.Get(h));
++    d.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == KernelResult::SessionClosed);
++    assert(k.Close(h) && k.HandleCount() == before - 1 && !k.Get(h));
++    std::printf("domains: sessions, object ids, control messages, close\n");
++}
++
++void TestEvents() {
++    NativeKernel k = MakeKernel();
++    auto e1 = std::make_shared<Event>(k, "a"), e2 = std::make_shared<Event>(k, "b");
++    int32_t index = -1;
++    assert(k.WaitAny(1, {e1, e2}, 0, &index) == KernelResult::TimedOut);
++    e2->Signal();
++    assert(k.WaitAny(1, {e1, e2}, -1, &index) == 0 && index == 1);
++    assert(k.WaitAny(1, {e1, e2}, -1, &index) == 0 && index == 1); // stays signalled until cleared
++    e2->Clear();
++    // A signal from another thread wakes the waiter.
++    std::thread t{[&] {
++        while (k.Waiting() == 0) std::this_thread::yield();
++        e1->Signal();
++    }};
++    assert(k.WaitAny(1, {e1, e2}, -1, &index) == 0 && index == 0);
++    t.join();
++    e1->Clear();
++    // Timeout.
++    const auto t0 = std::chrono::steady_clock::now();
++    assert(k.WaitAny(1, {e1}, 10'000'000, &index) == KernelResult::TimedOut);
++    assert(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(9));
++    // Cancel: during the wait, and before it (the next wait ends at once).
++    uint32_t got = 0;
++    std::thread w{[&] { got = k.WaitAny(5, {e1}, -1, &index); }};
++    while (k.Waiting() == 0) std::this_thread::yield();
++    k.CancelWait(5);
++    w.join();
++    assert(got == KernelResult::Cancelled);
++    k.CancelWait(6);
++    assert(k.WaitAny(6, {e1}, -1, &index) == KernelResult::Cancelled);
++    assert(k.WaitAny(6, {e1}, 0, &index) == KernelResult::TimedOut);
++    k.Terminate(7);
++    assert(k.WaitAny(7, {e1}, -1, &index) == KernelResult::Cancelled);
++    // Handles for events.
++    const uint32_t h = k.Add(e1);
++    assert(k.GetAs<Event>(h) == e1 && !k.GetAs<Session>(h));
++    assert(k.Close(h) && !k.Close(h));
++    assert(k.Waiting() == 0);
++    std::printf("events: signal, clear, wait any, timeout, cancel, terminate\n");
++}
++
++} // namespace
++
++int main() {
++    TestMessages();
++    TestDomains();
++    TestEvents();
++    std::printf("native_kernel: all tests passed\n");
 +    return 0;
 +}
 diff --git a/src/kart_runtime/tests/test_sync_arbiter.cpp b/src/kart_runtime/tests/test_sync_arbiter.cpp
