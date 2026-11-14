@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..d472316889 100644
+index 408daa6839..d73c1669bb 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,13 +860,14 @@ index 408daa6839..d472316889 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,15 @@ add_library(core STATIC
+@@ -339,6 +359,16 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
 +    hle/kernel/native_sync.cpp
 +    hle/kernel/native_sync.h
 +    hle/kernel/native_fs_backend.cpp
++    hle/kernel/native_mii.cpp
 +    hle/kernel/native_services.cpp
 +    hle/kernel/native_services.h
 +    hle/kernel/native_services_list.cpp
@@ -876,7 +877,7 @@ index 408daa6839..d472316889 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1080,8 @@ add_library(core STATIC
+@@ -1051,6 +1081,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -885,7 +886,7 @@ index 408daa6839..d472316889 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1257,7 @@ else()
+@@ -1226,7 +1258,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -4608,6 +4609,131 @@ index 0000000000..ac7edb8a03
 +}
 +
 +} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_mii.cpp b/src/core/hle/kernel/native_mii.cpp
+new file mode 100644
+index 0000000000..4a85402ceb
+--- /dev/null
++++ b/src/core/hle/kernel/native_mii.cpp
+@@ -0,0 +1,119 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the Mii database service ("mii:e", "mii:u") answered by the runtime. The database itself (the console's Mii data
++// file, random and default Miis, conversions) is suyu's Mii library (MiiManager); this replaces only the service around it.
++#include <memory>
++#include <span>
++#include <vector>
++
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/mii/mii_manager.h"
++#include "core/hle/service/mii/mii_result.h"
++#include "core/hle/service/mii/types/char_info.h"
++#include "core/hle/service/mii/types/core_data.h"
++#include "core/hle/service/mii/types/raw_data.h"
++#include "core/hle/service/mii/types/store_data.h"
++#include "core/hle/service/mii/types/ver3_store_data.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace Service::Mii;
++using KartRuntime::Context;
++using KartRuntime::Service;
++
++/// A getter that fills the output buffer with `T` records.
++template <typename T>
++void GetInto(Context& c, MiiManager& m, DatabaseSessionMetadata& md) {
++    const auto flag = static_cast<SourceFlag>(c.Pop<u32>());
++    std::vector<T> out(c.WriteBufferSize(0) / sizeof(T));
++    u32 count = 0;
++    const Result r = m.Get(md, std::span<T>{out}, count, flag);
++    if (r.IsError()) return c.SetResult(r.raw);
++    if (count) c.WriteBuffer(out.data(), count * sizeof(T), 0);
++    c.Push<u32>(count);
++}
++
++std::shared_ptr<Service> Database(std::shared_ptr<MiiManager> m, bool is_system) {
++    auto md = std::make_shared<DatabaseSessionMetadata>();
++    m->Initialize(*md);
++    auto s = std::make_shared<Service>("IDatabaseService");
++    s->On(0, [m, md](Context& c) { c.Push<u8>(m->IsUpdated(*md, static_cast<SourceFlag>(c.Pop<u32>()))); });
++    s->On(1, [m](Context& c) { c.Push<u8>(m->IsFullDatabase()); });
++    s->On(2, [m, md](Context& c) { c.Push<u32>(m->GetCount(*md, static_cast<SourceFlag>(c.Pop<u32>()))); });
++    s->On(3, [m, md](Context& c) { GetInto<CharInfoElement>(c, *m, *md); });
++    s->On(4, [m, md](Context& c) { GetInto<CharInfo>(c, *m, *md); });
++    s->On(5, [m, md](Context& c) { // UpdateLatest(char info, source flag)
++        const auto in = c.Pop<CharInfo>();
++        const auto flag = static_cast<SourceFlag>(c.Pop<u32>());
++        CharInfo out{};
++        const Result r = m->UpdateLatest(*md, out, in, flag);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.Push(out);
++    });
++    s->On(6, [m](Context& c) { // BuildRandom(age, gender, race)
++        const auto age = static_cast<Age>(c.Pop<u32>());
++        const auto gender = static_cast<Gender>(c.Pop<u32>());
++        const auto race = static_cast<Race>(c.Pop<u32>());
++        if (age > Age::All || gender > Gender::All || race > Race::All) return c.SetResult(ResultInvalidArgument.raw);
++        CharInfo out{};
++        m->BuildRandom(out, age, gender, race);
++        c.Push(out);
++    });
++    s->On(7, [m](Context& c) { // BuildDefault(index)
++        const auto index = c.Pop<s32>();
++        if (index < 0 || index >= static_cast<s32>(RawData::DefaultMii.size())) return c.SetResult(ResultInvalidArgument.raw);
++        CharInfo out{};
++        m->BuildDefault(out, static_cast<u32>(index));
++        c.Push(out);
++    });
++    s->On(8, [m, md](Context& c) { GetInto<StoreDataElement>(c, *m, *md); });
++    s->On(9, [m, md](Context& c) { GetInto<StoreData>(c, *m, *md); });
++    s->On(11, [m](Context& c) { // FindIndex(create id, is special)
++        const auto id = c.Pop<Common::UUID>();
++        const bool special = c.Pop<u8>() != 0;
++        c.Push<s32>(m->FindIndex(id, special));
++    });
++    s->On(21, [m, md](Context& c) { // GetIndex(char info)
++        const auto info = c.Pop<CharInfo>();
++        s32 index = -1;
++        const Result r = m->GetIndex(*md, info, index);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.Push(index);
++    });
++    s->On(22, [m, md](Context& c) { m->SetInterfaceVersion(*md, c.Pop<u32>()); });
++    s->On(23, [m](Context& c) { // Convert(v3 store data)
++        const auto v3 = c.Pop<Ver3StoreData>();
++        CharInfo out{};
++        const Result r = m->ConvertV3ToCharInfo(out, v3);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.Push(out);
++    });
++    s->On(24, [m](Context& c) { // ConvertCoreDataToCharInfo
++        const auto core = c.Pop<CoreData>();
++        CharInfo out{};
++        const Result r = m->ConvertCoreDataToCharInfo(out, core);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.Push(out);
++    });
++    s->On(25, [m](Context& c) { // ConvertCharInfoToCoreData
++        const auto info = c.Pop<CharInfo>();
++        CoreData out{};
++        const Result r = m->ConvertCharInfoToCoreData(out, info);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.Push(out);
++    });
++    (void)is_system;
++    return s;
++}
++
++} // namespace
++
++std::shared_ptr<Service> MakeMiiService(const char* name, bool is_system) {
++    static auto manager = std::make_shared<MiiManager>();
++    auto s = std::make_shared<Service>(name);
++    s->On(0, [is_system](Context& c) { c.PushInterface(Database(manager, is_system)); }); // GetDatabaseService
++    return s;
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
 index 0000000000..0c1ab10133
@@ -4917,10 +5043,10 @@ index 0000000000..3fef566612
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..752b13486b
+index 0000000000..df23b12598
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,368 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -4951,6 +5077,9 @@ index 0000000000..752b13486b
 +#include "core/hle/service/set/settings_server.h"
 +#include "core/hle/service/set/settings_types.h"
 +#include "core/hle/service/sm/sm.h"
++#include "core/hle/service/ns/platform_service_manager.h"
++#include "core/hle/kernel/k_shared_memory.h"
++#include "core/hle/kernel/k_handle_table.h"
 +#include "core/hle/service/vi/application_display_service.h"
 +#include "core/hle/service/vi/container.h"
 +#include "core/hle/service/vi/manager_root_service.h"
@@ -5199,6 +5328,40 @@ index 0000000000..752b13486b
 +    return applets.Root("appletOE");
 +}
 +
++
++/// Shared fonts ("pl:u"): the font table of the emulator's font loader (the player's firmware fonts or the stand-ins); the fonts'
++/// shared memory is still the emulated kernel's object (memory system calls are emulated), handed out as a copy handle.
++std::shared_ptr<KartRuntime::Service> MakeSharedFont(KernelCore& kernel) {
++    Core::System& system = kernel.System();
++    auto pl = system.ServiceManager().GetService<Service::NS::IPlatformServiceManager>("pl:u", true);
++    if (!pl) return nullptr;
++    auto s = std::make_shared<KartRuntime::Service>("pl:u");
++    s->Ok(0);                                                                   // RequestLoad
++    s->On(1, [](KartRuntime::Context& c) { c.Push<u32>(1); });                 // GetLoadState: loaded
++    s->On(2, [pl](KartRuntime::Context& c) { c.Push<u32>(pl->FontOffsetAndSize(c.Pop<u32>()).second); }); // GetSize
++    s->On(3, [pl](KartRuntime::Context& c) { c.Push<u32>(pl->FontOffsetAndSize(c.Pop<u32>()).first); });  // GetSharedMemoryAddressOffset
++    s->On(4, [pl, &kernel](KartRuntime::Context& c) { // GetSharedMemoryNativeHandle
++        Handle h{};
++        if (GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, &pl->FontSharedMemory()).IsError()) return c.SetResult(0xD201); // out of handles
++        c.PushCopyHandle(h);
++    });
++    s->On(5, [pl](KartRuntime::Context& c) { // GetSharedFontInOrderOfPriority(language) -> codes, offsets, sizes, loaded, count
++        c.Pop<u64>();
++        const size_t n = std::min<size_t>({6, pl->FontCount(), c.WriteBufferSize(0) / 4, c.WriteBufferSize(1) / 4, c.WriteBufferSize(2) / 4});
++        std::vector<u32> codes(n), offsets(n), sizes(n);
++        for (size_t i = 0; i < n; ++i) {
++            codes[i] = static_cast<u32>(i);
++            std::tie(offsets[i], sizes[i]) = pl->FontOffsetAndSize(i);
++        }
++        c.WriteBuffer(codes.data(), n * 4, 0);
++        c.WriteBuffer(offsets.data(), n * 4, 1);
++        c.WriteBuffer(sizes.data(), n * 4, 2);
++        c.Push<u8>(1);
++        c.Push<u32>(static_cast<u32>(n));
++    });
++    return s;
++}
++
 +} // namespace
 +
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f) {
@@ -5240,6 +5403,9 @@ index 0000000000..752b13486b
 +             static KartRuntime::Services::FileSystemService fs{MakeFsBackend(system)};
 +             return fs.Root("fsp-srv");
 +         }},
++        {"pl:u", [&] { return MakeSharedFont(kernel); }},
++        {"mii:e", [] { return MakeMiiService("mii:e", true); }},
++        {"mii:u", [] { return MakeMiiService("mii:u", false); }},
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
 +        {"vi:u", [&] { return NativeDisplay(runtime).Root("vi:u", 0); }},
 +        {"vi:s", [&] { return NativeDisplay(runtime).Root("vi:s", 1); }},
@@ -5251,10 +5417,10 @@ index 0000000000..752b13486b
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..01553e2d6f
+index 0000000000..5c90833037
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,41 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -5284,6 +5450,9 @@ index 0000000000..01553e2d6f
 +/// The service object for `name`, or null when the runtime does not have it (the emulated one is used).
 +/// The engine's file system for the runtime's "fsp-srv" (native_fs_backend.cpp).
 +std::shared_ptr<KartRuntime::Services::FsBackend> MakeFsBackend(Core::System& system);
++
++/// The Mii database service around suyu's Mii library (native_mii.cpp).
++std::shared_ptr<KartRuntime::Service> MakeMiiService(const char* name, bool is_system);
 +
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
@@ -6377,6 +6546,49 @@ index 0000000000..26c8087726
 +bool TryHandle(Kernel::KernelCore& kernel, Kernel::KServerSession& session, Result* out);
 +
 +} // namespace Service::NativeIpc
+diff --git a/src/core/hle/service/ns/platform_service_manager.cpp b/src/core/hle/service/ns/platform_service_manager.cpp
+index 085363e085..1c56591c95 100644
+--- a/src/core/hle/service/ns/platform_service_manager.cpp
++++ b/src/core/hle/service/ns/platform_service_manager.cpp
+@@ -158,6 +158,20 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
+ 
+ IPlatformServiceManager::~IPlatformServiceManager() = default;
+ 
++std::size_t IPlatformServiceManager::FontCount() const {
++    return impl->shared_font_regions.size();
++}
++
++std::pair<u32, u32> IPlatformServiceManager::FontOffsetAndSize(std::size_t index) const {
++    const auto& r = impl->GetSharedFontRegion(index);
++    return {r.offset, r.size};
++}
++
++Kernel::KSharedMemory& IPlatformServiceManager::FontSharedMemory() {
++    std::memcpy(kernel.GetFontSharedMem().GetPointer(), impl->shared_font.data(), impl->shared_font.size());
++    return kernel.GetFontSharedMem();
++}
++
+ Result IPlatformServiceManager::RequestLoad(SharedFontType type) {
+     // Games don't call this so all fonts should be loaded
+     LOG_DEBUG(Service_NS, "called, shared_font_type={}", type);
+diff --git a/src/core/hle/service/ns/platform_service_manager.h b/src/core/hle/service/ns/platform_service_manager.h
+index b82c385a6c..c140cc9801 100644
+--- a/src/core/hle/service/ns/platform_service_manager.h
++++ b/src/core/hle/service/ns/platform_service_manager.h
+@@ -57,6 +57,13 @@ public:
+     explicit IPlatformServiceManager(Core::System& system_, const char* service_name_);
+     ~IPlatformServiceManager() override;
+ 
++    // kart-recomp (native services): the font table and shared memory for the runtime's "pl:u".
++    std::size_t FontCount() const;
++    /// (offset in the shared memory, size) of font `index`
++    std::pair<u32, u32> FontOffsetAndSize(std::size_t index) const;
++    /// The shared memory with the fonts copied in.
++    Kernel::KSharedMemory& FontSharedMemory();
++
+ private:
+     Result RequestLoad(SharedFontType type);
+     Result GetLoadState(Out<LoadState> out_load_state, SharedFontType type);
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..1b76552ee6 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
@@ -10217,10 +10429,10 @@ index 0000000000..6b0956610e
 +} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/hipc.h b/src/kart_runtime/hipc.h
 new file mode 100644
-index 0000000000..ee66c9a722
+index 0000000000..dd0326c478
 --- /dev/null
 +++ b/src/kart_runtime/hipc.h
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,225 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the console's service message format (HIPC transport + CMIF commands), read and written natively
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -10376,9 +10588,10 @@ index 0000000000..ee66c9a722
 +    std::vector<uint32_t> copy_handles, move_handles;
 +    std::vector<uint32_t> out_objects; ///< domain object ids (domain sessions only)
 +
++    /// Each value at its natural alignment (as the SDK reads them: a bool then a u32 puts the u32 at offset 4).
 +    template <typename T>
 +    void Push(const T& v) {
-+        const size_t at = data.size();
++        const size_t at = (data.size() + alignof(T) - 1) / alignof(T) * alignof(T);
 +        data.resize(at + sizeof(T));
 +        std::memcpy(data.data() + at, &v, sizeof(T));
 +    }
@@ -13564,10 +13777,10 @@ index 0000000000..adf06efe2d
 +}
 diff --git a/src/kart_runtime/tests/test_native_kernel.cpp b/src/kart_runtime/tests/test_native_kernel.cpp
 new file mode 100644
-index 0000000000..ab6e85c219
+index 0000000000..d10bf1aba3
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_native_kernel.cpp
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,332 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Tests for kart_runtime/hipc.h and native_kernel.h: messages laid out as the console SDK writes them (the same layout libnx's
 +// cmif.h documents), sessions, domains, buffers, events and waits.
@@ -13735,6 +13948,18 @@ index 0000000000..ab6e85c219
 +        assert(r.result == 0 && n == 6 && std::memcmp(guest.data() + 0x200, "fedcba", 6) == 0);
 +        std::memset(guest.data() + 0x200, 0, 6);
 +    }
++
++    // Values sit at their natural alignment.
++    svc->On(10, [](Context& ctx) {
++        ctx.Push<uint8_t>(1);
++        ctx.Push<uint32_t>(6);
++    });
++    Builder ab;
++    ab.cmd = 10;
++    ab.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == 0);
++    r = ParseReply(msg, false, 8, 0);
++    assert(r.values[0] == 1 && r.values[4] == 6);
 +
 +    // The process id is the kernel's, whatever the message holds.
 +    svc->On(9, [](Context& ctx) { ctx.Push<uint64_t>(ctx.Pid()); });

@@ -586,6 +586,11 @@ sessions and suyu's HLE service code.
   objects the emulated service used. Like the emulated service: Commit answers success (writes reach the save folder directly),
   storage reads past the end return what is there. The runtime fills in the sender's process id (the kernel's job), which
   `SetCurrentProcess` needs. Checked: 1P race, saves byte-identical before/after (this race writes none).
+- **Shared fonts** (`pl:u`): the font table of the engine's font loader (firmware fonts or stand-ins); the fonts' shared
+  memory is still the emulated kernel's object (memory system calls are emulated), handed out as a copy handle.
+  **Mii database** (`mii:e`, `mii:u`, `core/hle/kernel/native_mii.cpp`): the service around suyu's Mii library.
+- Found on the way: reply values must sit at their natural alignment (a bool then a u32 puts the u32 at offset 4); packed,
+  the font count read as 0x601 and the game waited forever.
 - Diagnostics: `KARTRECOMP_NATIVE_SERVICES_TRACE=1` (first call of each command) / `=2` (repeats too; the engine's logger folds
   repeated lines), `KARTRECOMP_NATIVE_SERVICES_DUMP=<file>` (every request and reply), unknown commands and missing objects are
   logged.
