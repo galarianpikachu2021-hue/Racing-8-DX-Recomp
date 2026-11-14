@@ -571,4 +571,14 @@ sessions and suyu's HLE service code.
   `SetOpenUrlHandler`), any other applet finished at once with no output.
 - A thread whose runtime wait ends because it is being terminated now exits inside the wait (`KThread::Exit`), as the emulated
   kernel's run loop does: returning the error to the game made the SDK stop with a panic at shutdown.
-- Checked: 1P race (60 fps), 4P split-screen through the controller applet (59.9 fps, 4 views), clean exits.
+- After a library applet's output is collected the game gets a "resume" message when it turned those on
+  (SetRestartMessageEnabled): without it MK8 kept players 2-4 frozen on the character screen after the controller applet.
+- **Display service** (`vi:m/u/s`, `kart_runtime/services/display.h`): displays, the game's layer (the applet manager makes it
+  here when the display service is native), the stray layer the game opens, the native-window parcel, and the buffer queue's
+  setup transactions (Connect, SetPreallocatedBuffer, RequestBuffer, Query, ...) with Android parcels. Frames never go through
+  it (native graphics queue). The vsync event is signalled by a once-per-refresh host tick (`KARTRECOMP_VSYNC_HZ`).
+- Checked: 1P race (60 fps, pictures), 4P split-screen through the controller applet (59.8 fps, all four players racing),
+  clean exits. Test scripts: `local/exp/mprun3.sh` now runs without mods too (`KARTRECOMP_NO_MODS=1`); its "4 views" summary
+  only says the menus were split, check the shots.
+- Known: at the INT stop the emulated services are torn down while game threads still run; a failed request there makes the
+  game stop with a panic (only at shutdown, logged).

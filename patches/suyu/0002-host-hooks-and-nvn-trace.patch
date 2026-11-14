@@ -4408,10 +4408,10 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..e086c988c6
+index 0000000000..13862ba270
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,232 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -4492,6 +4492,9 @@ index 0000000000..e086c988c6
 +    static std::once_flag once;
 +    std::call_once(once, [&] {
 +        g_kernel.store(&kernel, std::memory_order_release);
++        runtime.on_invalid_object = [](u32 handle, u32 object, u32 command, bool domain) {
++            LOG_WARNING(Service, "native services: request {} on handle {:08X} names object {} the session does not have (domain {})", command, handle, object, domain);
++        };
 +        KartRuntime::Service::on_unknown = [](const std::string& service, u32 cmd) {
 +            static std::mutex m;
 +            static std::set<std::pair<std::string, u32>> seen;
@@ -4504,7 +4507,10 @@ index 0000000000..e086c988c6
 +                static std::mutex m;
 +                static std::map<std::pair<std::string, u32>, u64> counts;
 +                std::scoped_lock lk{m};
-+                if (counts[{service, cmd}]++ == 0) LOG_INFO(Service, "native services: first {} command {}", service, cmd);
++                static const bool all = std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")[0] == '2';
++                const u64 n = counts[{service, cmd}]++;
++                if (n == 0) LOG_INFO(Service, "native services: first {} command {}", service, cmd);
++                else if (all && n < 40) LOG_INFO(Service, "native services: {} command {} (call {})", service, cmd, n + 1);
 +            };
 +        }
 +    });
@@ -4521,6 +4527,10 @@ index 0000000000..e086c988c6
 +#endif
 +    }();
 +    return on;
++}
++
++bool ServiceWanted(const std::string& name) {
++    return Enabled() && Wanted(name);
 +}
 +
 +bool IsNative(Svc::Handle handle) {
@@ -4636,10 +4646,10 @@ index 0000000000..e086c988c6
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..e3c9e31e9f
+index 0000000000..3fef566612
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -4667,6 +4677,8 @@ index 0000000000..e3c9e31e9f
 +
 +bool Enabled();
 +bool IsNative(Svc::Handle handle);
++/// True when the runtime is asked to answer `name` (KARTRECOMP_NATIVE_SERVICES), whether or not it has that service.
++bool ServiceWanted(const std::string& name);
 +
 +/// The service manager's GetService: a new runtime session handle when `name` is served by the runtime.
 +std::optional<u32> OpenService(KernelCore& kernel, const std::string& name);
@@ -4685,16 +4697,18 @@ index 0000000000..e3c9e31e9f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..18df0d61a0
+index 0000000000..fb505cf6b5
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,323 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
 +#include <algorithm>
 +#include <functional>
++#include <atomic>
 +#include <map>
++#include <thread>
 +
 +#include "common/settings.h"
 +#include "core/core.h"
@@ -4704,6 +4718,7 @@ index 0000000000..18df0d61a0
 +#include "core/file_sys/patch_manager.h"
 +#include "core/file_sys/registered_cache.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services.h"
 +#include "core/hle/service/acc/profile_manager.h"
 +#include "common/fs/fs.h"
 +#include "common/fs/path_util.h"
@@ -4726,6 +4741,7 @@ index 0000000000..18df0d61a0
 +#include "kart_runtime/native_kernel.h"
 +#include "kart_runtime/services/account.h"
 +#include "kart_runtime/services/applet.h"
++#include "kart_runtime/services/display.h"
 +#include "kart_runtime/services/system.h"
 +#include "kart_runtime/services/time.h"
 +
@@ -4785,6 +4801,35 @@ index 0000000000..18df0d61a0
 +
 +
 +std::function<bool(const std::string&)> g_open_url;
++
++/// The display service and its once-per-refresh vsync tick (KARTRECOMP_VSYNC_HZ, as the native renderer's display clock).
++KartRuntime::Services::Display& NativeDisplay(KartRuntime::NativeKernel& runtime) {
++    struct Holder {
++        explicit Holder(KartRuntime::NativeKernel& k) : display{k} {
++            display.on_unknown_transaction = [](u32 code) { LOG_WARNING(Service_VI, "native services: buffer queue transaction {} is not implemented", code); };
++            ticker = std::thread([this] {
++                int hz = 60;
++                if (const char* v = std::getenv("KARTRECOMP_VSYNC_HZ")) hz = std::clamp(std::atoi(v), 30, 360);
++                const auto period = std::chrono::nanoseconds{1000000000 / hz};
++                auto next = std::chrono::steady_clock::now();
++                while (!stop.load(std::memory_order_relaxed)) {
++                    next += period;
++                    std::this_thread::sleep_until(next);
++                    display.Vsync();
++                }
++            });
++        }
++        ~Holder() {
++            stop = true;
++            if (ticker.joinable()) ticker.join();
++        }
++        KartRuntime::Services::Display display;
++        std::atomic<bool> stop{false};
++        std::thread ticker;
++    };
++    static Holder holder{runtime};
++    return holder.display;
++}
 +KartRuntime::Services::Applets* g_applets = nullptr;
 +
 +u64 DesiredLanguage(Core::System& system) {
@@ -4831,6 +4876,7 @@ index 0000000000..18df0d61a0
 +/// The engine's controller reconfiguration for the controller applet (what the emulator's default controller applet did).
 +AppletHooks::ControllerResult ControllerApplet(Core::System& system, const AppletHooks::ControllerArgs& a) {
 +    auto& hid = system.HIDCore();
++    LOG_INFO(Service_AM, "native services: controller applet min {} max {} single {} styles {:#x}", a.min_players, a.max_players, a.single, a.style_set);
 +    const size_t min_players = a.single ? 1 : static_cast<size_t>(std::max(a.min_players, 1));
 +    const bool pro = a.style_set & 1, handheld = a.style_set & 2, dual = a.style_set & 4, left = a.style_set & 8, right = a.style_set & 16;
 +    hid.GetEmulatedController(Core::HID::NpadIdType::Handheld)->Disconnect();
@@ -4903,9 +4949,17 @@ index 0000000000..18df0d61a0
 +    h.docked = [] { return Settings::IsDockedMode(); };
 +    h.performance_mode = [&system] { return static_cast<u32>(system.GetAPMController().GetCurrentPerformanceMode()); };
 +    h.exit_locked = [&system](bool locked) { system.SetExitLocked(locked); };
++    h.log = [](const std::string& m) { LOG_INFO(Service_AM, "native services: {}", m); };
 +    h.terminate_result = [](u32 r) { LOG_WARNING(Service_AM, "native services: the game set its terminate result {:#x} ({:04}-{:04})", r, (r & 0x1FF) + 2000, (r >> 9) & 0x1FFF); };
 +    const u64 aruid = h.aruid;
-+    h.create_layer = [&system, aruid](u64* out) {
++    if (ServiceWanted("vi:m")) {
++        // The display service is the runtime's too: the layer is made there.
++        auto* display = &NativeDisplay(runtime);
++        h.create_layer = [display](u64* out) {
++            *out = display->CreateLayer();
++            return true;
++        };
++    } else h.create_layer = [&system, aruid](u64* out) {
 +        // The game's layer on the default display (the display service still makes the window's buffer queue).
 +        std::shared_ptr<Service::VI::IApplicationDisplayService> display;
 +        auto root = system.ServiceManager().GetService<Service::VI::IManagerRootService>("vi:m", true);
@@ -4961,6 +5015,9 @@ index 0000000000..18df0d61a0
 +        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
 +        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
 +        {"appletOE", [&] { return MakeApplets(runtime, kernel); }},
++        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
++        {"vi:u", [&] { return NativeDisplay(runtime).Root("vi:u", 0); }},
++        {"vi:s", [&] { return NativeDisplay(runtime).Root("vi:s", 1); }},
 +    };
 +    const auto it = factories.find(name);
 +    return it == factories.end() ? nullptr : it->second();
@@ -10413,10 +10470,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..7834e04f92
+index 0000000000..3e92d12437
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,517 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -10717,6 +10774,7 @@ index 0000000000..7834e04f92
 +        }
 +        if (!target) {
 +            ctx.SetResult(CmifResult::InvalidObject);
++            if (on_invalid_object) on_invalid_object(handle, req.object_id, req.command, domain);
 +        } else {
 +            target->Handle(ctx);
 +        }
@@ -10814,6 +10872,9 @@ index 0000000000..7834e04f92
 +        std::scoped_lock lk{wait_mutex};
 +        return by_thread.size();
 +    }
++
++    /// A request named an object the session does not have (diagnostics).
++    std::function<void(uint32_t handle, uint32_t object, uint32_t command, bool domain)> on_invalid_object;
 +
 +    bool Read(uint64_t addr, void* out, size_t n) { return hooks.read && hooks.read(addr, out, n); }
 +    bool Write(uint64_t addr, const void* in, size_t n) { return hooks.write && hooks.write(addr, in, n); }
@@ -11070,10 +11131,10 @@ index 0000000000..bc29741ca2
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/applet.h b/src/kart_runtime/services/applet.h
 new file mode 100644
-index 0000000000..f15db695de
+index 0000000000..bb6e117de8
 --- /dev/null
 +++ b/src/kart_runtime/services/applet.h
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,494 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the applet manager as an application sees it ("appletOE": IApplicationProxy and its interfaces)
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -11108,6 +11169,7 @@ index 0000000000..f15db695de
 +    std::function<bool(uint64_t*)> create_layer; ///< CreateManagedDisplayLayer
 +    std::function<void(bool)> exit_locked;       ///< LockExit / UnlockExit
 +    std::function<void(uint32_t)> terminate_result; ///< SetTerminateResult (the game is about to stop on an error)
++    std::function<void(const std::string&)> log;      ///< diagnostics
 +    struct ControllerArgs {
 +        int min_players = 1, max_players = 4;
 +        bool single = false;
@@ -11262,7 +11324,10 @@ index 0000000000..f15db695de
 +            focus_notify = c.Pop<uint8_t>() != 0;
 +            UpdateEventLocked();
 +        });
-+        s->Ok(14); // SetRestartMessageEnabled
++        s->On(14, [this](Context& c) { // SetRestartMessageEnabled
++            std::scoped_lock lk{mutex};
++            resume_notify = c.Pop<uint8_t>() != 0;
++        });
 +        s->Ok(15); // SetScreenShotAppletIdentityInfo
 +        s->Ok(16); // SetOutOfFocusSuspendingEnabled
 +        s->Ok(19); // SetAlbumImageOrientation
@@ -11392,7 +11457,13 @@ index 0000000000..f15db695de
 +            if (!obj || obj->name != "IStorage") return c.SetResult(128 | (503u << 9));
 +            la->in.push_back(std::static_pointer_cast<Storage>(obj));
 +        });
-+        auto pop = [la](Context& c) { // PopOutData / PopInteractiveOutData
++        auto pop = [this, la](Context& c) { // PopOutData / PopInteractiveOutData
++            {
++                // The caller is back in front: it gets a "resume" message when it asked for those (as the console does).
++                std::scoped_lock lk{mutex};
++                if (resume_notify) resume_pending = true;
++                UpdateEventLocked();
++            }
 +            if (la->out.empty()) return c.SetResult(ResultNoDataInChannel);
 +            auto st = la->out.front();
 +            la->out.pop_front();
@@ -11419,6 +11490,11 @@ index 0000000000..f15db695de
 +            // argument (header: min players, max players, ..., single mode at 5). Other modes (firmware update, strap guide)
 +            // finish with the same result.
 +            AppletHooks::ControllerArgs args;
++            if (hooks.log) {
++                std::string sizes;
++                for (const auto& st : la.in) sizes += std::to_string(st->data.size()) + " ";
++                hooks.log("controller applet input storages: " + sizes);
++            }
 +            if (la.in.size() >= 2 && la.in[1]->data.size() >= 0x14) std::memcpy(&args.style_set, la.in[1]->data.data() + 12, 4);
 +            if (la.in.size() >= 3 && la.in[2]->data.size() >= 7) {
 +                args.min_players = static_cast<int8_t>(la.in[2]->data[0]);
@@ -11510,6 +11586,10 @@ index 0000000000..f15db695de
 +    }
 +
 +    uint32_t PopMessageLocked() {
++        if (resume_pending) {
++            resume_pending = false;
++            return Resume;
++        }
 +        if (exit_requested != exit_acknowledged) {
 +            exit_acknowledged = exit_requested;
 +            return Exit;
@@ -11529,7 +11609,7 @@ index 0000000000..f15db695de
 +        return 0;
 +    }
 +    void UpdateEventLocked() {
-+        const bool pending = (exit_requested != exit_acknowledged) || (focus_notify && focus_changed) || operation_mode_changed ||
++        const bool pending = resume_pending || (exit_requested != exit_acknowledged) || (focus_notify && focus_changed) || operation_mode_changed ||
 +                             performance_mode_changed;
 +        if (pending) message_event->Signal();
 +        else message_event->Clear();
@@ -11545,6 +11625,356 @@ index 0000000000..f15db695de
 +    bool performance_mode_notify = true, performance_mode_changed = false;
 +    bool exit_requested = false, exit_acknowledged = false;
 +    bool preselected_popped = false;
++    bool resume_notify = false, resume_pending = false;
++};
++
++} // namespace KartRuntime::Services
+diff --git a/src/kart_runtime/services/display.h b/src/kart_runtime/services/display.h
+new file mode 100644
+index 0000000000..dd18851237
+--- /dev/null
++++ b/src/kart_runtime/services/display.h
+@@ -0,0 +1,343 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the display service ("vi:m", "vi:u", "vi:s") and its buffer queues ("IHOSBinderDriver")
++// (docs/NATIVE_ENGINE.md, "native services").
++//
++// The game opens the default display, opens its layer (made by the applet manager) and gets a "native window": an Android-style
++// parcel naming a buffer-queue binder. Its graphics driver connects to that queue and registers its window textures with it at
++// boot. Frames are not queued here: the engine's renderer takes the game's window acquire and present calls directly (native
++// graphics queue), so the queue only has to answer the setup transactions the way the console's does. Vsync: the display's event
++// is signalled once per refresh by the engine's display clock (`Vsync`).
++#pragma once
++
++#include <array>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++class Display {
++public:
++    static constexpr uint32_t ResultOperationFailed = 114 | (6u << 9);
++    static constexpr uint32_t ResultNotFound = 114 | (7u << 9);
++    static constexpr uint32_t ResultPermissionDenied = 114 | (5u << 9);
++
++    explicit Display(NativeKernel& k) : kernel{k} {}
++
++    /// The applet manager's CreateManagedDisplayLayer: a layer on the default display.
++    uint64_t CreateLayer() {
++        std::scoped_lock lk{mutex};
++        const uint64_t id = next_layer++;
++        layers[id] = next_binder++;
++        return id;
++    }
++    /// Called once per display refresh.
++    void Vsync() {
++        std::scoped_lock lk{mutex};
++        for (auto& [id, e] : vsync_events) e->Signal();
++    }
++
++    std::shared_ptr<Service> Root(const char* name, uint32_t get_display_service_cmd) {
++        auto s = std::make_shared<Service>(name);
++        s->On(get_display_service_cmd, [this](Context& c) { c.PushInterface(ApplicationDisplayService()); });
++        return s;
++    }
++
++    /// Parcels: header {data size, data offset, objects size, objects offset}, then 4-byte aligned values.
++    class ParcelReader {
++    public:
++        explicit ParcelReader(const std::vector<uint8_t>& d) : data{d} {
++            uint32_t offset = 0;
++            if (data.size() >= 16) std::memcpy(&offset, data.data() + 4, 4);
++            pos = offset;
++            // Interface token: u32 strict-mode policy, u32 length, UTF-16 characters + terminator, aligned.
++            Read<uint32_t>();
++            const uint32_t len = Read<uint32_t>();
++            pos += (static_cast<size_t>(len) + 1) * 2;
++            pos = (pos + 3) & ~size_t{3};
++        }
++        template <typename T>
++        T Read() {
++            T v{};
++            if (pos + sizeof(T) <= data.size()) std::memcpy(&v, data.data() + pos, sizeof(T));
++            pos = (pos + sizeof(T) + 3) & ~size_t{3};
++            return v;
++        }
++        std::vector<uint8_t> ReadBytes(size_t n) {
++            std::vector<uint8_t> out(n);
++            if (pos + n <= data.size()) std::memcpy(out.data(), data.data() + pos, n);
++            pos = (pos + n + 3) & ~size_t{3};
++            return out;
++        }
++
++    private:
++        const std::vector<uint8_t>& data;
++        size_t pos = 0;
++    };
++    class ParcelWriter {
++    public:
++        template <typename T>
++        void Write(const T& v) {
++            const size_t at = data.size();
++            data.resize(at + ((sizeof(T) + 3) & ~size_t{3}));
++            std::memcpy(data.data() + at, &v, sizeof(T));
++        }
++        void WriteBytes(const std::vector<uint8_t>& b) {
++            const size_t at = data.size();
++            data.resize(at + ((b.size() + 3) & ~size_t{3}));
++            std::memcpy(data.data() + at, b.data(), b.size());
++        }
++        void WriteObjectSlot() { objects.resize(objects.size() + 4); }
++        std::vector<uint8_t> Serialize() const {
++            std::vector<uint8_t> out(16 + data.size() + objects.size());
++            const uint32_t h[4]{static_cast<uint32_t>(data.size()), 16, static_cast<uint32_t>(objects.size()),
++                                static_cast<uint32_t>(16 + data.size())};
++            std::memcpy(out.data(), h, 16);
++            std::memcpy(out.data() + 16, data.data(), data.size());
++            if (!objects.empty()) std::memcpy(out.data() + 16 + data.size(), objects.data(), objects.size());
++            return out;
++        }
++
++    private:
++        std::vector<uint8_t> data, objects;
++    };
++
++    /// One buffer queue (the producer side the game's graphics driver talks to).
++    struct Queue {
++        bool connected = false;
++        int32_t api = 0;
++        int32_t buffer_count = 0;
++        std::map<int32_t, std::vector<uint8_t>> buffers; ///< slot -> flattened graphic buffer as registered
++        int32_t next_slot = 0;
++        std::shared_ptr<Event> buffer_event;
++    };
++    /// Android status codes.
++    static constexpr int32_t NoError = 0, BadValue = -22, NoInit = -19;
++
++    std::vector<uint8_t> Transact(int32_t binder, uint32_t code, const std::vector<uint8_t>& in) {
++        std::scoped_lock lk{mutex};
++        Queue& q = queues[binder];
++        ParcelReader r{in};
++        ParcelWriter w;
++        int32_t status = NoError;
++        switch (code) {
++        case 10: { // Connect(listener?, api, producer controlled by app) -> QueueBufferOutput
++            r.Read<uint8_t>();
++            q.api = r.Read<int32_t>();
++            q.connected = true;
++            const uint32_t out[4]{1, 1, 0, 0}; // width, height (default 1x1), transform hint, pending buffers
++            w.Write(out);
++            break;
++        }
++        case 11: // Disconnect(api)
++            q.connected = false;
++            break;
++        case 14: { // SetPreallocatedBuffer(slot, object: valid flag, flattened size, buffer)
++            const int32_t slot = r.Read<int32_t>();
++            if (r.Read<uint32_t>() != 0) {
++                const int64_t size = r.Read<int64_t>();
++                if (size > 0 && size < 0x1000) q.buffers[slot] = r.ReadBytes(static_cast<size_t>(size));
++            } else {
++                q.buffers.erase(slot);
++            }
++            break;
++        }
++        case 1: { // RequestBuffer(slot) -> flattened buffer
++            const int32_t slot = r.Read<int32_t>();
++            const auto it = q.buffers.find(slot);
++            if (it == q.buffers.end()) {
++                w.Write<uint32_t>(0);
++            } else {
++                w.Write<uint32_t>(1);
++                w.Write<int64_t>(static_cast<int64_t>(it->second.size()));
++                w.WriteBytes(it->second);
++            }
++            break;
++        }
++        case 2: // SetBufferCount(count)
++            q.buffer_count = r.Read<int32_t>();
++            break;
++        case 3: { // DequeueBuffer(async, w, h, format, usage) -> slot, fence (frames are not queued here: slots in turn)
++            int32_t slot = 0;
++            if (!q.buffers.empty()) {
++                auto it = q.buffers.upper_bound(q.next_slot - 1);
++                if (it == q.buffers.end()) it = q.buffers.begin();
++                slot = it->first;
++                q.next_slot = slot + 1;
++            }
++            w.Write<int32_t>(slot);
++            w.Write<uint32_t>(1);                       // fence present
++            w.Write<int64_t>(0x24);                     // flattened size of a fence
++            std::array<uint8_t, 0x24> fence{};          // no sync points
++            std::memset(fence.data() + 4, 0xFF, 4);     // first point: invalid id
++            w.WriteBytes({fence.begin(), fence.end()});
++            break;
++        }
++        case 7: { // QueueBuffer(slot, input) -> output
++            const uint32_t out[4]{1, 1, 0, 0};
++            w.Write(out);
++            break;
++        }
++        case 8: // CancelBuffer
++            break;
++        case 9: { // Query(what)
++            const int32_t what = r.Read<int32_t>();
++            int32_t value = 0;
++            switch (what) {
++            case 0: value = 1; break;  // width (the queue's default 1x1)
++            case 1: value = 1; break;  // height
++            case 2: value = 1; break;  // format: RGBA8888
++            case 3: value = 0; break;  // min undequeued buffers (synchronous queue)
++            case 9: value = 0; break;  // consumer running behind
++            case 10: value = 0; break; // consumer usage bits
++            case 11: value = 0; break; // sticky transform
++            case 12: value = 3; break; // (the emulator answered its max buffer count here)
++            default: status = BadValue; break;
++            }
++            w.Write(value);
++            break;
++        }
++        case 13: // GetBufferHistory
++            break;
++        default:
++            status = BadValue;
++            if (on_unknown_transaction) on_unknown_transaction(code);
++            break;
++        }
++        w.Write(status);
++        return w.Serialize();
++    }
++
++    std::function<void(uint32_t)> on_unknown_transaction;
++
++private:
++    std::shared_ptr<Service> ApplicationDisplayService() {
++        auto s = std::make_shared<Service>("IApplicationDisplayService");
++        s->On(100, [this](Context& c) { c.PushInterface(Binder()); });                                   // GetRelayService
++        s->On(101, [](Context& c) { c.PushInterface(std::make_shared<Service>("ISystemDisplayService")); });
++        s->On(102, [](Context& c) { c.PushInterface(std::make_shared<Service>("IManagerDisplayService")); });
++        s->On(103, [this](Context& c) { c.PushInterface(Binder()); });                                   // GetIndirectDisplayTransactionService
++        s->On(1010, [this](Context& c) { // OpenDisplay(name)
++            auto name = c.Pop<std::array<char, 0x40>>();
++            name.back() = 0;
++            const auto id = DisplayId(name.data());
++            if (id < 0) return c.SetResult(ResultNotFound);
++            c.Push<uint64_t>(static_cast<uint64_t>(id));
++        });
++        s->On(1011, [](Context& c) { c.Push<uint64_t>(0); }); // OpenDefaultDisplay
++        s->Ok(1020);                                          // CloseDisplay
++        s->Ok(1101);                                          // SetDisplayEnabled
++        s->On(1102, [](Context& c) {                          // GetDisplayResolution
++            c.Push<int64_t>(1920);
++            c.Push<int64_t>(1080);
++        });
++        s->On(2020, [this](Context& c) { // OpenLayer(display name, layer id, aruid) -> native window parcel
++            c.Pop<std::array<char, 0x40>>();
++            const auto layer = c.Pop<uint64_t>();
++            int32_t binder = 0;
++            {
++                std::scoped_lock lk{mutex};
++                const auto it = layers.find(layer);
++                if (it == layers.end()) return c.SetResult(ResultNotFound);
++                binder = it->second;
++            }
++            c.Push<uint64_t>(WriteNativeWindow(c, binder));
++        });
++        s->Ok(2021); // CloseLayer
++        s->On(2030, [this](Context& c) { // CreateStrayLayer(flags, display) -> layer id, parcel
++            const uint64_t layer = CreateLayer();
++            int32_t binder = 0;
++            {
++                std::scoped_lock lk{mutex};
++                binder = layers[layer];
++            }
++            c.Push<uint64_t>(layer);
++            c.Push<uint64_t>(WriteNativeWindow(c, binder));
++        });
++        s->Ok(2031);                                                      // DestroyStrayLayer
++        s->On(2101, [](Context& c) {                                      // SetLayerScalingMode(mode, layer)
++            const auto mode = c.Pop<uint32_t>();
++            if (mode > 4) c.SetResult(ResultOperationFailed);
++        });
++        s->On(2102, [](Context& c) { // ConvertScalingMode
++            static constexpr uint64_t table[]{0, 3, 1, 2, 4};
++            const auto mode = c.Pop<uint32_t>();
++            if (mode > 4) return c.SetResult(ResultOperationFailed);
++            c.Push<uint64_t>(table[mode]);
++        });
++        s->On(5202, [this](Context& c) { // GetDisplayVsyncEvent(display): once per display
++            const auto display = c.Pop<uint64_t>();
++            std::scoped_lock lk{mutex};
++            if (vsync_events.contains(display)) return c.SetResult(ResultPermissionDenied);
++            auto e = std::make_shared<Event>(kernel, "vsync");
++            vsync_events[display] = e;
++            c.PushCopyObject(e);
++        });
++        return s;
++    }
++
++    std::shared_ptr<Service> Binder() {
++        auto s = std::make_shared<Service>("IHOSBinderDriver");
++        auto transact = [this](Context& c) { // TransactParcel(binder, code, in parcel, out parcel, flags)
++            const auto binder = c.Pop<int32_t>();
++            const auto code = c.Pop<uint32_t>();
++            const auto in = c.ReadBuffer(0);
++            const auto out = Transact(binder, code, in);
++            c.WriteBuffer(out.data(), std::min(out.size(), c.WriteBufferSize(0)), 0);
++        };
++        s->On(0, transact);
++        s->On(3, transact); // TransactParcelAuto
++        s->Ok(1);           // AdjustRefcount
++        s->On(2, [this](Context& c) { // GetNativeHandle(binder, type): the buffer-available event (always available here)
++            const auto binder = c.Pop<int32_t>();
++            std::scoped_lock lk{mutex};
++            Queue& q = queues[binder];
++            if (!q.buffer_event) {
++                q.buffer_event = std::make_shared<Event>(kernel, "buffer available");
++                q.buffer_event->Signal();
++            }
++            c.PushCopyObject(q.buffer_event);
++        });
++        return s;
++    }
++
++    static uint64_t WriteNativeWindow(Context& c, int32_t binder) {
++        struct {
++            uint32_t magic = 2, process_id = 1;
++            uint64_t id = 0;
++            uint32_t pad0[2]{};
++            std::array<char, 8> dispdrv{'d', 'i', 's', 'p', 'd', 'r', 'v', '\0'};
++            uint32_t pad1[2]{};
++        } window;
++        static_assert(sizeof(window) == 0x28);
++        window.id = static_cast<uint64_t>(binder);
++        ParcelWriter p;
++        p.Write(window);
++        p.WriteObjectSlot();
++        const auto bytes = p.Serialize();
++        c.WriteBuffer(bytes.data(), std::min(bytes.size(), c.WriteBufferSize(0)), 0);
++        return bytes.size();
++    }
++
++    static int DisplayId(const std::string& name) {
++        static const char* names[]{"Default", "External", "Edid", "Internal", "Null"};
++        for (int i = 0; i < 5; ++i)
++            if (name == names[i]) return i;
++        return -1;
++    }
++
++    NativeKernel& kernel;
++    std::mutex mutex;
++    uint64_t next_layer = 1;
++    int32_t next_binder = 1;
++    std::map<uint64_t, int32_t> layers; ///< layer id -> binder id
++    std::map<int32_t, Queue> queues;
++    std::map<uint64_t, std::shared_ptr<Event>> vsync_events;
 +};
 +
 +} // namespace KartRuntime::Services
