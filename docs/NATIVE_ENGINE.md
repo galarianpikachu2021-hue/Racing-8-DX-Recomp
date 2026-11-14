@@ -580,5 +580,14 @@ sessions and suyu's HLE service code.
 - Checked: 1P race (60 fps, pictures), 4P split-screen through the controller applet (59.8 fps, all four players racing),
   clean exits. Test scripts: `local/exp/mprun3.sh` now runs without mods too (`KARTRECOMP_NO_MODS=1`); its "4 views" summary
   only says the menus were split, check the shots.
+- **File system service** (`fsp-srv`, `kart_runtime/services/filesystem.h`; engine side `core/hle/kernel/native_fs_backend.cpp`):
+  save data (IFileSystem / IFile / IDirectory) and system archives (IStorage) with the service's argument layouts and results;
+  the storage underneath is suyu's file-system library (save data factory, NCA/RomFS readers, synthesized archives), the same
+  objects the emulated service used. Like the emulated service: Commit answers success (writes reach the save folder directly),
+  storage reads past the end return what is there. The runtime fills in the sender's process id (the kernel's job), which
+  `SetCurrentProcess` needs. Checked: 1P race, saves byte-identical before/after (this race writes none).
+- Diagnostics: `KARTRECOMP_NATIVE_SERVICES_TRACE=1` (first call of each command) / `=2` (repeats too; the engine's logger folds
+  repeated lines), `KARTRECOMP_NATIVE_SERVICES_DUMP=<file>` (every request and reply), unknown commands and missing objects are
+  logged.
 - Known: at the INT stop the emulated services are torn down while game threads still run; a failed request there makes the
   game stop with a panic (only at shutdown, logged).

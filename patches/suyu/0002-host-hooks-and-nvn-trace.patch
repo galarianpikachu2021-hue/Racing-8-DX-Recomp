@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..a7538c977a 100644
+index 408daa6839..d472316889 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,12 +860,13 @@ index 408daa6839..a7538c977a 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,14 @@ add_library(core STATIC
+@@ -339,6 +359,15 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
 +    hle/kernel/native_sync.cpp
 +    hle/kernel/native_sync.h
++    hle/kernel/native_fs_backend.cpp
 +    hle/kernel/native_services.cpp
 +    hle/kernel/native_services.h
 +    hle/kernel/native_services_list.cpp
@@ -875,7 +876,7 @@ index 408daa6839..a7538c977a 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1079,8 @@ add_library(core STATIC
+@@ -1051,6 +1080,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -884,7 +885,7 @@ index 408daa6839..a7538c977a 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1256,7 @@ else()
+@@ -1226,7 +1257,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -4406,16 +4407,218 @@ index 6363a9e0ab..b613a6512a 100644
      const u32 core_id = impl->GetCurrentHostThreadID();
      if (core_id >= Core::Hardware::NUM_CPU_CORES) {
          return Core::Hardware::NUM_CPU_CORES - 1;
+diff --git a/src/core/hle/kernel/native_fs_backend.cpp b/src/core/hle/kernel/native_fs_backend.cpp
+new file mode 100644
+index 0000000000..ac7edb8a03
+--- /dev/null
++++ b/src/core/hle/kernel/native_fs_backend.cpp
+@@ -0,0 +1,195 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the engine side of the runtime's file system service (kart_runtime/services/filesystem.h): save data folders and
++// system archives through suyu's file-system library (save data factory, NCA/RomFS readers, synthesized archives), the same
++// objects the emulated "fsp-srv" used.
++#include <cstring>
++#include <memory>
++
++#include "common/logging/log.h"
++#include "core/core.h"
++#include "core/file_sys/fs_directory.h"
++#include "core/file_sys/fsa/fs_i_directory.h"
++#include "core/file_sys/fsa/fs_i_file.h"
++#include "core/file_sys/fsa/fs_i_filesystem.h"
++#include "core/file_sys/content_archive.h"
++#include "core/file_sys/patch_manager.h"
++#include "core/file_sys/romfs_factory.h"
++#include "core/file_sys/savedata_factory.h"
++#include "core/file_sys/system_archive/system_archive.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/filesystem/filesystem.h"
++#include "core/hle/service/filesystem/romfs_controller.h"
++#include "core/hle/service/filesystem/save_data_controller.h"
++#include "kart_runtime/services/filesystem.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace KartRuntime::Services;
++
++class File final : public FsFile {
++public:
++    explicit File(FileSys::VirtualFile f) : impl{std::move(f)} {}
++    uint32_t Read(int64_t offset, void* out, uint64_t size, uint64_t* out_read) override {
++        size_t got = 0;
++        const Result r = impl.Read(&got, offset, out, size);
++        *out_read = got;
++        return r.raw;
++    }
++    uint32_t Write(int64_t offset, const void* in, uint64_t size, bool flush) override {
++        return impl.Write(offset, in, size, flush ? FileSys::WriteOption::Flush : FileSys::WriteOption::None).raw;
++    }
++    uint32_t Flush() override { return impl.Flush().raw; }
++    uint32_t SetSize(int64_t size) override { return impl.SetSize(size).raw; }
++    uint32_t GetSize(int64_t* out) override { return impl.GetSize(out).raw; }
++
++private:
++    FileSys::Fsa::IFile impl;
++};
++
++class Directory final : public FsDirectory {
++public:
++    Directory(FileSys::VirtualDir d, FileSys::OpenDirectoryMode mode) : impl{std::move(d), mode} {}
++    uint32_t Read(uint8_t* out, int64_t max, int64_t* out_count) override {
++        static_assert(sizeof(FileSys::DirectoryEntry) == 0x310);
++        return impl.Read(out_count, reinterpret_cast<FileSys::DirectoryEntry*>(out), max).raw;
++    }
++    uint32_t GetEntryCount(int64_t* out) override { return impl.GetEntryCount(out).raw; }
++
++private:
++    FileSys::Fsa::IDirectory impl;
++};
++
++class FileSystem final : public FsFileSystem {
++public:
++    FileSystem(Core::System& s, FileSys::VirtualDir dir, FileSys::StorageId id) : system{s}, impl{std::move(dir)}, storage{id} {}
++    uint32_t CreateFile(const std::string& p, int64_t size) override { return impl.CreateFile(FileSys::Path(p.c_str()), size).raw; }
++    uint32_t DeleteFile(const std::string& p) override { return impl.DeleteFile(FileSys::Path(p.c_str())).raw; }
++    uint32_t CreateDirectory(const std::string& p) override { return impl.CreateDirectory(FileSys::Path(p.c_str())).raw; }
++    uint32_t DeleteDirectory(const std::string& p) override { return impl.DeleteDirectory(FileSys::Path(p.c_str())).raw; }
++    uint32_t DeleteDirectoryRecursively(const std::string& p) override { return impl.DeleteDirectoryRecursively(FileSys::Path(p.c_str())).raw; }
++    uint32_t CleanDirectoryRecursively(const std::string& p) override { return impl.CleanDirectoryRecursively(FileSys::Path(p.c_str())).raw; }
++    uint32_t RenameFile(const std::string& a, const std::string& b) override { return impl.RenameFile(FileSys::Path(a.c_str()), FileSys::Path(b.c_str())).raw; }
++    uint32_t GetEntryType(const std::string& p, uint32_t* out) override {
++        FileSys::DirectoryEntryType t{};
++        const Result r = impl.GetEntryType(&t, FileSys::Path(p.c_str()));
++        *out = static_cast<uint32_t>(t);
++        return r.raw;
++    }
++    uint32_t OpenFile(const std::string& p, uint32_t mode, std::shared_ptr<FsFile>* out) override {
++        FileSys::VirtualFile f;
++        const Result r = impl.OpenFile(&f, FileSys::Path(p.c_str()), static_cast<FileSys::OpenMode>(mode));
++        if (r.IsSuccess()) *out = std::make_shared<File>(std::move(f));
++        return r.raw;
++    }
++    uint32_t OpenDirectory(const std::string& p, uint32_t mode, std::shared_ptr<FsDirectory>* out) override {
++        FileSys::VirtualDir d;
++        const Result r = impl.OpenDirectory(&d, FileSys::Path(p.c_str()), static_cast<FileSys::OpenDirectoryMode>(mode));
++        if (r.IsSuccess()) *out = std::make_shared<Directory>(std::move(d), static_cast<FileSys::OpenDirectoryMode>(mode));
++        return r.raw;
++    }
++    uint32_t Commit() override { return 0; } // writes reach the save folder directly (as the emulated service answered)
++    uint32_t GetFreeSpace(int64_t* out) override {
++        *out = static_cast<int64_t>(system.GetFileSystemController().GetFreeSpaceSize(storage));
++        return 0;
++    }
++    uint32_t GetTotalSpace(int64_t* out) override {
++        *out = static_cast<int64_t>(system.GetFileSystemController().GetTotalSpaceSize(storage));
++        return 0;
++    }
++    uint32_t GetFileTimeStampRaw(const std::string& p, std::array<uint8_t, 0x20>* out) override {
++        FileSys::FileTimeStampRaw t{};
++        const Result r = impl.GetFileTimeStampRaw(&t, FileSys::Path(p.c_str()));
++        static_assert(sizeof(t) == 0x20);
++        std::memcpy(out->data(), &t, sizeof(t));
++        return r.raw;
++    }
++
++private:
++    Core::System& system;
++    FileSys::Fsa::IFileSystem impl;
++    FileSys::StorageId storage;
++};
++
++class Storage final : public FsStorage {
++public:
++    explicit Storage(FileSys::VirtualFile f) : file{std::move(f)} {}
++    uint32_t Read(int64_t offset, void* out, uint64_t size) override {
++        // Reads what is there (the rest of the window stays zero), as the file system service does: the SDK reads whole blocks
++        // past the end of an archive.
++        std::memset(out, 0, size);
++        if (size) file->Read(static_cast<u8*>(out), size, static_cast<size_t>(offset));
++        return 0;
++    }
++    uint32_t GetSize(int64_t* out) override {
++        *out = static_cast<int64_t>(file->GetSize());
++        return 0;
++    }
++
++private:
++    FileSys::VirtualFile file;
++};
++
++class Backend final : public FsBackend {
++public:
++    explicit Backend(Core::System& s) : system{s} {}
++
++    uint32_t SetProcess(uint64_t pid) override {
++        return system.GetFileSystemController().OpenProcess(&program_id, &save_data, &romfs, pid).raw;
++    }
++    uint32_t OpenSaveData(uint8_t space, const std::array<uint8_t, 0x40>& attribute, std::shared_ptr<FsFileSystem>* out) override {
++        if (!save_data) return ::ResultUnknown.raw;
++        FileSys::SaveDataAttribute attr{};
++        static_assert(sizeof(attr) == 0x40);
++        std::memcpy(&attr, attribute.data(), sizeof(attr));
++        FileSys::VirtualDir dir;
++        const auto space_id = static_cast<FileSys::SaveDataSpaceId>(space);
++        if (const Result r = save_data->OpenSaveData(&dir, space_id, attr); r.IsError()) return r.raw;
++        FileSys::StorageId id = FileSys::StorageId::NandUser;
++        if (space_id == FileSys::SaveDataSpaceId::SdSystem || space_id == FileSys::SaveDataSpaceId::SdUser) id = FileSys::StorageId::SdCard;
++        else if (space_id == FileSys::SaveDataSpaceId::System || space_id == FileSys::SaveDataSpaceId::ProperSystem ||
++                 space_id == FileSys::SaveDataSpaceId::SafeMode)
++            id = FileSys::StorageId::NandSystem;
++        *out = std::make_shared<FileSystem>(system, std::move(dir), id);
++        return 0;
++    }
++    uint32_t OpenDataStorage(uint8_t storage_id, uint64_t data_id, std::shared_ptr<FsStorage>* out) override {
++        if (!romfs) return ::ResultUnknown.raw;
++        const auto sid = static_cast<FileSys::StorageId>(storage_id);
++        auto data = romfs->OpenRomFS(data_id, sid, FileSys::ContentRecordType::Data);
++        if (!data) {
++            // No such archive among the player's files: the engine's stand-in, if it has one (fonts, Mii data).
++            if (auto archive = FileSys::SystemArchive::SynthesizeSystemArchive(data_id)) {
++                *out = std::make_shared<Storage>(std::move(archive));
++                return 0;
++            }
++            LOG_ERROR(Service_FS, "native services: no data storage {:016X} (storage {:02X})", data_id, storage_id);
++            return ::ResultUnknown.raw;
++        }
++        const FileSys::PatchManager pm{data_id, system.GetFileSystemController(), system.GetContentProvider()};
++        auto base = romfs->OpenBaseNca(data_id, sid, FileSys::ContentRecordType::Data);
++        *out = std::make_shared<Storage>(pm.PatchRomFS(base.get(), std::move(data), FileSys::ContentRecordType::Data));
++        return 0;
++    }
++    uint32_t CreateSaveData(const std::array<uint8_t, 0x40>& attribute, const std::array<uint8_t, 0x40>&) override {
++        if (!save_data) return ::ResultUnknown.raw;
++        FileSys::SaveDataAttribute attr{};
++        std::memcpy(&attr, attribute.data(), sizeof(attr));
++        FileSys::VirtualDir dir;
++        return save_data->CreateSaveData(&dir, FileSys::SaveDataSpaceId::User, attr).raw;
++    }
++
++private:
++    Core::System& system;
++    Service::FileSystem::ProgramId program_id{};
++    std::shared_ptr<Service::FileSystem::SaveDataController> save_data;
++    std::shared_ptr<Service::FileSystem::RomFsController> romfs;
++};
++
++} // namespace
++
++std::shared_ptr<FsBackend> MakeFsBackend(Core::System& system) {
++    return std::make_shared<Backend>(system);
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..13862ba270
+index 0000000000..0c1ab10133
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,250 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
 +#include <atomic>
++#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +#include <functional>
@@ -4488,6 +4691,11 @@ index 0000000000..13862ba270
 +            if (t_host_wait) NativeThreads::EndHostWait();
 +            t_host_wait = false;
 +        },
++        []() -> u64 {
++            KernelCore* k = g_kernel.load(std::memory_order_acquire);
++            KProcess* p = k ? GetCurrentProcessPointer(*k) : nullptr;
++            return p ? p->GetProcessId() : 0;
++        },
 +    }};
 +    static std::once_flag once;
 +    std::call_once(once, [&] {
@@ -4558,15 +4766,27 @@ index 0000000000..13862ba270
 +    const u64 tls = GetInteger(thread.GetTlsAddress());
 +    u8 msg[KartRuntime::Hipc::MessageSize];
 +    memory.ReadBlock(tls, msg, sizeof(msg));
-+    static const bool dump = std::getenv("KARTRECOMP_NATIVE_SERVICES_DUMP") != nullptr;
++    // KARTRECOMP_NATIVE_SERVICES_DUMP=<file>: every request and reply (first 24 words) with the session handle.
++    static std::FILE* dump = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_SERVICES_DUMP");
++        return v && *v ? std::fopen(v, "w") : nullptr;
++    }();
++    static std::mutex dump_lock;
 +    auto words = [&] {
 +        std::string out;
 +        for (int i = 0; i < 24; ++i) out += fmt::format("{:08X} ", reinterpret_cast<const u32*>(msg)[i]);
 +        return out;
 +    };
-+    if (dump) LOG_INFO(Service, "native services: request on {:08X}: {}", handle, words());
++    if (dump) {
++        std::scoped_lock lk{dump_lock};
++        std::fprintf(dump, "%08X > %s\n", handle, words().c_str());
++    }
 +    const u32 r = runtime.SendSyncRequest(handle, msg);
-+    if (dump) LOG_INFO(Service, "native services: reply {:X}: {}", r, words());
++    if (dump) {
++        std::scoped_lock lk{dump_lock};
++        std::fprintf(dump, "%08X < %X %s\n", handle, r, words().c_str());
++        std::fflush(dump);
++    }
 +    if (r != 0) LOG_ERROR(Service, "native services: request on handle {:08X} failed with {:X}", handle, r);
 +    if (r == 0) memory.WriteBlock(tls, msg, sizeof(msg));
 +    return ToResult(r);
@@ -4697,10 +4917,10 @@ index 0000000000..3fef566612
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..fb505cf6b5
+index 0000000000..752b13486b
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,328 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -4742,6 +4962,7 @@ index 0000000000..fb505cf6b5
 +#include "kart_runtime/services/account.h"
 +#include "kart_runtime/services/applet.h"
 +#include "kart_runtime/services/display.h"
++#include "kart_runtime/services/filesystem.h"
 +#include "kart_runtime/services/system.h"
 +#include "kart_runtime/services/time.h"
 +
@@ -5015,6 +5236,10 @@ index 0000000000..fb505cf6b5
 +        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
 +        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
 +        {"appletOE", [&] { return MakeApplets(runtime, kernel); }},
++        {"fsp-srv", [&] {
++             static KartRuntime::Services::FileSystemService fs{MakeFsBackend(system)};
++             return fs.Root("fsp-srv");
++         }},
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
 +        {"vi:u", [&] { return NativeDisplay(runtime).Root("vi:u", 0); }},
 +        {"vi:s", [&] { return NativeDisplay(runtime).Root("vi:s", 1); }},
@@ -5026,10 +5251,10 @@ index 0000000000..fb505cf6b5
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..b179394405
+index 0000000000..01553e2d6f
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,38 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -5041,6 +5266,13 @@ index 0000000000..b179394405
 +namespace KartRuntime {
 +class NativeKernel;
 +class Service;
++namespace Services {
++class FsBackend;
++}
++}
++
++namespace Core {
++class System;
 +}
 +
 +namespace Kernel {
@@ -5050,6 +5282,9 @@ index 0000000000..b179394405
 +namespace Kernel::NativeServices {
 +
 +/// The service object for `name`, or null when the runtime does not have it (the emulated one is used).
++/// The engine's file system for the runtime's "fsp-srv" (native_fs_backend.cpp).
++std::shared_ptr<KartRuntime::Services::FsBackend> MakeFsBackend(Core::System& system);
++
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
 +/// The engine switched docked / handheld: the game gets its message.
@@ -10470,10 +10705,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..3e92d12437
+index 0000000000..a39c50ad1f
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,519 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -10665,6 +10900,7 @@ index 0000000000..3e92d12437
 +        std::function<bool(uint64_t addr, void* out, size_t n)> read;        ///< guest memory
 +        std::function<bool(uint64_t addr, const void* in, size_t n)> write;  ///< guest memory
 +        std::function<void()> before_block, after_block; ///< a thread is about to wait / has stopped waiting
++        std::function<uint64_t()> process_id;            ///< the calling thread's process id (the kernel sends it, not the game)
 +    };
 +    explicit NativeKernel(Hooks h) : hooks{std::move(h)} {}
 +
@@ -10731,8 +10967,9 @@ index 0000000000..3e92d12437
 +        if (!session) return KernelResult::InvalidHandle;
 +        SessionState& st = *session->state;
 +        const bool domain = st.domain;
-+        const Hipc::Request req = Hipc::Request::Parse(msg, domain);
++        Hipc::Request req = Hipc::Request::Parse(msg, domain);
 +        if (!req.valid) return KernelResult::InvalidState;
++        if (req.has_pid && hooks.process_id) req.pid = hooks.process_id();
 +        if (req.type == Hipc::Type::Close) {
 +            // The server side goes; the client closes its handle itself afterwards (CloseHandle), as on the console.
 +            std::shared_ptr<Service> gone;
@@ -11978,6 +12215,260 @@ index 0000000000..dd18851237
 +};
 +
 +} // namespace KartRuntime::Services
+diff --git a/src/kart_runtime/services/filesystem.h b/src/kart_runtime/services/filesystem.h
+new file mode 100644
+index 0000000000..decd1fcf75
+--- /dev/null
++++ b/src/kart_runtime/services/filesystem.h
+@@ -0,0 +1,248 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the file system service ("fsp-srv") for what the game opens through it after its content moved to the
++// native file system: save data (IFileSystem / IFile / IDirectory) and system archives (IStorage: fonts, Mii resources)
++// (docs/NATIVE_ENGINE.md, "native services").
++//
++// The service framing, paths, buffers and results are here; the storage itself comes from the engine (`FsBackend`): its save
++// folders and its archive readers.
++#pragma once
++
++#include <array>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "../native_kernel.h"
++
++namespace KartRuntime::Services {
++
++class FsFile {
++public:
++    virtual ~FsFile() = default;
++    virtual uint32_t Read(int64_t offset, void* out, uint64_t size, uint64_t* out_read) = 0;
++    virtual uint32_t Write(int64_t offset, const void* in, uint64_t size, bool flush) = 0;
++    virtual uint32_t Flush() = 0;
++    virtual uint32_t SetSize(int64_t size) = 0;
++    virtual uint32_t GetSize(int64_t* out) = 0;
++};
++
++class FsDirectory {
++public:
++    virtual ~FsDirectory() = default;
++    /// Up to `max` 0x310-byte entries into `out`.
++    virtual uint32_t Read(uint8_t* out, int64_t max, int64_t* out_count) = 0;
++    virtual uint32_t GetEntryCount(int64_t* out) = 0;
++};
++
++class FsFileSystem {
++public:
++    virtual ~FsFileSystem() = default;
++    virtual uint32_t CreateFile(const std::string& path, int64_t size) = 0;
++    virtual uint32_t DeleteFile(const std::string& path) = 0;
++    virtual uint32_t CreateDirectory(const std::string& path) = 0;
++    virtual uint32_t DeleteDirectory(const std::string& path) = 0;
++    virtual uint32_t DeleteDirectoryRecursively(const std::string& path) = 0;
++    virtual uint32_t CleanDirectoryRecursively(const std::string& path) = 0;
++    virtual uint32_t RenameFile(const std::string& from, const std::string& to) = 0;
++    virtual uint32_t GetEntryType(const std::string& path, uint32_t* out) = 0;
++    virtual uint32_t OpenFile(const std::string& path, uint32_t mode, std::shared_ptr<FsFile>* out) = 0;
++    virtual uint32_t OpenDirectory(const std::string& path, uint32_t mode, std::shared_ptr<FsDirectory>* out) = 0;
++    virtual uint32_t Commit() = 0;
++    virtual uint32_t GetFreeSpace(int64_t* out) = 0;
++    virtual uint32_t GetTotalSpace(int64_t* out) = 0;
++    virtual uint32_t GetFileTimeStampRaw(const std::string& path, std::array<uint8_t, 0x20>* out) = 0;
++};
++
++class FsStorage {
++public:
++    virtual ~FsStorage() = default;
++    virtual uint32_t Read(int64_t offset, void* out, uint64_t size) = 0;
++    virtual uint32_t GetSize(int64_t* out) = 0;
++};
++
++class FsBackend {
++public:
++    virtual ~FsBackend() = default;
++    /// SetCurrentProcess
++    virtual uint32_t SetProcess(uint64_t pid) = 0;
++    /// OpenSaveDataFileSystem(space id, 0x40-byte save data attribute)
++    virtual uint32_t OpenSaveData(uint8_t space, const std::array<uint8_t, 0x40>& attribute, std::shared_ptr<FsFileSystem>* out) = 0;
++    /// OpenDataStorageByDataId(storage id, data id): a system archive (fonts, Mii data)
++    virtual uint32_t OpenDataStorage(uint8_t storage_id, uint64_t data_id, std::shared_ptr<FsStorage>* out) = 0;
++    /// CreateSaveDataFileSystem(attribute, creation info, meta info)
++    virtual uint32_t CreateSaveData(const std::array<uint8_t, 0x40>& attribute, const std::array<uint8_t, 0x40>& creation) = 0;
++};
++
++class FileSystemService {
++public:
++    explicit FileSystemService(std::shared_ptr<FsBackend> b) : backend{std::move(b)} {}
++
++    std::shared_ptr<Service> Root(const char* name) {
++        auto s = std::make_shared<Service>(name);
++        s->serialize = false;
++        s->On(1, [this](Context& c) { c.SetResult(backend->SetProcess(c.Pid())); }); // SetCurrentProcess (the sender's process)
++        s->On(22, [this](Context& c) { // CreateSaveDataFileSystem(creation info, attribute, meta) - the emulator's order
++            const auto creation = c.Pop<std::array<uint8_t, 0x40>>();
++            const auto attr = c.Pop<std::array<uint8_t, 0x40>>();
++            c.SetResult(backend->CreateSaveData(attr, creation));
++        });
++        auto open_save = [this](Context& c) { // OpenSaveDataFileSystem(space id u8, attribute)
++            const auto space = c.Pop<uint8_t>();
++            c.args.Skip(7);
++            const auto attr = c.Pop<std::array<uint8_t, 0x40>>();
++            std::shared_ptr<FsFileSystem> fs;
++            if (const uint32_t r = backend->OpenSaveData(space, attr, &fs); r != 0) return c.SetResult(r);
++            c.PushInterface(FileSystem(fs));
++        };
++        s->On(51, open_save);
++        s->On(53, open_save); // OpenReadOnlySaveDataFileSystem
++        s->On(202, [this](Context& c) { // OpenDataStorageByDataId(storage id u8, data id u64)
++            const auto storage = c.Pop<uint8_t>();
++            const auto id = c.Pop<uint64_t>();
++            std::shared_ptr<FsStorage> st;
++            if (const uint32_t r = backend->OpenDataStorage(storage, id, &st); r != 0) return c.SetResult(r);
++            c.PushInterface(Storage(st));
++        });
++        s->On(27, [](Context& c) { c.Push<uint8_t>(0); }); // IsExFatSupported
++        s->On(631, [](Context& c) { c.Push<uint8_t>(0); }); // IsSdCardAccessible
++        s->Ok(1003);                                          // DisableAutoSaveDataCreation
++        s->Ok(1004);                                          // SetGlobalAccessLogMode
++        s->On(1005, [](Context& c) { c.Push<uint32_t>(0); }); // GetGlobalAccessLogMode: off
++        s->Ok(1006);                                          // OutputAccessLogToSdCard
++        s->On(1011, [](Context& c) { c.Push<uint32_t>(0); }); // GetProgramIndexForAccessLog (index, count)
++        s->Ok(1016);                                          // FlushAccessLogOnSdCard
++        return s;
++    }
++
++    /// The path argument: a 0x301-byte string in the first X (pointer) buffer.
++    static std::string Path(Context& c, size_t i = 0) {
++        const auto raw = c.ReadBuffer(i);
++        return std::string(reinterpret_cast<const char*>(raw.data()), strnlen(reinterpret_cast<const char*>(raw.data()), raw.size()));
++    }
++
++    std::shared_ptr<Service> FileSystem(std::shared_ptr<FsFileSystem> fs) {
++        auto s = std::make_shared<Service>("IFileSystem");
++        s->On(0, [fs](Context& c) { // CreateFile(option, size)
++            c.Pop<int32_t>();
++            const auto size = c.Pop<int64_t>();
++            c.SetResult(fs->CreateFile(Path(c), size));
++        });
++        s->On(1, [fs](Context& c) { c.SetResult(fs->DeleteFile(Path(c))); });
++        s->On(2, [fs](Context& c) { c.SetResult(fs->CreateDirectory(Path(c))); });
++        s->On(3, [fs](Context& c) { c.SetResult(fs->DeleteDirectory(Path(c))); });
++        s->On(4, [fs](Context& c) { c.SetResult(fs->DeleteDirectoryRecursively(Path(c))); });
++        s->On(5, [fs](Context& c) { c.SetResult(fs->RenameFile(Path(c, 0), Path(c, 1))); });
++        s->On(7, [fs](Context& c) { // GetEntryType
++            uint32_t type = 0;
++            if (const uint32_t r = fs->GetEntryType(Path(c), &type); r != 0) return c.SetResult(r);
++            c.Push<uint32_t>(type);
++        });
++        s->On(8, [this, fs](Context& c) { // OpenFile(mode)
++            const auto mode = c.Pop<uint32_t>();
++            std::shared_ptr<FsFile> f;
++            if (const uint32_t r = fs->OpenFile(Path(c), mode, &f); r != 0) return c.SetResult(r);
++            c.PushInterface(File(f));
++        });
++        s->On(9, [this, fs](Context& c) { // OpenDirectory(mode)
++            const auto mode = c.Pop<uint32_t>();
++            std::shared_ptr<FsDirectory> d;
++            if (const uint32_t r = fs->OpenDirectory(Path(c), mode, &d); r != 0) return c.SetResult(r);
++            c.PushInterface(Directory(d));
++        });
++        s->On(10, [fs](Context& c) { c.SetResult(fs->Commit()); });
++        s->On(11, [fs](Context& c) {
++            int64_t v = 0;
++            c.SetResult(fs->GetFreeSpace(&v));
++            c.Push(v);
++        });
++        s->On(12, [fs](Context& c) {
++            int64_t v = 0;
++            c.SetResult(fs->GetTotalSpace(&v));
++            c.Push(v);
++        });
++        s->On(13, [fs](Context& c) { c.SetResult(fs->CleanDirectoryRecursively(Path(c))); });
++        s->On(14, [fs](Context& c) {
++            std::array<uint8_t, 0x20> t{};
++            if (const uint32_t r = fs->GetFileTimeStampRaw(Path(c), &t); r != 0) return c.SetResult(r);
++            c.Push(t);
++        });
++        return s;
++    }
++
++    static std::shared_ptr<Service> File(std::shared_ptr<FsFile> f) {
++        auto s = std::make_shared<Service>("IFile");
++        s->On(0, [f](Context& c) { // Read(option, offset, size) -> bytes read
++            c.Pop<uint32_t>();
++            const auto offset = c.Pop<int64_t>();
++            const auto size = c.Pop<int64_t>();
++            if (offset < 0 || size < 0) return c.SetResult(2 | (6061u << 9)); // fs: invalid offset / size
++            const size_t want = std::min<size_t>(static_cast<size_t>(size), c.WriteBufferSize(0));
++            std::vector<uint8_t> buf(want);
++            uint64_t got = 0;
++            if (const uint32_t r = f->Read(offset, buf.data(), want, &got); r != 0) return c.SetResult(r);
++            if (got) c.WriteBuffer(buf.data(), got, 0);
++            c.Push<int64_t>(static_cast<int64_t>(got));
++        });
++        s->On(1, [f](Context& c) { // Write(option, offset, size)
++            const auto option = c.Pop<uint32_t>();
++            const auto offset = c.Pop<int64_t>();
++            const auto size = c.Pop<int64_t>();
++            auto data = c.ReadBuffer(0);
++            if (offset < 0 || size < 0) return c.SetResult(2 | (6061u << 9));
++            data.resize(std::min<size_t>(data.size(), static_cast<size_t>(size)));
++            c.SetResult(f->Write(offset, data.data(), data.size(), (option & 1) != 0));
++        });
++        s->On(2, [f](Context& c) { c.SetResult(f->Flush()); });
++        s->On(3, [f](Context& c) { c.SetResult(f->SetSize(c.Pop<int64_t>())); });
++        s->On(4, [f](Context& c) {
++            int64_t v = 0;
++            if (const uint32_t r = f->GetSize(&v); r != 0) return c.SetResult(r);
++            c.Push(v);
++        });
++        return s;
++    }
++
++    static std::shared_ptr<Service> Directory(std::shared_ptr<FsDirectory> d) {
++        auto s = std::make_shared<Service>("IDirectory");
++        s->On(0, [d](Context& c) { // Read -> entry count
++            const int64_t max = static_cast<int64_t>(c.WriteBufferSize(0) / 0x310);
++            std::vector<uint8_t> buf(static_cast<size_t>(max) * 0x310);
++            int64_t n = 0;
++            if (const uint32_t r = d->Read(buf.data(), max, &n); r != 0) return c.SetResult(r);
++            if (n) c.WriteBuffer(buf.data(), static_cast<size_t>(n) * 0x310, 0);
++            c.Push<int64_t>(n);
++        });
++        s->On(1, [d](Context& c) {
++            int64_t n = 0;
++            if (const uint32_t r = d->GetEntryCount(&n); r != 0) return c.SetResult(r);
++            c.Push(n);
++        });
++        return s;
++    }
++
++    static std::shared_ptr<Service> Storage(std::shared_ptr<FsStorage> st) {
++        auto s = std::make_shared<Service>("IStorage");
++        s->serialize = false;
++        s->On(0, [st](Context& c) { // Read(offset, length)
++            const auto offset = c.Pop<int64_t>();
++            const auto length = c.Pop<int64_t>();
++            if (offset < 0 || length < 0) return c.SetResult(2 | (6061u << 9));
++            const size_t want = std::min<size_t>(static_cast<size_t>(length), c.WriteBufferSize(0));
++            std::vector<uint8_t> buf(want);
++            if (const uint32_t r = st->Read(offset, buf.data(), want); r != 0) return c.SetResult(r);
++            c.WriteBuffer(buf.data(), want, 0);
++        });
++        s->On(4, [st](Context& c) {
++            int64_t v = 0;
++            if (const uint32_t r = st->GetSize(&v); r != 0) return c.SetResult(r);
++            c.Push<uint64_t>(static_cast<uint64_t>(v));
++        });
++        return s;
++    }
++
++private:
++    std::shared_ptr<FsBackend> backend;
++};
++
++} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/system.h b/src/kart_runtime/services/system.h
 new file mode 100644
 index 0000000000..69d3c3c986
@@ -13073,10 +13564,10 @@ index 0000000000..adf06efe2d
 +}
 diff --git a/src/kart_runtime/tests/test_native_kernel.cpp b/src/kart_runtime/tests/test_native_kernel.cpp
 new file mode 100644
-index 0000000000..c0eee13eba
+index 0000000000..ab6e85c219
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_native_kernel.cpp
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,320 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Tests for kart_runtime/hipc.h and native_kernel.h: messages laid out as the console SDK writes them (the same layout libnx's
 +// cmif.h documents), sessions, domains, buffers, events and waits.
@@ -13106,6 +13597,7 @@ index 0000000000..c0eee13eba
 +        },
 +        {},
 +        {},
++        [] { return uint64_t{0x51}; },
 +    }};
 +}
 +
@@ -13243,6 +13735,17 @@ index 0000000000..c0eee13eba
 +        assert(r.result == 0 && n == 6 && std::memcmp(guest.data() + 0x200, "fedcba", 6) == 0);
 +        std::memset(guest.data() + 0x200, 0, 6);
 +    }
++
++    // The process id is the kernel's, whatever the message holds.
++    svc->On(9, [](Context& ctx) { ctx.Push<uint64_t>(ctx.Pid()); });
++    Builder pb;
++    pb.cmd = 9;
++    pb.pid = true;
++    pb.Build(msg);
++    assert(k.SendSyncRequest(h, msg) == 0);
++    r = ParseReply(msg, false, 8, 0);
++    std::memcpy(&v, r.values, 8);
++    assert(v == 0x51);
 +
 +    b.cmd = 99;
 +    b.Build(msg);
