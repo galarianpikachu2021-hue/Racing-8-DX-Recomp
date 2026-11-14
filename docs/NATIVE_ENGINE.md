@@ -653,3 +653,9 @@ Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host t
   37 emulated service modules that only the start list referred to (bcat, ssl, ldn, nifm, ro, olsc, spl, pctl, btm, friend, nim,
   ptm, lm, aoc, lbl, es, fatal, pcv, usb, prepo, mm, btdrv, npns, omm, ngc, ncm, erpt, fgm, i2c, pcie, mig, bpc, ldr, eupld,
   mnpp, grc, gpio): about 20,000 lines no longer compiled. Engine 55 MB. Checked: 1P and 4P races.
+- The applet manager module (`am`, 14k lines) is not started either: the game's process is registered with the controller
+  library (applet resource user id, input, rumble) and run directly (`AppletManager::CreateAndInsertByFrontendAppletParameters`),
+  and released during engine shutdown while the kernel still runs. 5 modules left: sm, hid, nvservices, ns, settings.
+- Fixed: the runtime's objects were destroyed at process exit after the engine (a crash on closing, seen since the driver
+  service moved to the runtime): they now live to the end of the process.
+- Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, keyless boot, clean exits (no core dumps).

@@ -3606,7 +3606,7 @@ index 0000000000..49a539dcf1
 +
 +} // namespace Core::SdkTrace
 diff --git a/src/core/core.cpp b/src/core/core.cpp
-index b15af176fe..9dee7eb88c 100644
+index b15af176fe..45a2de02a8 100644
 --- a/src/core/core.cpp
 +++ b/src/core/core.cpp
 @@ -15,6 +15,8 @@
@@ -3667,15 +3667,16 @@ index b15af176fe..9dee7eb88c 100644
          if (auto room_member = Network::GetRoomMember().lock()) {
              Network::GameInfo game_info;
              game_info.name = name;
-@@ -434,6 +452,7 @@ struct System::Impl {
+@@ -434,6 +452,8 @@ struct System::Impl {
          if (gpu_core) {
              gpu_core->ShutdownThread();
          }
 +        Kernel::NativeServices::Shutdown(kernel); // kart-recomp: the runtime's service objects go first
++        applet_manager.ReleaseNativeProcess(); // kart-recomp: the game's process, if no window system started it
          kernel.CloseServices();
          kernel.ShutdownCores();
          services.reset();
-@@ -693,6 +712,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
+@@ -693,6 +713,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
      return impl->kernel.ApplicationProcess()->GetMemory();
  }
  
@@ -4646,7 +4647,7 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
-index 0000000000..2be964a76a
+index 0000000000..e6b4beb3f7
 --- /dev/null
 +++ b/src/core/hle/kernel/native_audio_service.cpp
 @@ -0,0 +1,222 @@
@@ -4830,7 +4831,7 @@ index 0000000000..2be964a76a
 +
 +std::shared_ptr<Service> MakeAudioRendererService(KernelCore& kernel) {
 +    Core::System& system = kernel.System();
-+    static AudioCore::Renderer::Manager manager{system};
++    static AudioCore::Renderer::Manager& manager = *new AudioCore::Renderer::Manager{system}; // kept to process exit
 +    auto s = std::make_shared<Service>("audren:u");
 +    s->On(0, [&kernel, &system](Context& c) { // OpenAudioRenderer(params, transfer memory size, aruid; tmem, process)
 +        const auto params = c.Pop<AudioCore::AudioRendererParameterInternal>();
@@ -5610,10 +5611,10 @@ index 0000000000..cf40baaec8
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..f8b2413dca
+index 0000000000..fe1023aee7
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,367 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5679,7 +5680,9 @@ index 0000000000..f8b2413dca
 +} // namespace
 +
 +NativeKernel& Runtime(KernelCore& kernel) {
-+    static NativeKernel runtime{{
++    // Lives to the end of the process: its objects hold the engine's library parts, which must not be destroyed after the
++    // engine itself (process exit).
++    static NativeKernel& runtime = *new NativeKernel{{
 +        [](u64 addr, void* out, size_t n) {
 +            KernelCore* k = g_kernel.load(std::memory_order_acquire);
 +            if (!k) return false;
@@ -6044,7 +6047,7 @@ index 0000000000..99b108ad22
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..24fa3970bc
+index 0000000000..d66c12dfb7
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
 @@ -0,0 +1,371 @@
@@ -6324,7 +6327,7 @@ index 0000000000..24fa3970bc
 +    };
 +    h.controller_applet = [&system](const AppletHooks::ControllerArgs& a) { return ControllerApplet(system, a); };
 +    h.web_applet = [&system](const AppletHooks::WebRequest& r) { return WebApplet(system, r); };
-+    static KartRuntime::Services::Applets applets{runtime, std::move(h)};
++    static KartRuntime::Services::Applets& applets = *new KartRuntime::Services::Applets{runtime, std::move(h)}; // kept to process exit
 +    g_applets = &applets;
 +    return applets.Root("appletOE");
 +}
@@ -6401,7 +6404,7 @@ index 0000000000..24fa3970bc
 +        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
 +        {"appletOE", [&] { return MakeApplets(runtime, kernel); }},
 +        {"fsp-srv", [&] {
-+             static KartRuntime::Services::FileSystemService fs{MakeFsBackend(system)};
++             static KartRuntime::Services::FileSystemService& fs = *new KartRuntime::Services::FileSystemService{MakeFsBackend(system)};
 +             return fs.Root("fsp-srv");
 +         }},
 +        {"pl:u", [&] { return MakeSharedFont(kernel); }},
@@ -7310,18 +7313,62 @@ index 79c6ac2079..7a9c434d60 100644
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
 diff --git a/src/core/hle/service/am/applet_manager.cpp b/src/core/hle/service/am/applet_manager.cpp
-index 3dd2adc9c0..c17da80799 100644
+index 3dd2adc9c0..217185a87b 100644
 --- a/src/core/hle/service/am/applet_manager.cpp
 +++ b/src/core/hle/service/am/applet_manager.cpp
-@@ -11,6 +11,7 @@
+@@ -11,6 +11,11 @@
  #include "core/hle/service/acc/profile_manager.h"
  #include "core/hle/service/am/applet_data_broker.h"
  #include "core/hle/service/am/applet_manager.h"
++#include "core/hle/service/services.h"
++#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/sm/sm.h"
++#include "hid_core/resource_manager.h"
 +#include "core/hle/kernel/native_services_list.h"
  #include "core/hle/service/am/frontend/applet_cabinet.h"
  #include "core/hle/service/am/frontend/applet_controller.h"
  #include "core/hle/service/am/frontend/applet_mii_edit_types.h"
-@@ -251,6 +252,7 @@ void AppletManager::RequestExit() {
+@@ -233,6 +238,23 @@ AppletManager::~AppletManager() = default;
+ 
+ void AppletManager::CreateAndInsertByFrontendAppletParameters(
+     std::unique_ptr<Process> process, const FrontendAppletParameters& params) {
++    // kart-recomp: without the emulated applet manager (native services), the game's process is registered with the controller
++    // library and started here, which is what the window system did for it.
++    if (!Service::IsHleModuleStarted("am")) {
++        auto hid = m_system.ServiceManager().GetService<HID::IHidServer>("hid", true);
++        const u64 pid = process->GetProcessId();
++        if (hid) {
++            auto rm = hid->GetResourceManager();
++            rm->RegisterAppletResourceUserId(pid, true);
++            rm->SetAruidValidForVibration(pid, true);
++            rm->EnableInput(pid, true);
++        }
++        LOG_INFO(Service_AM, "native start: running the game's process {} directly", pid);
++        process->Run();
++        std::scoped_lock lk{m_lock};
++        m_native_process = std::move(process);
++        return;
++    }
+     LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: setting pending process");
+     {
+         std::scoped_lock lk{m_lock};
+@@ -243,6 +265,15 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
+     LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: notified");
+ }
+ 
++void AppletManager::ReleaseNativeProcess() {
++    std::unique_ptr<Process> process;
++    {
++        std::scoped_lock lk{m_lock};
++        process = std::move(m_native_process);
++    }
++    process.reset();
++}
++
+ void AppletManager::RequestExit() {
+     std::scoped_lock lk{m_lock};
+     if (m_window_system) {
+@@ -251,6 +282,7 @@ void AppletManager::RequestExit() {
  }
  
  void AppletManager::OperationModeChanged() {
@@ -7329,6 +7376,27 @@ index 3dd2adc9c0..c17da80799 100644
      std::scoped_lock lk{m_lock};
      if (m_window_system) {
          m_window_system->OnOperationModeChanged();
+diff --git a/src/core/hle/service/am/applet_manager.h b/src/core/hle/service/am/applet_manager.h
+index 4d477b5327..1a966ecf6c 100644
+--- a/src/core/hle/service/am/applet_manager.h
++++ b/src/core/hle/service/am/applet_manager.h
+@@ -42,6 +42,8 @@ public:
+     explicit AppletManager(Core::System& system);
+     ~AppletManager();
+ 
++    /// kart-recomp: ends the game's process started without the window system (engine shutdown, while the kernel still runs).
++    void ReleaseNativeProcess();
+     void CreateAndInsertByFrontendAppletParameters(std::unique_ptr<Process> process,
+                                                    const FrontendAppletParameters& params);
+     void RequestExit();
+@@ -61,6 +63,7 @@ private:
+ 
+     FrontendAppletParameters m_pending_parameters{};
+     std::unique_ptr<Process> m_pending_process{};
++    std::unique_ptr<Process> m_native_process{}; ///< kart-recomp: the game, started without the window system
+ };
+ 
+ } // namespace Service::AM
 diff --git a/src/core/hle/service/caps/caps_su.cpp b/src/core/hle/service/caps/caps_su.cpp
 index 9b86072f2f..509722eaae 100644
 --- a/src/core/hle/service/caps/caps_su.cpp
@@ -8069,10 +8137,10 @@ index 8b6d05a8dc..b50e5673d5 100644
          return ReportUnimplementedFunction(ctx, info);
  
 diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
-index 7bdd89905c..a10b13901f 100644
+index 7bdd89905c..91bf44c682 100644
 --- a/src/core/hle/service/services.cpp
 +++ b/src/core/hle/service/services.cpp
-@@ -5,72 +5,166 @@
+@@ -5,72 +5,170 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "core/hle/service/services.h"
@@ -8226,7 +8294,7 @@ index 7bdd89905c..a10b13901f 100644
 +    static const std::set<std::string, std::less<>> wanted = [] {
 +        std::set<std::string, std::less<>> out;
 +        const char* v = std::getenv("KARTRECOMP_HLE_SERVICES");
-+        std::string list = v ? v : (Kernel::NativeServices::Enabled() ? "sm,hid,nvservices,ns,am,settings" : "all");
++        std::string list = v ? v : (Kernel::NativeServices::Enabled() ? "sm,hid,nvservices,ns,settings" : "all");
 +        std::stringstream in{list};
 +        for (std::string item; std::getline(in, item, ',');)
 +            if (!item.empty()) out.insert(item);
@@ -8236,10 +8304,14 @@ index 7bdd89905c..a10b13901f 100644
 +}
 +} // namespace
 +
++bool IsHleModuleStarted(std::string_view name) {
++    return StartModule(name);
++}
++
  Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                     std::stop_token token) {
      auto& kernel = system.Kernel();
-@@ -97,67 +191,144 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+@@ -97,67 +195,144 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          // which is the honest answer for a build that cannot provide one.
          {"jit",        &JIT::LoopProcess},
  #endif
@@ -8387,6 +8459,29 @@ index 7bdd89905c..a10b13901f 100644
  }
  
  } // namespace Service
+diff --git a/src/core/hle/service/services.h b/src/core/hle/service/services.h
+index a89b04af2d..2412bfaa40 100644
+--- a/src/core/hle/service/services.h
++++ b/src/core/hle/service/services.h
+@@ -6,6 +6,8 @@
+ 
+ #pragma once
+ 
++#include <string_view>
++
+ #include "common/polyfill_thread.h"
+ #include "core/hle/service/sm/sm.h"
+ 
+@@ -13,6 +15,9 @@ namespace Service {
+ 
+ /// @brief The purpose of this class is to own any objects that need to be shared across the other service
+ /// implementations. Will be torn down when the global system instance is shutdown.
++/// kart-recomp: whether the emulated service module `name` is started (native services start only the ones used as libraries).
++bool IsHleModuleStarted(std::string_view name);
++
+ class Services final {
+ public:
+     explicit Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
 diff --git a/src/core/hle/service/set/system_settings_server.cpp b/src/core/hle/service/set/system_settings_server.cpp
 index ae07565196..3cd1665b8a 100644
 --- a/src/core/hle/service/set/system_settings_server.cpp
