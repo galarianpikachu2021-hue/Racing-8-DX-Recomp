@@ -82,7 +82,27 @@ QList<Piece> Split(const QString& unitPath, const QString& outDir, const QSet<QB
     struct Group { QString name; bool hot; QList<const Func*> funcs; };
     QList<Group> groups;
     for (int k = 0; k < parts; ++k) groups.append({QStringLiteral("%1_p%2.c").arg(stem).arg(k), false, cold.mid(k * per, per)});
-    if (!hot.isEmpty()) groups.append({QStringLiteral("%1_hot.c").arg(stem), true, hot_funcs});
+    if (!hot.isEmpty()) {
+        // The optimiser's time grows much faster than a piece's size (measured with clang 20 at -O3: 0.5 s per MB for a 1 MB
+        // piece, 1.2 s per MB at 5 MB, 3.6 s per MB at 20 MB), so the hot blocks are cut into pieces of about kHotPieceBytes, in
+        // address order (neighbouring blocks, which call each other, stay together). The last one is <stem>_hot.c.
+        constexpr qsizetype kHotPieceBytes = 1536 * 1024;
+        QList<QList<const Func*>> chunks{{}};
+        qsizetype bytes = 0;
+        for (const Func* f : hot_funcs) {
+            qsizetype size = 0;
+            for (const QByteArray& l : f->lines) size += l.size() + 1;
+            // A two-function block (blk_X_f + blk_X) is never cut apart.
+            if (bytes + size > kHotPieceBytes && !chunks.last().isEmpty() && !chunks.last().last()->name.endsWith("_f")) {
+                chunks.append(QList<const Func*>{});
+                bytes = 0;
+            }
+            chunks.last().append(f);
+            bytes += size;
+        }
+        for (qsizetype k = 0; k + 1 < chunks.size(); ++k) groups.append({QStringLiteral("%1_h%2.c").arg(stem).arg(k), true, chunks[k]});
+        groups.append({QStringLiteral("%1_hot.c").arg(stem), true, chunks.last()});
+    }
 
     QDir().mkpath(outDir);
     static const QRegularExpression init_re(QStringLiteral("^(int|unsigned|uint32_t|uint64_t) (\\w+)=[^;]*;$"));

@@ -17,6 +17,10 @@ struct CompileJob {
     QString marker; // <object>.done, written only after the object was produced successfully
     QStringList args;
     bool hot;
+    /// What the object depends on (Build sets it): a hash of the source text, the module's headers, the compile options and the
+    /// compiler. The marker stores it, so a later build compiles a piece again only when one of those changed. Empty = not
+    /// checked (the marker's existence is enough).
+    QByteArray key = {};
 };
 
 struct BuildPlan {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "build_runner.h"
 
+#include <QCryptographicHash>
+#include <QHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -147,7 +149,10 @@ QList<CompileJob> BuildRunner::PlanCompileJobs(const QString& srcDir, const QStr
 }
 
 bool BuildRunner::IsDone(const CompileJob& job) {
-    return QFile::exists(job.object) && QFile::exists(job.marker);
+    if (!QFile::exists(job.object)) return false;
+    QFile marker(job.marker);
+    if (!marker.open(QIODevice::ReadOnly)) return false;
+    return job.key.isEmpty() || marker.readAll().trimmed() == job.key;
 }
 
 void BuildRunner::DieWithParent(QProcess& process) {
@@ -214,6 +219,7 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
         if (error) *error = QStringLiteral("cannot write %1").arg(job.marker);
         return false;
     }
+    marker.write(job.key);
     return true;
 }
 
@@ -242,7 +248,9 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
         QFile old(stampFile);
         const bool same = old.open(QIODevice::ReadOnly) && old.readAll().trimmed() == plan.stamp.toUtf8();
         old.close();
-        if (!same) QDir(plan.workDir).removeRecursively();
+        // The objects stay: each one is checked against what it was made from (CompileJob::key), so a new engine or game
+        // version compiles only the pieces whose text, headers or options really changed.
+        Q_UNUSED(same)
         QDir().mkpath(plan.workDir);
         QFile fresh(stampFile);
         if (fresh.open(QIODevice::WriteOnly)) fresh.write(plan.stamp.toUtf8() + "\n");
@@ -288,6 +296,43 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
 
     for (Module& m : modules)
         for (CompileJob& j : m.jobs) j.args = plan.compileArgs + j.args;
+    // Each job's key. Paths that differ between installs (the include folder, the toolchain's sysroot) are left out of the options;
+    // the headers count by content, the compiler by its size.
+    {
+        const QByteArray compilerId = QByteArray::number(QFileInfo(plan.compiler).size());
+        for (Module& m : modules) {
+            const QString mdir = QDir(plan.exportDir).filePath(m.dir);
+            QCryptographicHash headers(QCryptographicHash::Sha256);
+            for (const QString& h : QDir(mdir).entryList({QStringLiteral("*.h")}, QDir::Files, QDir::Name)) {
+                QFile f(QDir(mdir).filePath(h));
+                if (f.open(QIODevice::ReadOnly)) headers.addData(f.readAll());
+            }
+            const QByteArray headerId = headers.result().toHex();
+            QSet<QString> wanted;
+            for (CompileJob& j : m.jobs) {
+                QCryptographicHash key(QCryptographicHash::Sha256);
+                QFile src(j.source);
+                if (src.open(QIODevice::ReadOnly)) key.addData(src.readAll());
+                key.addData(headerId);
+                key.addData(compilerId);
+                for (const QString& a : j.args) {
+                    if (a.startsWith(QLatin1String("-I")) || a.startsWith(QLatin1String("--sysroot="))) continue;
+                    key.addData(a.toUtf8());
+                    key.addData("\0", 1);
+                }
+                j.key = key.result().toHex();
+                wanted << QFileInfo(j.object).fileName();
+            }
+            // Objects and pieces of an earlier layout (other piece names) are of no use any more.
+            for (const QString& sub : {QStringLiteral("obj"), QStringLiteral("src")}) {
+                QDir dir(QDir(plan.workDir).filePath(m.dir + "/" + sub));
+                for (const QString& f : dir.entryList(QDir::Files)) {
+                    const QString object = sub == QLatin1String("src") ? f + ".o" : f.endsWith(".done") ? f.chopped(5) : f;
+                    if (!wanted.contains(object)) dir.remove(f);
+                }
+            }
+        }
+    }
     // Optional game changes (code_patches.txt) alter a few blocks of main: when the set differs from the last build's, only the pieces
     // holding a changed address are compiled again (each block names its last instruction's address, "0x<offset>ULL").
     {

@@ -133,6 +133,11 @@ QStringList GamePackage::launchArguments(bool fullscreen) const {
     return args;
 }
 
+bool GamePackage::hasFirmware() const {
+    const QString dir = installed ? layout.firmwareDir() : QDir(suyu_home).filePath(QStringLiteral("suyu/nand/system/Contents/registered"));
+    return !QDir(dir).entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty();
+}
+
 QProcessEnvironment GamePackage::launchEnvironment() const {
     auto env = QProcessEnvironment::systemEnvironment();
     if (installed) {

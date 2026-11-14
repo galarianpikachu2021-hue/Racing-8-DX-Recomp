@@ -71,7 +71,7 @@ private slots:
         QVERIFY(std::is_sorted(marks.begin(), marks.end()));
         QCOMPARE(marks.last(), 1000);
     }
-    void aNewEngineVersionRebuildsEverythingAndAStaleExportIsCleared() {
+    void aNewEngineVersionBuildsAgainAndAStaleExportIsCleared() {
         NEEDS_SH();
         Fixture f;
         const auto touch = [&](const QString& path) { Write(path, "x"); };
@@ -79,11 +79,10 @@ private slots:
         touch(f.layout.workDir() + "/main/obj/sentinel.o");
         touch(f.layout.exportDir() + "/stale-from-an-older-export.txt");
         QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
-        QVERIFY(QFile::exists(f.layout.workDir() + "/main/obj/sentinel.o"));      // same engine: resumed
+        QVERIFY(!QFile::exists(f.layout.workDir() + "/main/obj/sentinel.o"));     // an object no piece owns is removed
         QVERIFY(!QFile::exists(f.layout.exportDir() + "/stale-from-an-older-export.txt")); // the export is regenerated every time
         f.paths.engineVersion = "v2";
         QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
-        QVERIFY(!QFile::exists(f.layout.workDir() + "/main/obj/sentinel.o"));     // new engine: everything compiled again
         QVERIFY(IsBuilt(f.layout, "v2"));
     }
     void an32BitUpdateStopsBeforeAnythingIsInstalled() {

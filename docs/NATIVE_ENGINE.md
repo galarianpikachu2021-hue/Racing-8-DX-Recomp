@@ -386,3 +386,88 @@ Setup can take the game as already decrypted files instead of NSPs: a code folde
 Result: the keyless "decrypted files" boot (no keys, no firmware, RomFS folder) runs menus and a scripted Grand Prix race for
 110 s at 60 fps with no stray memory accesses at all (before: 300,000 dropped writes a second and a crash after 25 s). Miis have
 no faces or bodies in this mode. Installs with firmware are unaffected: the stand-in is only used when the archive is missing.
+
+## Native paths are the default (2026-11-13)
+
+On Linux the engine now starts with native threads, native controller reads and native IPC ("all-safe") without any switch, and
+the native renderer is the only one that draws on every platform. `KARTRECOMP_NATIVE_THREADS=0`, `KARTRECOMP_NATIVE_HID=0`,
+`KARTRECOMP_NATIVE_IPC=0` turn each off; elsewhere they stay opt-in (`=1`) until the Windows build has been tested with them.
+`KARTRECOMP_NATIVE_GPU=shadow` is the development comparison mode, `=off` is for tools (the launcher's test boot and the
+firmware reader below); there is no emulated-GPU picture any more (the old renderer runs as Null whenever the native one is not
+in shadow mode). Mario Circuit, 4.0.1, defaults only: 59.9 fps, no second under 58, game threads as host threads.
+
+What is still the old console layer underneath: the HLE kernel objects (handles, memory map, synchronisation), the services the
+game talks to through IPC (file system, audio renderer, the display queue, account, settings) and the loader. They are called
+on the game's own host threads now, but the code is suyu's. Removing them is the remaining part of the plan above (native
+handle table and synchronisation, then file system and audio).
+
+## Tuning points and ultrawide (2026-11-14)
+
+Game changes at run time without JIT and without patching code: a **tuning point** is an instruction whose float result the
+generated code multiplies by a number the engine can set. `common/kart_tune_sites.h` lists them (game build, address, expected
+instruction, register, slot); the exporter marks the ones whose instruction matches, the generator appends
+`c->vreg[r] *= recomp_tune[slot]` after that instruction, and the module exports the table (`recomp_image_tune_v1`). All slots
+start at 1.0, so a game with tuning points and an engine that never sets them behaves exactly as before, and an older game
+build simply has none (`KartTune::Set` returns false). `export.json` records `tune_sites`.
+
+**Slot 0, view aspect.** The game sets each camera's aspect to its view's width / height in four places (one `fdiv` each,
+stored at +0xb0 of the engine library's perspective projection; found by scanning a running race for the 16:9 value, writing
+21:9 there and seeing the picture widen, then searching `main` for the divide-and-store): 4.0.1 `main+0x3ccab4`, `+0x3cd258`,
+`+0x3cd314`, `+0x3ce048`; 3.0.4 `+0x3ca93c`, `+0x3cb0e0`, `+0x3cb19c`, `+0x3cbecc`. Because the game's own projection changes,
+its culling follows: nothing pops in at the sides.
+
+**Renderer** (`KARTRECOMP_ASPECT` = `auto` for the window's shape, `W:H`, or a number; launcher: Display, "Picture shape"):
+- `wide_x` = wanted aspect / (16:9), set once; the tuning slot gets the same value.
+- In a race (the game camera was seen within the last 30 frames) every screen-size render target is `wide_x` times wider
+  (`Image::wide`, beside the vertical `scale`), and viewports and scissors scale horizontally by `scale * wide`.
+- The HUD is a 16:9 layout: after the upscale point (where the HUD starts) a draw keeps its 16:9 shape in the middle of the
+  wide target, unless it reads a wide image (a full-screen copy or effect, e.g. the final copy to the window image) or reads no
+  texture at all (a fade or the pause dimmer): those fill the target.
+- Menus, their 3D previews and loading screens are drawn 16:9 exactly as before (their cameras are fixed 16:9) and shown in
+  the middle with black bars; the targets change size at the switch.
+- Checked on 4.0.1 at 21:9 (3360x1440): menus, vehicle and cup select, the pause menu and a race look right, 60 fps.
+  Not checked yet: split-screen, replays, the award ceremony, 32:9, frame generation and HDR together with ultrawide, handheld
+  quality, effects that work in screen pixels (none seen wrong so far).
+
+## Mii preview in the launcher (2026-11-13)
+
+`app/src/mii_render.{h,cpp}`: the Miis tab draws the Mii's head and shoulders and redraws on every change. It is a firmware
+feature: the face data is the console's own "MiiModel" archive, read from the player's installed firmware by the engine
+(`KARTRECOMP_SYSARCHIVE_EXTRACT=0100000000000802=<folder>`, exits before any game code and needs no built game) into the
+launcher's cache folder, once; the eye, mouth and makeup textures are ASTC and are decoded by the engine too
+(`mk8d-engine --astc-decode <in> <out>`). Without firmware the Miis tab is off (the game has no Mii racers then either).
+Nothing from the firmware is in the repository or a release.
+- Resource layout, placement formulas and colour tables follow the MIT/Apache "vee" Mii library; block-linear unswizzle, BC4 and
+  BC5 decoding and the drawing (a software rasterizer with depth buffer, bilinear textures, alpha layers, 2x supersampling)
+  are the launcher's own. No GPU or OpenGL is used.
+- Face texture: skin colour, makeup, wrinkles, painted beard (the texture is one half of the face, mirrored). Mask: mustache,
+  mouth, eyebrows, eyes, mole. Meshes: face, forehead, hair (mirrored when parted the other way), nose, nose line, beard,
+  glasses. The shoulders are a plain bust in the favourite colour (the firmware has no body; games bring their own).
+- Development: `kartrecomp --mii-render <resource folder> <out.png> [key=value ...]`, and
+  `KARTRECOMP_LAUNCHER_SHOT=<tab>=<png>[=<seconds>]` saves a picture of the launcher window.
+
+## Frame rate (2026-11-14)
+
+The game's simulation is 60 steps a second and counts frames (docs/FRAMERATE.md), so the launcher's Frame rate tab offers what
+is real: 60, or 120 / 180 / 240 with frames generated by the renderer between the game's own (the built-in interpolator with the
+game's motion vectors; it switches FSR 3 on at 100% when no temporal upscaler is chosen), and it points to the Setup page's
+60 fps split-screen build option for 3-4 players. A game rate above 60 would need every frame-counted timer in the game
+rewritten; that has not been done.
+
+## Game build time (2026-11-14)
+
+Measured on the 4.0.1 build (clang 20, 6 jobs on 4 cores / 8 threads, 236 s): 160 s are the "hot" pieces (the 176,577 blocks
+of `hot_blocks.txt`, 35% of the generated text, compiled at -O3), 60 s the cold ones (-O0), linking about 2 s, the export 2 s.
+A hot piece costs about 1.2 s per MB at any level from -O1 to -O3 (-O0: 0.2 s), half optimiser and half code generation: the
+cost is in the shape of the generated code (every instruction is a possible entry), not in one pass. What changed:
+
+- **Incremental builds.** Every compile job has a key: a hash of its source text, the module's headers, the compile options
+  (without install-specific paths) and the compiler. The object's marker stores it, and a piece is compiled again only when
+  the key differs. The work folder is no longer wiped when the engine version changes. A second build of an unchanged export:
+  13 s instead of 237 s (hashing, splitting and linking). A generator change that touches a few blocks (a new tuning point, a
+  code patch) recompiles only the pieces holding them; a change to the runtime header still recompiles everything.
+- **Hot pieces of about 1.5 MB** (were one per unit, up to 20 MB and 72 s for a single file): 4% less build time, no long
+  single compile at the end, and finer pieces for the incremental build. CPU in the race unchanged within noise.
+- Not done, with reasons: a smaller hot list (the list is every block that ran in the coverage runs; cutting it to the
+  blocks of one profile risks -O0 code in whatever the profile did not visit), -O1 for the hot pieces (9% faster to compile,
+  bigger code).

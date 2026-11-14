@@ -71,3 +71,10 @@ clocks are whole frames, so at 90 Hz every counter still advances once per frame
 means changing each counter's meaning by hand (hundreds of places, lap times at risk): not a patch.
 What works for higher rates: frame generation (built-in 2x/3x/4x = 120/180/240 from the game's 60). A possible extension is an
 arbitrary output rate (e.g. 144 or 165 from 60: generated frames at the right time positions), which needs only renderer work.
+
+## 2026-11-14: what the launcher offers
+
+Frame rate tab: 60, or 120 / 180 / 240 with generated frames (the built-in interpolator, 2x / 3x / 4x, from the game's motion
+vectors); the game still simulates 60 steps a second. 60 fps in 3-4 player split-screen is the Setup page's build option
+(`split60`). A real game rate above 60 is still not done, for the reason above (frame-counted timers everywhere). The new
+tuning points (docs/NATIVE_ENGINE.md) make single values adjustable at run time, but a frame rate change is hundreds of them.

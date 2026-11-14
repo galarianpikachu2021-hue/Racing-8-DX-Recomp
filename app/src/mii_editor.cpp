@@ -16,6 +16,12 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QDesktopServices>
+#include <QPixmap>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QTimer>
+
+#include "build_runner.h"
 #include <QUrl>
 
 namespace {
@@ -25,10 +31,10 @@ const char* const kFavoriteColors[] = {"Red", "Orange", "Yellow", "Light green",
 
 MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
     auto* outer = new QVBoxLayout(this);
-    auto* note = new QLabel(tr("<b>Experimental.</b> Keep a copy of your Miis folder before saving (Open Miis folder). "
-                               "Miis you make here show up in the game's character select (Mii racer). Values are the game's own "
-                               "numbers (the same ones the console's Mii Maker uses), so try a value and look in the game; there is "
-                               "no face preview here yet. Close the game before saving."));
+    note = new QLabel(tr("<b>Experimental.</b> Keep a copy of your Miis folder before saving (Open Miis folder). "
+                         "Miis you make here show up in the game's character select (Mii racer). Values are the game's own "
+                         "numbers (the same ones the console's Mii Maker uses); the picture shows the face as you change them. "
+                         "Close the game before saving."));
     note->setWordWrap(true);
     outer->addWidget(note);
 
@@ -36,6 +42,12 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
     outer->addLayout(body, 1);
 
     auto* left = new QVBoxLayout;
+    preview = new QLabel;
+    preview->setFixedSize(260, 320);
+    preview->setAlignment(Qt::AlignCenter);
+    preview->setWordWrap(true);
+    preview->setFrameShape(QFrame::StyledPanel);
+    left->addWidget(preview, 0, Qt::AlignHCenter);
     list = new QListWidget;
     list->setMinimumWidth(170);
     left->addWidget(list, 1);
@@ -84,6 +96,7 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
         spins[f.key] = spin;
         connect(spin, &QSpinBox::valueChanged, this, [this] {
             if (!loading) setDirty(true);
+            updatePreview();
         });
     }
     fl->addStretch();
@@ -110,7 +123,10 @@ MiiEditor::MiiEditor(QWidget* parent) : QWidget(parent) {
 
     connect(name, &QLineEdit::textEdited, this, [this] { setDirty(true); });
     connect(gender, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); });
-    connect(favorite, &QComboBox::currentIndexChanged, this, [this] { if (!loading) setDirty(true); });
+    connect(favorite, &QComboBox::currentIndexChanged, this, [this] {
+        if (!loading) setDirty(true);
+        updatePreview();
+    });
     connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
         storeEdits();
         showMii(row);
@@ -213,7 +229,7 @@ void MiiEditor::refreshList() {
 
 void MiiEditor::showMii(int row) {
     current = (row >= 0 && row < db.Count()) ? row : -1;
-    form->setEnabled(current >= 0 && !locked);
+    form->setEnabled(current >= 0 && !locked && has_firmware);
     if (current < 0) return;
     loading = true;
     const auto& d = db.At(current);
@@ -222,16 +238,108 @@ void MiiEditor::showMii(int row) {
     favorite->setCurrentIndex(d.Get("favorite_color"));
     for (auto& [key, spin] : spins) spin->setValue(d.Get(key.c_str()));
     loading = false;
+    updatePreview();
 }
 
-void MiiEditor::storeEdits() {
-    if (current < 0 || current >= db.Count()) return;
+Mii::StoreData MiiEditor::edited() const {
     Mii::StoreData d = db.At(current);
     d.SetName(name->text());
     d.Set("gender", gender->currentIndex());
     d.Set("favorite_color", favorite->currentIndex());
     for (auto& [key, spin] : spins) d.Set(key.c_str(), spin->value());
     d.UpdateChecksums();
+    return d;
+}
+
+QString MiiEditor::resourceDir() const {
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/mii-model");
+}
+
+void MiiEditor::setEngine(const QString& path, const QStringList& arguments, const QProcessEnvironment& environment, const QString& working_dir,
+                          bool firmware) {
+    engine = path, engine_args = arguments, engine_env = environment, engine_dir = working_dir;
+    has_firmware = firmware;
+    tried_extract = false;
+    setLocked(locked);
+    prepareResources();
+}
+
+// The face data comes from the player's own firmware: the engine writes the firmware's Mii archive into the cache folder (once),
+// then decodes its ASTC textures. Nothing happens without firmware or without an engine that knows these two jobs.
+void MiiEditor::prepareResources() {
+    if (!has_firmware) {
+        preview->setText(tr("Miis need your console's firmware.\nAdd it on the Setup page."));
+        return;
+    }
+    if (renderer.Load(resourceDir()) && !renderer.NeedsAstc()) return updatePreview();
+    if (tried_extract || helper || engine.isEmpty() || !QFileInfo::exists(engine)) {
+        if (!helper) preview->setText(tr("No preview: the Mii face data could not be read from the firmware."));
+        return;
+    }
+    tried_extract = true;
+    QDir().mkpath(resourceDir());
+    preview->setText(tr("Reading the Mii face data from your firmware..."));
+    if (!renderer.Loaded()) {
+        QProcessEnvironment env = engine_env;
+        env.insert(QStringLiteral("KARTRECOMP_SYSARCHIVE_EXTRACT"), QStringLiteral("0100000000000802=") + resourceDir());
+        env.insert(QStringLiteral("KARTRECOMP_NATIVE_GPU"), QStringLiteral("off"));
+        env.insert(QStringLiteral("SDL_VIDEODRIVER"), QStringLiteral("dummy"));
+        env.insert(QStringLiteral("SDL_AUDIODRIVER"), QStringLiteral("dummy"));
+        env.insert(QStringLiteral("KARTRECOMP_NO_MODS"), QStringLiteral("1"));
+        runEngine(engine_args, env, 0);
+    } else {
+        runEngine({}, engine_env, 1);
+    }
+}
+
+void MiiEditor::runEngine(const QStringList& arguments, const QProcessEnvironment& environment, int step) {
+    QStringList args = arguments;
+    if (step == 1) {
+        QFile job(resourceDir() + QStringLiteral("/astc.job"));
+        if (!job.open(QIODevice::WriteOnly) || job.write(renderer.AstcJob()) <= 0) return prepareResources();
+        job.close();
+        args = {QStringLiteral("--astc-decode"), job.fileName(), resourceDir() + QStringLiteral("/astc.rgba")};
+    }
+    helper = new QProcess(this);
+    BuildRunner::DieWithParent(*helper);
+    helper->setProcessEnvironment(environment);
+    helper->setWorkingDirectory(engine_dir);
+    helper->setProcessChannelMode(QProcess::MergedChannels);
+    // An engine that does not know the job would start the game instead: never let it run on.
+    QTimer::singleShot(30000, helper, [p = helper] { p->kill(); });
+    connect(helper, &QProcess::finished, this, [this, step](int, QProcess::ExitStatus) {
+        helper->deleteLater();
+        helper = nullptr;
+        QFile::remove(resourceDir() + QStringLiteral("/astc.job"));
+        if (step == 0 && renderer.Load(resourceDir()) && renderer.NeedsAstc()) return runEngine({}, engine_env, 1);
+        prepareResources();
+    });
+    connect(helper, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart || !helper) return;
+        helper->deleteLater();
+        helper = nullptr;
+        prepareResources();
+    });
+    helper->start(engine, args);
+}
+
+void MiiEditor::updatePreview() {
+    if (loading || preview_queued) return;
+    preview_queued = true; // one picture per burst of changes
+    QTimer::singleShot(0, this, [this] {
+        preview_queued = false;
+        if (!renderer.Loaded() || renderer.NeedsAstc() || !has_firmware) return;
+        if (current < 0 || current >= db.Count()) return preview->setPixmap(QPixmap());
+        const qreal ratio = devicePixelRatioF();
+        QImage img = renderer.Render(edited(), static_cast<int>(256 * ratio), static_cast<int>(316 * ratio));
+        img.setDevicePixelRatio(ratio);
+        preview->setPixmap(QPixmap::fromImage(img));
+    });
+}
+
+void MiiEditor::storeEdits() {
+    if (current < 0 || current >= db.Count()) return;
+    const Mii::StoreData d = edited();
     if (d.raw != db.At(current).raw) {
         db.Replace(current, d);
         if (QListWidgetItem* it = list->item(current)) it->setText(d.Name());
@@ -275,10 +383,12 @@ bool MiiEditor::save() {
 
 void MiiEditor::setLocked(bool l) {
     locked = l;
-    for (auto* b : {add_male, add_female, duplicate, remove, up, down}) b->setEnabled(!locked);
-    form->setEnabled(current >= 0 && !locked);
-    save_button->setEnabled(dirty && !locked);
-    revert->setEnabled(dirty && !locked);
-    list->setEnabled(true);
-    if (locked) status->setText(tr("The game is running: Miis can be edited after it closes."));
+    const bool off = locked || !has_firmware; // Miis are a firmware feature
+    for (auto* b : {add_male, add_female, duplicate, remove, up, down}) b->setEnabled(!off);
+    form->setEnabled(current >= 0 && !off);
+    save_button->setEnabled(dirty && !off);
+    revert->setEnabled(dirty && !off);
+    list->setEnabled(has_firmware);
+    if (!has_firmware) status->setText(tr("Miis need your console's firmware (Setup page). Without it the game has no Mii racers either."));
+    else if (locked) status->setText(tr("The game is running: Miis can be edited after it closes."));
 }

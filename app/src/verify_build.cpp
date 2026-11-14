@@ -65,7 +65,7 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     env.insert("SUYU_RECOMP_COVERAGE_PATH", coveragePath);
     env.insert("SDL_VIDEODRIVER", "dummy"); // no window: the Null renderer needs no display
     env.insert("SDL_AUDIODRIVER", "dummy");
-    env.remove("KARTRECOMP_NATIVE_GPU");
+    env.insert("KARTRECOMP_NATIVE_GPU", "off"); // the check boots without a picture
     env.insert("KARTRECOMP_NO_MODS", "1");
     QProcess p;
     BuildRunner::DieWithParent(p);

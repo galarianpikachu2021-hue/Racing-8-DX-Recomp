@@ -594,6 +594,65 @@ index 0000000000..9839ebcc04
 +}
 +
 +} // namespace KartRe
+diff --git a/src/common/kart_tune_sites.h b/src/common/kart_tune_sites.h
+new file mode 100644
+index 0000000000..53119f50fd
+--- /dev/null
++++ b/src/common/kart_tune_sites.h
+@@ -0,0 +1,53 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: tuning points. A few places in the game compute a value the engine wants to scale at run time (no JIT, no code
++// patching: the generated code itself multiplies by a number the engine sets). The exporter marks each site; the generated code
++// multiplies the named float register by recomp_tune[slot] right after that instruction, and the module hands the engine the
++// table through recomp_image_tune_v1. Every slot starts at 1.0, so a game built with tuning points behaves exactly like one
++// without until the engine changes a slot, and an engine that knows nothing about them changes nothing.
++//
++// Slot 0, view aspect: the game sets each camera's aspect ratio to its view's width / height ("fdiv" of the two, stored into the
++// projection, in four places: full screen, the two split-screen layouts, and the resize path). Slot 0 = wanted aspect / (16:9)
++// widens every camera, with the game's own culling following (the projection is the game's, not a renderer trick).
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++namespace KartTune {
++
++inline constexpr int kSlots = 8;
++inline constexpr int kSlotAspect = 0;
++
++struct Site {
++    uint64_t build;  ///< first 8 bytes of main's NSO build ID
++    uint64_t offset; ///< in main: the instruction whose result is scaled
++    uint32_t word;   ///< what must be there (otherwise the site is left alone)
++    int reg;         ///< float register holding the result (S<reg>)
++    int slot;
++};
++
++inline constexpr Site kSites[] = {
++    // 4.0.1
++    {0x158c0c7399aabd7bULL, 0x3ccab4, 0x1e211800, 0, kSlotAspect}, // fdiv s0, s0, s1
++    {0x158c0c7399aabd7bULL, 0x3cd258, 0x1e201820, 0, kSlotAspect}, // fdiv s0, s1, s0
++    {0x158c0c7399aabd7bULL, 0x3cd314, 0x1e201820, 0, kSlotAspect}, // fdiv s0, s1, s0
++    {0x158c0c7399aabd7bULL, 0x3ce048, 0x1e251884, 4, kSlotAspect}, // fdiv s4, s4, s5
++    // 3.0.4
++    {0x2452c49bc26ec159ULL, 0x3ca93c, 0x1e211800, 0, kSlotAspect},
++    {0x2452c49bc26ec159ULL, 0x3cb0e0, 0x1e201820, 0, kSlotAspect},
++    {0x2452c49bc26ec159ULL, 0x3cb19c, 0x1e201820, 0, kSlotAspect},
++    {0x2452c49bc26ec159ULL, 0x3cbecc, 0x1e251884, 4, kSlotAspect},
++};
++
++/// The loaded game's table (null when the game was built without tuning points). Set once by the module loader.
++inline std::atomic<float*> g_table{nullptr};
++
++/// Sets a slot; false when the loaded game has no tuning points.
++inline bool Set(int slot, float value) {
++    float* const table = g_table.load(std::memory_order_acquire);
++    if (!table || slot < 0 || slot >= kSlots) return false;
++    table[slot] = value;
++    return true;
++}
++
++} // namespace KartTune
 diff --git a/src/common/thread.cpp b/src/common/thread.cpp
 index 5617a93b91..849d89f383 100644
 --- a/src/common/thread.cpp
@@ -1971,10 +2030,10 @@ index 0000000000..11a6dabdf0
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
-index 0000000000..68e8b5a69b
+index 0000000000..dbce9ea040
 --- /dev/null
 +++ b/src/core/arm/recomp/native_hid.cpp
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,271 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_hid.h"
 +
@@ -2126,8 +2185,13 @@ index 0000000000..68e8b5a69b
 +
 +bool Enabled() {
 +    static const bool on = [] {
++        // On by default on Linux (KARTRECOMP_NATIVE_HID=0 turns it off); elsewhere only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_HID");
++#ifdef __linux__
++        return !(v && *v == '0');
++#else
 +        return v && *v == '1';
++#endif
 +    }();
 +    return on;
 +}
@@ -4027,10 +4091,10 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..0d270aded9
+index 0000000000..8c21366291
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,239 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_threads.h"
 +
@@ -4171,8 +4235,13 @@ index 0000000000..0d270aded9
 +
 +bool Enabled() {
 +    static const bool on = [] {
++        // On by default on Linux (KARTRECOMP_NATIVE_THREADS=0 turns it off); elsewhere only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_THREADS");
++#ifdef __linux__
++        return !(v && *v == '0');
++#else
 +        return v && *v == '1';
++#endif
 +    }();
 +    return on;
 +}
@@ -4519,10 +4588,10 @@ index 1dec5ab984..e8ee5a0089 100644
          // mount point should be "mii:"
 diff --git a/src/core/hle/service/native_ipc.cpp b/src/core/hle/service/native_ipc.cpp
 new file mode 100644
-index 0000000000..e7fc00cfb2
+index 0000000000..24715b142c
 --- /dev/null
 +++ b/src/core/hle/service/native_ipc.cpp
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,128 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/service/native_ipc.h"
 +
@@ -4561,8 +4630,12 @@ index 0000000000..e7fc00cfb2
 +const std::set<std::string>& Wanted() {
 +    static const std::set<std::string> wanted = [] {
 +        std::set<std::string> out;
++        // On by default on Linux for every safe service (KARTRECOMP_NATIVE_IPC=0 turns it off); elsewhere only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_IPC");
-+        if (!v) return out;
++#ifdef __linux__
++        if (!v) v = "all-safe";
++#endif
++        if (!v || std::strcmp(v, "0") == 0) return out;
 +        std::istringstream list{v};
 +        for (std::string item; std::getline(list, item, ',');) {
 +            if (item == "all-safe") out.insert(SafeServices().begin(), SafeServices().end());
@@ -5264,10 +5337,10 @@ index 3cc84acfdf..74a38ac4f7 100644
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..1cdef55536
+index 0000000000..563a89995b
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1292 @@
+@@ -0,0 +1,1296 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +
@@ -6300,8 +6373,11 @@ index 0000000000..1cdef55536
 +
 +bool Enabled() {
 +    static const bool enabled = [] {
++        // The native renderer is the renderer. "shadow" (development) runs it beside the old output; "off" is for tools that
++        // start the game without a picture.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_GPU");
-+        return v && (std::strcmp(v, "shadow") == 0 || std::strcmp(v, "native") == 0);
++        if (std::getenv("KARTRECOMP_VERIFY_BOOT")) return false; // the launcher's test boot has no display
++        return !(v && std::strcmp(v, "off") == 0);
 +    }();
 +    return enabled;
 +}
@@ -6309,7 +6385,8 @@ index 0000000000..1cdef55536
 +bool Exclusive() {
 +    static const bool exclusive = [] {
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_GPU");
-+        return v && std::strcmp(v, "native") == 0;
++        if (std::getenv("KARTRECOMP_VERIFY_BOOT")) return false;
++        return !(v && (std::strcmp(v, "shadow") == 0 || std::strcmp(v, "off") == 0));
 +    }();
 +    return exclusive;
 +}
@@ -7220,7 +7297,7 @@ index 0000000000..c36de3728b
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..01db125f03 100644
+index 699980238b..22939bf57d 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -349,18 +349,37 @@ inline constexpr int kChainBudget = 256;
@@ -7266,7 +7343,7 @@ index 699980238b..01db125f03 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -369,6 +388,92 @@ inline std::string ChainTo(u64 t) {
+@@ -369,6 +388,94 @@ inline std::string ChainTo(u64 t) {
      return b;
  }
  
@@ -7282,6 +7359,8 @@ index 699980238b..01db125f03 100644
 +// instead of returning to the module's dispatcher loop, whose block-index read misses the cache for most branch targets.
 +// Measured with direct memory on (4.0.1, Mario Circuit, all game threads): 5% less CPU. The older measurement above ("deliberately
 +// do not chain") was taken on the JIT-hybrid build and does not hold for the static-only one.
++/// Tuning points of the module being generated (common/kart_tune_sites.h): instruction address -> (float register, slot).
++inline std::map<u64, std::pair<int, int>> g_tune_sites;
 +inline bool g_chain_cond = false;
 +inline std::string ChainTo(u64 t);
 +inline std::string CondExit(const std::string& cond, u64 taken, u64 next) {
@@ -7359,7 +7438,7 @@ index 699980238b..01db125f03 100644
  // The same for a computed target. A chain of blocks otherwise ends at the first
  // BR, BLR or RET, and every one of those is a round trip out to the host
  // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
-@@ -946,8 +1051,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -946,8 +1053,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -7369,7 +7448,7 @@ index 699980238b..01db125f03 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1188,16 +1292,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,16 +1294,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
@@ -7393,7 +7472,7 @@ index 699980238b..01db125f03 100644
          snprintf(buf, sizeof buf,
                   "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; "
                   "c->pc=_target; return; } /* BLR */",
-@@ -1209,16 +1317,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1209,16 +1319,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          const s64 off = ((s32)((i >> 5) << 13) >> 13);
          const u64 tt = pc + off * 4;
          const u32 cond = i & 15;
@@ -7413,7 +7492,7 @@ index 699980238b..01db125f03 100644
      if ((i & 0xFFE0001F) == 0xD4000001) { u32 imm = (i >> 5) & 0xFFFF; snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; c->pending_svc=%uULL; recomp_svc(c,%u); return;", (unsigned long long)next, imm, imm); put(buf); return false; }
      if ((i & 0xFFE0001F) == 0xD4200000) {
          const u32 imm = (i >> 5) & 0xFFFF;
-@@ -5100,7 +5203,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5100,7 +5205,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -7424,7 +7503,7 @@ index 699980238b..01db125f03 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5231,7 +5336,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5231,7 +5338,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          FuncNameTo(namebuf, mod.c_str(), b.vaddr);
          rcu += "void ";
          rcu += namebuf;
@@ -7433,7 +7512,7 @@ index 699980238b..01db125f03 100644
          const u32 first = (u32)((b.vaddr - base) / 4);
          rcu += "    static const uint32_t _expected[]={";
          if (EmitGuardGen()) {
-@@ -5257,12 +5362,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5257,12 +5364,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -7471,7 +7550,23 @@ index 699980238b..01db125f03 100644
              char addr[32];
              rcu += "    { uint64_t _entry=c->pc-g_module_base; if(_entry!=0x";
              snprintf(addr, sizeof addr, "%llx", (unsigned long long)b.vaddr);
-@@ -5321,12 +5450,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5299,6 +5430,15 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+             bool unhandled = false;
+             open = Translate(insn, insn_pc, body, &unhandled);
+             rcu += body;
++            if (mod == "main" && !g_tune_sites.empty()) {
++                if (const auto site = g_tune_sites.find(insn_pc); site != g_tune_sites.end()) {
++                    char tune[200];
++                    snprintf(tune, sizeof tune,
++                             "    { extern float recomp_tune[8]; float _t; memcpy(&_t,c->vreg[%d],4); _t*=recomp_tune[%d]; memcpy(c->vreg[%d],&_t,4); }\n",
++                             site->second.first, site->second.second, site->second.first);
++                    rcu += tune;
++                }
++            }
+             ++stats.emitted;
+             if (unhandled) {
+                 ++stats.unhandled;
+@@ -5321,12 +5461,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -7495,7 +7590,7 @@ index 699980238b..01db125f03 100644
          flush_unit(unit, false);
      }
      emit_seg(cur_unit);
-@@ -5566,7 +5702,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5566,7 +5713,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -7504,7 +7599,7 @@ index 699980238b..01db125f03 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5746,6 +5882,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5746,6 +5893,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
  
      std::ostringstream ex;
      ex << "/* auto-generated by suyu static recompiler - DO NOT EDIT */\n"
@@ -7512,7 +7607,7 @@ index 699980238b..01db125f03 100644
            "#include \"recomp_runtime.h\"\n\n"
            "/* The one symbol suyu resolves out of a recompiled image. Named\n"
            "   distinctly from the internal recomp_lookup so the export is\n"
-@@ -5758,7 +5895,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5758,7 +5906,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -7522,7 +7617,7 @@ index 699980238b..01db125f03 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5799,13 +5937,61 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5799,13 +5948,66 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                "  return &g_recomp_gg_word;\n"
                "}\n";
      }
@@ -7573,6 +7668,11 @@ index 699980238b..01db125f03 100644
 +                 (unsigned long long)hash);
 +        ex << run_table << gw;
 +    }
++    if (mod == "main" && !g_tune_sites.empty()) {
++        ex << "/* Tuning points (kart_tune_sites.h): numbers the engine may set; the marked instructions multiply by them. */\n"
++              "float recomp_tune[8]={1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f};\n"
++              "RECOMP_API float* recomp_image_tune_v1(void){ return recomp_tune; }\n";
++    }
      if (g_emit_fastmem) {
          ex << "/* ABI 6 feature handshake. The host passes its own view of the page\n"
                "   table layout and of the context offsets; 1 means this image was\n"
@@ -7585,7 +7685,7 @@ index 699980238b..01db125f03 100644
                "RECOMP_API unsigned recomp_image_fastmem_v1(uint32_t page_bits, uint32_t stride_log2,\n"
                "                                            uint64_t ptr_mask, uint32_t off_table,\n"
                "                                            uint32_t off_limit){\n"
-@@ -5838,12 +6024,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +6040,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -7613,7 +7713,7 @@ index 699980238b..01db125f03 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +6064,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +6080,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -7623,7 +7723,7 @@ index 699980238b..01db125f03 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6368,6 +6568,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
+@@ -6368,6 +6584,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
  )RT";
  }
  
@@ -7694,7 +7794,7 @@ index 699980238b..01db125f03 100644
  // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
  // Kept under MSVC's 16380-byte limit per string literal.
  inline const char* FpxAbiH() {
-@@ -6888,10 +7152,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,10 +7168,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -7721,7 +7821,7 @@ index 699980238b..01db125f03 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -6960,6 +7240,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6960,6 +7256,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
          text.replace(text.find(abi5_line), abi5_line.size(),
                       std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
      }
@@ -7736,7 +7836,7 @@ index 699980238b..01db125f03 100644
      if (fpx) {
          // After GuestContext, before the include guard closes.
          static constexpr std::string_view guard_end = "#endif\n";
-@@ -7241,7 +7529,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+@@ -7241,7 +7545,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
      // than being a single literal. Adjacent-literal concatenation would not
      // help: the limit applies to the result as well. The memory helpers are a
      // piece of their own because ABI 6 reuses their exact text as its slow path.
@@ -7746,7 +7846,7 @@ index 699980238b..01db125f03 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -7580,6 +7869,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +7885,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif

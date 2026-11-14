@@ -43,6 +43,8 @@ public:
     QString savesDir() const;
     /// Where the console kept the Mii database before (copied to miisDir() by the engine on first start).
     QString nandMiiDatabase() const;
+    /// True when console firmware is installed for this package (Miis need it: the faces come from the firmware's own files).
+    bool hasFirmware() const;
     QStringList dlcFiles() const;
     QString configFile() const;
     QString coverageReport() const;

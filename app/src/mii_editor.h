@@ -7,12 +7,17 @@
 #include <map>
 #include <string>
 
+#include <QProcessEnvironment>
+#include <QStringList>
+
 #include "mii_db.h"
+#include "mii_render.h"
 
 class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QProcess;
 class QPushButton;
 class QSpinBox;
 
@@ -26,6 +31,11 @@ public:
     /// The game must not run while the database is written (it saves its own copy when it closes).
     void setLocked(bool locked);
     void reload();
+    /// How to run the engine, and whether console firmware is installed. Miis are a firmware feature: without it the editor is
+    /// off (the game cannot show Miis either). With it, the preview's face data is read from the firmware once, by the engine,
+    /// into the launcher's cache folder.
+    void setEngine(const QString& engine, const QStringList& arguments, const QProcessEnvironment& environment, const QString& working_dir,
+                   bool has_firmware);
 
 private:
     void showMii(int row);
@@ -34,6 +44,11 @@ private:
     void setDirty(bool dirty);
     bool save();
     QString databasePath() const;
+    Mii::StoreData edited() const;      ///< the shown Mii with the form's values
+    void updatePreview();
+    void prepareResources();            ///< loads the face data, extracting it with the engine first when needed
+    void runEngine(const QStringList& arguments, const QProcessEnvironment& environment, int step);
+    QString resourceDir() const;
 
     Mii::Database db;
     QString miis_dir, nand_database;
@@ -49,4 +64,12 @@ private:
                 *save_button = nullptr, *revert = nullptr;
     QWidget* form = nullptr;
     QLabel* status = nullptr;
+    QLabel* preview = nullptr;
+    QLabel* note = nullptr;
+    Mii::Renderer renderer;
+    QProcess* helper = nullptr;
+    QString engine, engine_dir;
+    QStringList engine_args;
+    QProcessEnvironment engine_env;
+    bool has_firmware = true, tried_extract = false, preview_queued = false;
 };

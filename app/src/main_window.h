@@ -24,9 +24,11 @@ class QPushButton;
 class QSpinBox;
 class QTableWidget;
 
+class QTabWidget;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+    void showTab(const QString& title_part); ///< development: bring a tab to the front by (part of) its title
     explicit MainWindow(QWidget* parent = nullptr);
     /// Starts the game with the saved settings without showing this window; the app quits with the game's exit code. False
     /// (after telling the user why) when the game cannot start.
@@ -146,4 +148,7 @@ private:
     ControllerMapper* controller_mapper = nullptr;
     QListWidget* dlc_list = nullptr;
     class MiiEditor* mii_editor = nullptr;
+    QTabWidget* tabs = nullptr;
+    QComboBox* wide_combo = nullptr;
+    QComboBox* rate_combo = nullptr;
 };

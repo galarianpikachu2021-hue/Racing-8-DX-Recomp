@@ -265,14 +265,15 @@ index afd45206c1..1604a92001 100644
      LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..2d396e40c3
+index 0000000000..d9be321567
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,484 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
 +// their SUYU_RECOMP_* definitions) by src/kartrecomp_static_recomp.cmake. Moved verbatim from suyu.cpp.
++#include "common/kart_tune_sites.h"
 +#include "frontend_common/kart_static_recomp.h"
 +
 +#include <algorithm>
@@ -456,6 +457,11 @@ index 0000000000..2d396e40c3
 +                    return false;
 +                }
 +                Core::AddRecompVerifyModule(verify_v1, guard_gen_modules.back().base, file.filename().string());
++            }
++            // Tuning points (common/kart_tune_sites.h): optional; a game built before them simply has none.
++            if (auto tune_v1 = reinterpret_cast<float* (*)()>(FindSym(h, "recomp_image_tune_v1"))) {
++                KartTune::g_table.store(tune_v1(), std::memory_order_release);
++                LOG_INFO(Frontend, "{} has tuning points", file.filename().string());
 +            }
 +            const bool has_fpx = (features() & Core::RecompImageFeature::ExactFpX1) != 0;
 +            unsigned fpx_answer = 0;

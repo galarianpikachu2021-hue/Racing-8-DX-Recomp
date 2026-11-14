@@ -58,7 +58,7 @@ private slots:
         QVERIFY(BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 1024));
         QVERIFY(!BuildRunner::HasDiskSpace(dir.filePath("not/yet/created"), 10LL * 1024 * 1024 * 1024 * 1024));
     }
-    void aChangedBuildStampWipesTheWorkFolderAndTheSameStampKeepsIt() {
+    void objectsAreReusedUntilTheirSourceOrOptionsChange() {
         NEEDS_SH();
         QTemporaryDir dir;
         const auto touch = [&](const QString& rel, const QByteArray& text = {}) {
@@ -67,12 +67,19 @@ private slots:
             f.open(QIODevice::WriteOnly);
             f.write(text);
         };
+        const QByteArray unit = "static uint32_t recomp_gg_seen[4];\nvoid blk_main_0000000000000000(GuestContext* c){\n}\nconst struct _recomp_ent _seg_main_0[] = {\n};\n";
         touch("export/main/recomp_export.c");
         touch("export/main/recomp_runtime.c");
         touch("export/main/src/recompiled_main.c");
-        touch("export/main/src/recompiled_main_0.c", "static uint32_t recomp_gg_seen[4];\nvoid blk_main_0000000000000000(GuestContext* c){\n}\nconst struct _recomp_ent _seg_main_0[] = {\n};\n");
-        touch("fakecc", "#!/bin/sh\nout=; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\necho o > \"$out\"\n");
+        touch("export/main/src/recompiled_main_0.c", unit);
+        // A compiler that writes its output and counts its runs (links have no -c).
+        touch("fakecc", "#!/bin/sh\nout=; c=; for a in \"$@\"; do [ \"$a\" = -c ] && c=1; done\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done\n"
+                        "echo o > \"$out\"\n[ -n \"$c\" ] && echo run >> \"$(dirname \"$0\")/runs\"\nexit 0\n");
         QFile::setPermissions(dir.filePath("fakecc"), QFile::permissions(dir.filePath("fakecc")) | QFileDevice::ExeOwner);
+        const auto runs = [&] {
+            QFile f(dir.filePath("runs"));
+            return f.open(QIODevice::ReadOnly) ? f.readAll().count('\n') : 0;
+        };
         BuildPlan plan;
         plan.exportDir = dir.filePath("export");
         plan.workDir = dir.filePath("work");
@@ -80,12 +87,25 @@ private slots:
         plan.compiler = dir.filePath("fakecc");
         plan.stamp = "engine-1";
         QVERIFY(BuildRunner::Build(plan, nullptr).ok);
-        touch("work/main/obj/old-object.o"); // something left by an earlier build
+        const auto first = runs();
+        QVERIFY(first > 0);
+        touch("work/main/obj/old-object.o"); // left by an earlier layout
         QVERIFY(BuildRunner::Build(plan, nullptr).ok);
-        QVERIFY(QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // same stamp: resumed, not wiped
-        plan.stamp = "engine-2"; // a new engine, toolchain or hot list
+        QCOMPARE(runs(), first);                                             // nothing changed: nothing compiled
+        QVERIFY(!QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // and what no piece owns is removed
+        plan.stamp = "engine-2"; // a new engine version with the same generated code
         QVERIFY(BuildRunner::Build(plan, nullptr).ok);
-        QVERIFY(!QFile::exists(dir.filePath("work/main/obj/old-object.o"))); // different stamp: everything compiled again
+        QCOMPARE(runs(), first);                                             // the objects are still valid
+        touch("export/main/src/recompiled_main_0.c", unit + "/* changed */\n");
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        QVERIFY(runs() > first && runs() < 2 * first);                       // only the pieces with the change
+        const auto second = runs();
+        touch("export/main/recomp_runtime.h", "/* the header every piece includes */\n");
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        QCOMPARE(runs(), second + first);                                    // a header change compiles everything again
+        plan.compileArgs << "-DSOMETHING=1";
+        QVERIFY(BuildRunner::Build(plan, nullptr).ok);
+        QCOMPARE(runs(), second + 2 * first);                                // and so do other options
     }
     void cancelStopsTheRunningCompilerPromptly() {
         NEEDS_SH();

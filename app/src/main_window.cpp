@@ -115,7 +115,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("KartRecomp"));
     resize(820, 600);
 
-    auto* tabs = new QTabWidget;
+    tabs = new QTabWidget;
     setup_page = new SetupPage;
     tabs->addTab(scrolled(setup_page), tr("Setup"));
     connect(setup_page, &SetupPage::playRequested, this, &MainWindow::launch); // one place starts the game
@@ -271,6 +271,14 @@ QWidget* MainWindow::buildPlayTab() {
     connect(native_res_combo, &QComboBox::currentIndexChanged, this,
             [](int index) { QSettings().setValue(QStringLiteral("native_output_resolution"), index); });
     form->addRow(tr("Output resolution:"), native_res_combo);
+    // Ultrawide: the game's own cameras are made wider (a tuning point built into the game, see docs/NATIVE_ENGINE.md), so a race
+    // shows more to the left and right; the HUD and the menus keep their 16:9 shape in the middle.
+    wide_combo = makeCombo({tr("16:9 (standard)"), tr("Match the screen (ultrawide)"), tr("21:9"), tr("32:9")});
+    wide_combo->setToolTip(tr("Ultrawide races: more of the track to the left and right, not a stretched picture. The HUD and the menus "
+                              "stay 16:9 in the middle. Needs a game built with this version (Setup, Build): an older build stays 16:9."));
+    wide_combo->setCurrentIndex(QSettings().value(QStringLiteral("ultrawide"), 0).toInt());
+    connect(wide_combo, &QComboBox::currentIndexChanged, this, [](int i) { QSettings().setValue(QStringLiteral("ultrawide"), i); });
+    form->addRow(tr("Picture shape:"), wide_combo);
     auto* ingame_note = new QLabel(
         tr("In game, F10 (or both stick buttons, L3 + R3, on a controller) opens a settings menu: upscaler, render scale, "
            "sharpening, frame generation, HDR, present mode, speed limit, an FPS counter and which controller plays as "
@@ -371,7 +379,7 @@ QWidget* MainWindow::buildDisplayTab() {
     vsync_combo = makeCombo(kVSync);
     fullscreen_mode_combo = makeCombo(kFullscreenModes);
     docked_combo = makeCombo(kConsoleModes);
-    form->addRow(tr("Aspect ratio:"), aspect_combo);
+    form->addRow(tr("Fit in the window:"), aspect_combo);
     fsr_sharpness_spin = new QSpinBox;
     fsr_sharpness_spin->setRange(0, 200);
     fsr_sharpness_spin->setSuffix(QStringLiteral(" %"));
@@ -399,6 +407,30 @@ QWidget* MainWindow::buildDisplayTab() {
 QWidget* MainWindow::buildFrameRateTab() {
     auto* page = frame_rate_page = new QWidget;
     auto* form = new QFormLayout(page);
+    // Frames per second on screen. The game itself always simulates 60 steps a second (its timers and physics count frames), so
+    // higher rates are extra frames drawn by the renderer between the game's own, from its motion vectors.
+    rate_combo = makeCombo({tr("60 fps (the game's own)"), tr("120 fps"), tr("180 fps"), tr("240 fps")});
+    rate_combo->setToolTip(tr("Above 60, the renderer draws extra frames between the game's own (frame generation). The game's speed and "
+                              "physics do not change. It needs a temporal upscaler for the motion vectors: FSR 3 is switched on at 100% "
+                              "when no upscaler is chosen (Enhancements tab)."));
+    connect(rate_combo, &QComboBox::activated, this, [this](int index) {
+        static const char* const kIds[] = {"off", "builtin", "builtin3", "builtin4"};
+        const int fg = framegen_ids.indexOf(QLatin1String(kIds[qBound(0, index, 3)]));
+        if (index > 0) {
+            const QString up = upscaler_ids.value(upscaler_combo->currentIndex());
+            if (up == QLatin1String("off") || up == QLatin1String("fsr1")) {
+                const int want = upscaler_ids.indexOf(QStringLiteral("fsr3"));
+                if (want < 0) {
+                    QMessageBox::information(this, tr("Frame rate"), tr("Rates above 60 need the FSR 3 or DLSS upscaler plugin (Enhancements tab)."));
+                    rate_combo->setCurrentIndex(0);
+                    return;
+                }
+                upscaler_combo->setCurrentIndex(want);
+            }
+        }
+        if (fg >= 0) framegen_combo->setCurrentIndex(fg);
+    });
+    form->addRow(tr("Frame rate:"), rate_combo);
     limit_check = new QCheckBox(tr("Limit game speed"));
     limit_spin = new QSpinBox;
     limit_spin->setRange(10, 400);
@@ -407,9 +439,9 @@ QWidget* MainWindow::buildFrameRateTab() {
     form->addRow(limit_check);
     form->addRow(tr("Speed limit:"), limit_spin);
     auto* note = new QLabel(
-        tr("100 % is the game's native 60 fps. A different value speeds up or slows down the whole "
-           "game. True custom frame rates (for example 120 fps at normal speed) need game-side "
-           "patches generated from your own copy. That is planned; see docs/ROADMAP.md."));
+        tr("Speed limit: 100 % is the game's normal speed; another value speeds up or slows down the whole game. "
+           "In 3-4 player split-screen the game draws each view at 30 fps; \"60 fps split-screen\" on the Setup page builds a game "
+           "that draws every view every frame."));
     note->setWordWrap(true);
     form->addRow(note);
     return page;
@@ -482,6 +514,8 @@ void MainWindow::reloadPackage() {
     loadOverlay();
     refreshMods();
     mii_editor->setPaths(package.miisDir(), package.nandMiiDatabase());
+    mii_editor->setEngine(package.executable(), package.launchArguments(false), package.launchEnvironment(), package.workingDirectory(),
+                          package.hasFirmware());
 }
 
 void MainWindow::loadSettings() {
@@ -574,6 +608,8 @@ QProcessEnvironment MainWindow::launchEnvironment() const {
         static const int kHeights[] = {720, 1080, 1440, 2160};
         env.insert(QStringLiteral("KARTRECOMP_NATIVE_HEIGHT"),
                    QString::number(kHeights[qBound(0, native_res_combo->currentIndex(), 3)]));
+        static const char* const kShapes[] = {"", "auto", "64:27", "32:9"};
+        if (const int shape = wide_combo ? qBound(0, wide_combo->currentIndex(), 3) : 0) env.insert(QStringLiteral("KARTRECOMP_ASPECT"), QLatin1String(kShapes[shape]));
     }
 #ifdef Q_OS_LINUX
     if (pin_combo && pin_combo->currentIndex() == 1 && QThread::idealThreadCount() >= 6) {
@@ -932,6 +968,11 @@ void MainWindow::loadOverlay() {
                                                                  : id + QStringLiteral(" (2x)"));
     }
     framegen_combo->setCurrentIndex(qMax(0, framegen_ids.indexOf(overlay.value(QStringLiteral("framegen"), QStringLiteral("off")))));
+    if (rate_combo) {
+        const QSignalBlocker block(rate_combo);
+        const QString fg = overlay.value(QStringLiteral("framegen"), QStringLiteral("off"));
+        rate_combo->setCurrentIndex(fg == QLatin1String("off") ? 0 : fg == QLatin1String("builtin3") ? 2 : fg == QLatin1String("builtin4") ? 3 : 1);
+    }
 
     scale_combo->setCurrentIndex(qBound(0, overlay.intValue(QStringLiteral("quality"), 0), scale_combo->count() - 1));
     sharpness_combo->setCurrentIndex(qBound(0, overlay.intValue(QStringLiteral("sharpness"), 3), 3));
@@ -1326,4 +1367,9 @@ void MainWindow::appendLog(const QString& text) {
     log_view->moveCursor(QTextCursor::End);
     log_view->insertPlainText(clean);
     log_view->moveCursor(QTextCursor::End);
+}
+
+void MainWindow::showTab(const QString& title_part) {
+    for (int i = 0; i < tabs->count(); ++i)
+        if (tabs->tabText(i).contains(title_part, Qt::CaseInsensitive)) tabs->setCurrentIndex(i);
 }

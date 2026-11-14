@@ -1715,10 +1715,10 @@ index 0000000000..fd46dce571
 +} // namespace
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..4ce02c420f
+index 0000000000..0140a63937
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,460 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -1745,6 +1745,7 @@ index 0000000000..4ce02c420f
 +#endif
 +
 +#include "common/kart_code_patches.h"
++#include "common/kart_tune_sites.h"
 +#include "common/common_types.h"
 +#include "common/fs/path_util.h"
 +#include "common/lz4_compression.h"
@@ -2121,6 +2122,21 @@ index 0000000000..4ce02c420f
 +        }
 +    }
 +
++    // Tuning points (common/kart_tune_sites.h): marked for the generator when main is the expected code there.
++    int tune_sites = 0;
++    for (const auto& m : modules) {
++        if (m.name != "main") continue;
++        for (const auto& t : KartTune::kSites) {
++            const u64 at = t.offset - m.text_vaddr;
++            u32 word = 0;
++            if (t.build != m.build || at + 4 > m.text.size()) continue;
++            std::memcpy(&word, m.text.data() + at, 4);
++            if (word != t.word) continue;
++            suyu::recomp::g_tune_sites[t.offset] = {t.reg, t.slot};
++            ++tune_sites;
++        }
++    }
++
 +    u64 total_bytes = 0, done_bytes = 0;
 +    for (const auto& m : modules) total_bytes += m.text.size();
 +    fs::create_directories(out / "nso", ec);
@@ -2156,6 +2172,7 @@ index 0000000000..4ce02c420f
 +          << ", \"image_abi\": " << (suyu::recomp::g_emit_fastmem ? 6 : 5)
 +          << ", \"native_calls\": " << (suyu::recomp::g_native_calls ? "true" : "false")
 +          << ", \"chain_cond\": " << (suyu::recomp::g_chain_cond ? "true" : "false")
++          << ", \"tune_sites\": " << tune_sites
 +          << ", \"fast_entry\": " << (suyu::recomp::g_fast_entry ? "true" : "false") << " }\n";
 +    }
 +    fs::remove_all(fs::absolute(out) / ".export-home", ec);
@@ -15824,11 +15841,12 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..a1fd9c9440
+index 0000000000..b9eebca8c4
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8313 @@
+@@ -0,0 +1,8375 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
++#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
 +#include "suyu_cmd/native_gpu/native_surface.h"
 +#include "suyu_cmd/native_gpu/upscaler.h"
@@ -16277,6 +16295,7 @@ index 0000000000..a1fd9c9440
 +    bool scaled = false;                      ///< rendered at the resolution scale
 +    bool scalable = false;                    ///< a screen-size target: follows the current scale
 +    float scale = 1.0f;                       ///< its scale when `scaled`
++    float wide = 1.0f;                        ///< extra horizontal factor when `scaled` (ultrawide), see wide_x
 +    u32 levels = 1;
 +    u32 layers = 1; ///< array layers (layered targets, cube faces)
 +    bool cube = false;
@@ -17487,8 +17506,9 @@ index 0000000000..a1fd9c9440
 +        if (const auto it = images.find(key); it != images.end()) {
 +            Image& existing = it->second;
 +            if (create && render_target && existing.scalable) {
-+                const bool want = ScaleActive(cur_scale);
-+                if (existing.scaled != want || (want && std::fabs(existing.scale - cur_scale) > 1e-4f)) {
++                const bool want = ScaleActive(cur_scale) || ScaleActive(cur_wide);
++                if (existing.scaled != want ||
++                    (want && (std::fabs(existing.scale - cur_scale) > 1e-4f || std::fabs(existing.wide - cur_wide) > 1e-4f))) {
 +                    ResizeImageScale(existing);
 +                }
 +            }
@@ -17507,9 +17527,10 @@ index 0000000000..a1fd9c9440
 +        static const bool scale_bloom = [] { const char* v = std::getenv("KARTRECOMP_BLOOM_SCALE"); return !v || *v != '0'; }();
 +        const bool bloom_chain = scale_bloom && render_target && t.target == 1 && t.width == 480 && t.height == 272;
 +        img.scalable = render_target && (t.target == 1 || t.target == 4) && ((t.levels <= 1 && t.height > 288) || bloom_chain);
-+        img.scaled = img.scalable && ScaleActive(cur_scale);
++        img.scaled = img.scalable && (ScaleActive(cur_scale) || ScaleActive(cur_wide));
 +        img.scale = img.scaled ? cur_scale : 1.0f;
-+        img.width = img.scaled ? ScaleDim(t.width, cur_scale) : t.width;
++        img.wide = img.scaled ? cur_wide : 1.0f;
++        img.width = img.scaled ? ScaleDim(t.width, cur_scale * cur_wide) : t.width;
 +        img.height = img.scaled ? ScaleDim(t.height, cur_scale) : t.height;
 +        {
 +            // The game renders mip chains level by level (bloom: 480x272, 5 levels).
@@ -17601,7 +17622,7 @@ index 0000000000..a1fd9c9440
 +    /// A screen-size render target whose scale no longer matches the current one (the overlay's render scale, or
 +    /// the switch between the scene's and the output's scale): recreated in place, contents not kept.
 +    void ResizeImageScale(Image& img) {
-+        const bool want = ScaleActive(cur_scale);
++        const bool want = ScaleActive(cur_scale) || ScaleActive(cur_wide);
 +        Image old = img;
 +        TextureCopyRetire(old);
 +        img.views.clear();
@@ -17611,7 +17632,8 @@ index 0000000000..a1fd9c9440
 +        img.attach_view = img.sample_view = VK_NULL_HANDLE;
 +        img.scaled = want;
 +        img.scale = want ? cur_scale : 1.0f;
-+        img.width = want ? ScaleDim(img.guest_width, cur_scale) : img.guest_width;
++        img.wide = want ? cur_wide : 1.0f;
++        img.width = want ? ScaleDim(img.guest_width, cur_scale * cur_wide) : img.guest_width;
 +        img.height = want ? ScaleDim(img.guest_height, cur_scale) : img.guest_height;
 +        if (!AllocImageStorage(img, &img.info, img.depth > 1)) {
 +            LOG_ERROR(Frontend, "nvn-host vulkan: could not resize a render target");
@@ -18818,10 +18840,12 @@ index 0000000000..a1fd9c9440
 +        pass_depth = st.depth;
 +        pass_depth_layer = st.depth_layer;
 +        pass_scale = 1.0f;
++        pass_wide = 1.0f;
++        pass_guest_width = 0;
 +        for (Image* img : st.colors) {
-+            if (img && img->scaled) pass_scale = img->scale;
++            if (img && img->scaled) pass_scale = img->scale, pass_wide = img->wide, pass_guest_width = img->guest_width;
 +        }
-+        if (st.depth && st.depth->scaled) pass_scale = st.depth->scale;
++        if (st.depth && st.depth->scaled) pass_scale = st.depth->scale, pass_wide = st.depth->wide, pass_guest_width = st.depth->guest_width;
 +        pass_color_format = st.color_formats.empty() ? VK_FORMAT_UNDEFINED : st.color_formats[0];
 +        pass_color_layer = st.color_layers.empty() ? 0 : st.color_layers[0];
 +        pass_color_level = st.color_levels.empty() ? 0 : st.color_levels[0];
@@ -19541,9 +19565,18 @@ index 0000000000..a1fd9c9440
 +        // Vulkan maps NDC y=-1 to row 0, so flip with a negative-height viewport.
 +        const float vs = pass_scale;
 +        const bool flip = !IsShadowMapPass(st);
-+        VkViewport vp{static_cast<float>(st.viewport[0]) * vs,
++        // Ultrawide: the 3D scene fills the wider target (the game's cameras have the wider aspect); the HUD and the menus are
++        // 16:9 layouts and keep their shape in the middle of it.
++        // A draw that reads a wide image is a full-screen copy or effect (the final copy, a blur behind a menu): it fills the target.
++        // A draw with no texture at all is a fade or a dimmer: it fills the target as well.
++        const bool pillar = pass_wide > 1.0001f && (post_phase || !frame_has_scene) && !draw_samples_wide && draw_textures > 0;
++        draw_samples_wide = false;
++        draw_textures = 0;
++        const float vx = pillar ? vs : vs * pass_wide;
++        const float pillar_x = pillar ? static_cast<float>(std::max(1u, pass_guest_width >> pass_color_level)) * vs * (pass_wide - 1.0f) * 0.5f : 0.0f;
++        VkViewport vp{static_cast<float>(st.viewport[0]) * vx + pillar_x,
 +                      static_cast<float>(flip ? st.viewport[1] + st.viewport[3] : st.viewport[1]) * vs,
-+                      static_cast<float>(st.viewport[2]) * vs,
++                      static_cast<float>(st.viewport[2]) * vx,
 +                      (flip ? -1.0f : 1.0f) * static_cast<float>(st.viewport[3]) * vs,
 +                      std::clamp(st.depth_near, 0.0f, 1.0f), std::clamp(st.depth_far, 0.0f, 1.0f)};
 +        // Camera jitter for upscalers (KARTRECOMP_JITTER=1, or fixed:<px> to test): the scene's
@@ -19565,8 +19598,9 @@ index 0000000000..a1fd9c9440
 +        }
 +        vk.vkCmdSetViewport(cmd, 0, 1, &vp);
 +        const auto sc_scale = [&](s32 v) { return static_cast<s32>(ScaleDim(static_cast<u32>(std::max(0, v)), pass_scale)); };
-+        VkRect2D sc{{std::max(0, sc_scale(st.scissor[0])), std::max(0, sc_scale(st.scissor[1]))},
-+                    {static_cast<u32>(std::max(1, sc_scale(st.scissor[2]))),
++        const auto sc_x = [&](s32 v, float add) { return static_cast<s32>(std::lround(static_cast<double>(std::max(0, v)) * vx + add)); };
++        VkRect2D sc{{std::max(0, sc_x(st.scissor[0], pillar_x)), std::max(0, sc_scale(st.scissor[1]))},
++                    {static_cast<u32>(std::max(1, sc_x(st.scissor[2], 0.0f))),
 +                     static_cast<u32>(std::max(1, sc_scale(st.scissor[3])))}};
 +        vk.vkCmdSetScissor(cmd, 0, 1, &sc);
 +        // Same conversion as suyu (NVN units are already the hardware's halved value).
@@ -19625,6 +19659,7 @@ index 0000000000..a1fd9c9440
 +    /// the game samples one, otherwise a white stand-in of the right type.
 +    VkDescriptorImageInfo ResolveTexture(const DrawState& st, int nvn_stage,
 +                                         const Shader::TextureDescriptor& td, u32 element) {
++        ++draw_textures;
 +        last_resolve_scaled = false;
 +        static const bool white_bloom = [] {
 +            const char* t = std::getenv("KARTRECOMP_NATIVE_SIMPLE");
@@ -19740,6 +19775,7 @@ index 0000000000..a1fd9c9440
 +                        info.sampler = pinned_lod ? GameSampler(handle, td.is_depth, true) : GameSampler(handle, td.is_depth);
 +                        last_resolve_scaled = img->scaled;
 +                        last_resolve_scale = img->scale;
++                        if (img->wide > 1.0001f) draw_samples_wide = true;
 +                        ++textures_native;
 +                        return info;
 +                    }
@@ -20877,11 +20913,39 @@ index 0000000000..a1fd9c9440
 +                launcher_height = r.active ? static_cast<int>(std::lround(1080.0 * r.up_factor)) : 1080;
 +            }
 +        }
++        // Ultrawide (KARTRECOMP_ASPECT = "21:9", "2.37", or "auto" for the window's shape): how much wider than 16:9 the picture is.
++        // The game's cameras get the same factor through the game's tuning point; a game built without it stays 16:9.
++        if (!wide_init && (wide_auto ? extent.width > 0 && extent.height > 0 : true)) {
++            wide_init = true;
++            float want = 1.0f;
++            const char* a = std::getenv("KARTRECOMP_ASPECT");
++            if (a && *a) {
++                float ratio = 0.0f;
++                if (std::strcmp(a, "auto") == 0) {
++                    if (extent.width == 0 || extent.height == 0) wide_auto = true, wide_init = false;
++                    else ratio = static_cast<float>(extent.width) / static_cast<float>(extent.height);
++                } else if (const char* colon = std::strchr(a, ':')) {
++                    const float h = std::strtof(colon + 1, nullptr);
++                    ratio = h > 0.0f ? std::strtof(a, nullptr) / h : 0.0f;
++                } else {
++                    ratio = std::strtof(a, nullptr);
++                }
++                if (wide_init) want = std::clamp(ratio / (16.0f / 9.0f), 1.0f, 2.5f);
++            }
++            if (wide_init && want > 1.001f) {
++                if (KartTune::Set(KartTune::kSlotAspect, want)) {
++                    wide_x = want;
++                    LOG_INFO(Frontend, "ultrawide: picture {:.3f}:1 ({:.3f}x the width of 16:9)", want * 16.0f / 9.0f, want);
++                } else {
++                    LOG_WARNING(Frontend, "ultrawide: this game build has no aspect tuning point (build the game again in Setup); staying 16:9");
++                }
++            }
++        }
 +        out_height = overlay->OutputHeight() ? overlay->OutputHeight() : launcher_height;
 +        scene_ratio = 1.0f;
 +        split_mode = overlay->RenderRatio(scene_ratio);
-+        if (hdr_active && !split_mode) {
-+            split_mode = true; // the HDR pass needs the 3D image on its own, so it can leave the HUD alone
++        if ((hdr_active || wide_x > 1.0001f) && !split_mode) {
++            split_mode = true; // the HDR pass needs the 3D image on its own, so it can leave the HUD alone; ultrawide needs to know where the HUD starts
 +            scene_ratio = 1.0f;
 +        }
 +    }
@@ -21028,7 +21092,12 @@ index 0000000000..a1fd9c9440
 +        cam_wanted = upscaler.Enabled() && scene_ratio <= 1.0001f; // supersampling has no temporal upscaler
 +        // Frame generation needs motion vectors (and so the game camera) also when the render scale supersamples (150%/200%),
 +        // where there is no temporal upscaler: before, it silently generated nothing at those scales.
-+        cam_scan = cam_wanted || fg_on;
++        cam_scan = cam_wanted || fg_on || wide_x > 1.0001f;
++        // Ultrawide: a frame is a race (wide 3D) while the game camera has been seen within the last half second; menus and their
++        // 3D previews use fixed 16:9 cameras: those frames are drawn 16:9 as always and shown in the middle.
++        if (cam_prev_ok) wide_race_frames = 30;
++        else if (wide_race_frames > 0) --wide_race_frames;
++        cur_wide = wide_race_frames > 0 ? wide_x : 1.0f;
 +        ComputeScales(frame);
 +        post_phase = false;
 +        up_alias = nullptr;
@@ -21080,7 +21149,7 @@ index 0000000000..a1fd9c9440
 +
 +    /// The output-size image the upscaled 3D composite goes into.
 +    Image* EnsureUpImage(Image* low) {
-+        const u32 w = ScaleDim(low->guest_width, out_scale), h = ScaleDim(low->guest_height, out_scale);
++        const u32 w = ScaleDim(low->guest_width, out_scale * cur_wide), h = ScaleDim(low->guest_height, out_scale);
 +        if (up_image.image && (up_image.width != w || up_image.height != h || up_image.info.format != low->info.format)) {
 +            TextureCopyRetire(up_image);
 +            up_image = {};
@@ -21096,8 +21165,9 @@ index 0000000000..a1fd9c9440
 +            up_image.guest_width = low->guest_width;
 +            up_image.guest_height = low->guest_height;
 +            up_image.scalable = true;
-+            up_image.scaled = ScaleActive(out_scale);
++            up_image.scaled = ScaleActive(out_scale) || ScaleActive(cur_wide);
 +            up_image.scale = out_scale;
++            up_image.wide = cur_wide;
 +            up_image.info = low->info;
 +        }
 +        return &up_image;
@@ -21105,7 +21175,7 @@ index 0000000000..a1fd9c9440
 +
 +    /// Supersampling (render scale above 100%): the output-size copy of the scene colour.
 +    Image* EnsureSsImage(Image* low) {
-+        const u32 w = ScaleDim(low->guest_width, out_scale), h = ScaleDim(low->guest_height, out_scale);
++        const u32 w = ScaleDim(low->guest_width, out_scale * cur_wide), h = ScaleDim(low->guest_height, out_scale);
 +        if (ss_image.image && (ss_image.width != w || ss_image.height != h || ss_image.info.format != low->info.format)) {
 +            TextureCopyRetire(ss_image);
 +            ss_image = {};
@@ -21118,8 +21188,9 @@ index 0000000000..a1fd9c9440
 +            ss_image.guest_width = low->guest_width;
 +            ss_image.guest_height = low->guest_height;
 +            ss_image.scalable = true;
-+            ss_image.scaled = ScaleActive(out_scale);
++            ss_image.scaled = ScaleActive(out_scale) || ScaleActive(cur_wide);
 +            ss_image.scale = out_scale;
++            ss_image.wide = cur_wide;
 +            ss_image.info = low->info;
 +        }
 +        return &ss_image;
@@ -21146,7 +21217,7 @@ index 0000000000..a1fd9c9440
 +    /// Does the upscale point need its own output image? Not when nothing upscales and the sizes already match.
 +    bool UpscalePointNeedsImage(const Image* low) const {
 +        return fsr1_selected || upscaler.Enabled() || hdr_active ||
-+               low->width != ScaleDim(low->guest_width, out_scale) || low->height != ScaleDim(low->guest_height, out_scale);
++               low->width != ScaleDim(low->guest_width, out_scale * cur_wide) || low->height != ScaleDim(low->guest_height, out_scale);
 +    }
 +
 +    /// Prebuild pass: only the image classes matter (no commands are recorded for the upscale itself).
@@ -22229,8 +22300,8 @@ index 0000000000..a1fd9c9440
 +        MemoryBarrier();
 +        // Fit the Display tab's aspect ratio into the window (black bars), as
 +        // suyu's presenter does; "Stretch to window" fills it.
-+        float aspect = 16.0f / 9.0f;
-+        switch (Settings::values.aspect_ratio.GetValue()) {
++        float aspect = wide_x > 1.0001f && src && src->height ? static_cast<float>(src->width) / static_cast<float>(src->height) : 16.0f / 9.0f;
++        switch (wide_x > 1.0001f ? Settings::AspectRatio::R16_9 : Settings::values.aspect_ratio.GetValue()) {
 +        case Settings::AspectRatio::R4_3: aspect = 4.0f / 3.0f; break;
 +        case Settings::AspectRatio::R21_9: aspect = 21.0f / 9.0f; break;
 +        case Settings::AspectRatio::R16_10: aspect = 16.0f / 10.0f; break;
@@ -23902,6 +23973,14 @@ index 0000000000..a1fd9c9440
 +    int out_height = 1080;
 +    float scene_ratio = 1.0f;
 +    float cur_scale = 1.0f;       ///< scale new and resized screen-size targets get right now
++    float wide_x = 1.0f;          ///< ultrawide: screen-size targets are this much wider than the game's (1 = 16:9)
++    bool wide_init = false, wide_auto = false;
++    float cur_wide = 1.0f;          ///< this frame's factor: wide_x in a race, 1 in menus
++    int wide_race_frames = 0;       ///< frames left in which the picture counts as a race (see BeginFrameScale)
++    int draw_textures = 0;          ///< textures the draw being set up reads
++    bool draw_samples_wide = false; ///< the draw being set up reads a wide image
++    float pass_wide = 1.0f;       ///< the current pass's target: its extra horizontal factor
++    u32 pass_guest_width = 0;
 +    float scene_scale = 1.0f, out_scale = 1.0f, frame_scene_scale = 1.0f;
 +    bool split_mode = false;      ///< the 3D render scale row is on
 +    bool multi_view_logged = false;
@@ -24445,7 +24524,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..2f8cae982c 100644
+index 03f738eb63..f16fe9f2d0 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -24474,17 +24553,18 @@ index 03f738eb63..2f8cae982c 100644
  #include "common/logging/log.h"
  #include "common/microprofile.h"
  #include "common/fs/path_util.h"
-@@ -45,6 +53,9 @@
+@@ -45,6 +53,10 @@
  #include "core/cpu_manager.h"
  #include "core/crypto/key_manager.h"
  #include "core/file_sys/content_archive.h"
++#include "video_core/textures/astc.h"
 +#include "core/file_sys/fssystem/fssystem_crypto_configuration.h"
 +#include "core/file_sys/romfs.h"
 +#include "core/file_sys/vfs/vfs.h"
  #include "core/file_sys/nca_metadata.h"
  #include "core/file_sys/registered_cache.h"
  #include "core/file_sys/card_image.h"
-@@ -54,16 +65,31 @@
+@@ -54,16 +66,31 @@
  #include "core/hle/service/am/applet_manager.h"
  #include "core/hle/service/am/service/library_applet_creator.h"
  #include "core/hle/service/filesystem/filesystem.h"
@@ -24516,7 +24596,7 @@ index 03f738eb63..2f8cae982c 100644
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2_gl.h"
  #ifdef __APPLE__
-@@ -173,56 +199,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
+@@ -173,56 +200,6 @@ DiscordPackageSettings ReadDiscordIni(const std::filesystem::path& exe_dir) {
  } // namespace
  #endif
  
@@ -24573,7 +24653,7 @@ index 03f738eb63..2f8cae982c 100644
  
  static void PrintHelp(const char* argv0) {
      std::cout << "Usage: " << argv0
-@@ -233,6 +209,7 @@ static void PrintHelp(const char* argv0) {
+@@ -233,6 +210,7 @@ static void PrintHelp(const char* argv0) {
                   "--app-name            Display name when the loader has no title metadata\n"
                   "--content-base        Read-only base XCI/NSP for an explicit update pair\n"
                   "--content-update      Read-only matching update NSP (both flags required)\n"
@@ -24581,7 +24661,7 @@ index 03f738eb63..2f8cae982c 100644
                   "--content-probe       Verify that pair and exit without a window or game\n"
                   "--content-dump        New directory for resolved data (requires --content-probe)\n"
                   "-h, --help            Display this help and exit\n"
-@@ -366,9 +343,43 @@ bool g_native_export_mode = false;
+@@ -366,9 +344,43 @@ bool g_native_export_mode = false;
  bool g_export_package = false;
  SdlConfig* g_sdl_config = nullptr;
  
@@ -24625,7 +24705,7 @@ index 03f738eb63..2f8cae982c 100644
      }
  }
  
-@@ -917,7 +928,250 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +929,274 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -24852,10 +24932,33 @@ index 03f738eb63..2f8cae982c 100644
 +    return 0;
 +}
 +
++// `--astc-decode <in> <out>`: decodes ASTC 4x4 pictures for the launcher (its Mii preview: the firmware's eye and mouth textures
++// are ASTC, and the decoder lives here). In: records of u32 width, u32 height, then the 16-byte blocks row by row. Out: RGBA8,
++// width * height * 4 bytes per picture, in the same order. Exit 0 when every record was decoded.
++static int RunAstcDecode(const char* in_path, const char* out_path) {
++    std::FILE* in = std::fopen(in_path, "rb");
++    std::FILE* out = in ? std::fopen(out_path, "wb") : nullptr;
++    int status = out ? 0 : 2;
++    while (out) {
++        u32 size[2];
++        if (std::fread(size, 4, 2, in) != 2) break;
++        if (size[0] == 0 || size[1] == 0 || size[0] > 4096 || size[1] > 4096) { status = 3; break; }
++        std::vector<u8> blocks(static_cast<std::size_t>((size[0] + 3) / 4) * ((size[1] + 3) / 4) * 16), pixels(static_cast<std::size_t>(size[0]) * size[1] * 4);
++        if (std::fread(blocks.data(), 1, blocks.size(), in) != blocks.size()) { status = 3; break; }
++        Tegra::Texture::ASTC::Decompress(blocks, size[0], size[1], 1, 4, 4, pixels);
++        if (std::fwrite(pixels.data(), 1, pixels.size(), out) != pixels.size()) { status = 4; break; }
++    }
++    if (in) std::fclose(in);
++    if (out) std::fclose(out);
++    return status;
++}
++
  int main(int argc, char** argv) {
 +    AllowDebuggerAttach();
-+    for (int i = 1; i < argc; ++i)
++    for (int i = 1; i < argc; ++i) {
 +        if (std::strcmp(argv[i], "--input-capture") == 0) return RunInputCapture(argc - i - 1, argv + i + 1);
++        if (std::strcmp(argv[i], "--astc-decode") == 0 && i + 2 < argc) return RunAstcDecode(argv[i + 1], argv[i + 2]);
++    }
 +#ifdef KARTRECOMP_ENGINE
 +    if (std::getenv("KARTRECOMP_VERIFY_BOOT")) {
 +        // The builder's test boot stops itself when its launcher is gone: a verification engine must never outlive its test.
@@ -24866,7 +24969,8 @@ index 03f738eb63..2f8cae982c 100644
 +            std::_Exit(7);
 +        }).detach();
 +    }
-+    if (const int rc = KartStaticRecomp::CheckEngineModules(argc, argv)) {
++    // A tool run (KARTRECOMP_SYSARCHIVE_EXTRACT) reads the firmware and exits before any game code: it needs no built game.
++    if (const int rc = KartStaticRecomp::CheckEngineModules(argc, argv); rc && !std::getenv("KARTRECOMP_SYSARCHIVE_EXTRACT")) {
 +        return rc;
 +    }
 +#endif
@@ -24876,7 +24980,7 @@ index 03f738eb63..2f8cae982c 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1232,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1257,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -24894,7 +24998,7 @@ index 03f738eb63..2f8cae982c 100644
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1267,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1292,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -24910,7 +25014,7 @@ index 03f738eb63..2f8cae982c 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1291,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1316,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -24928,7 +25032,7 @@ index 03f738eb63..2f8cae982c 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1039,8 +1308,8 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1333,8 @@ int main(int argc, char** argv) {
                  installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
                  installed_config = installed_root / "config";
  #else
@@ -24939,7 +25043,7 @@ index 03f738eb63..2f8cae982c 100644
  #endif
              }
              // Coverage gaps are pooled in the installed suyu's user folder, which
-@@ -1091,6 +1360,7 @@ int main(int argc, char** argv) {
+@@ -1091,6 +1385,7 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -24947,7 +25051,7 @@ index 03f738eb63..2f8cae982c 100644
      bool explicit_content_probe = false;
      std::string explicit_content_dump;
      std::string program_args;
-@@ -1126,12 +1396,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1421,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -24962,7 +25066,7 @@ index 03f738eb63..2f8cae982c 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1429,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1454,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -24972,7 +25076,7 @@ index 03f738eb63..2f8cae982c 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1279,7 +1553,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1578,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -24982,7 +25086,7 @@ index 03f738eb63..2f8cae982c 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1566,36 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1591,36 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -25020,12 +25124,12 @@ index 03f738eb63..2f8cae982c 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1681,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1706,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
 +#ifdef SUYU_CMD_STATIC_RECOMP
-+    if (!KartStaticRecomp::Register()) {
++    if (!std::getenv("KARTRECOMP_SYSARCHIVE_EXTRACT") && !KartStaticRecomp::Register()) {
 +#ifdef KARTRECOMP_ENGINE
 +        return 4;
 +#else
@@ -25037,7 +25141,7 @@ index 03f738eb63..2f8cae982c 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1735,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1760,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -25132,7 +25236,7 @@ index 03f738eb63..2f8cae982c 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1902,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1927,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -25140,7 +25244,7 @@ index 03f738eb63..2f8cae982c 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1936,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1961,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -25158,7 +25262,7 @@ index 03f738eb63..2f8cae982c 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1732,7 +1960,11 @@ int main(int argc, char** argv) {
+@@ -1732,7 +1985,11 @@ int main(int argc, char** argv) {
      // still reports keys that are present but unusable, handled further down.
      const std::filesystem::path suyu_exe =
          installed_nand.empty() ? std::filesystem::path{} : RecordedSuyuExecutable(export_user_root);
@@ -25171,7 +25275,7 @@ index 03f738eb63..2f8cae982c 100644
          const auto keys_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir);
          std::error_code keys_ec;
          // The same two names KeyManager loads production keys from. There is no
-@@ -1783,7 +2015,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +2040,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -25193,13 +25297,13 @@ index 03f738eb63..2f8cae982c 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +2042,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2067,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
-+    if (Core::NvnHost::Exclusive()) {
-+        // kart-recomp: native GPU only. The emulated GPU keeps consuming the command
-+        // stream (fences, syncpoints) but renders nothing.
++    if (Core::NvnHost::Exclusive() || !Core::NvnHost::Enabled()) {
++        // kart-recomp: the native renderer is the only one that draws (or, for tools, nothing does). The old GPU keeps
++        // consuming the command stream (fences, syncpoints) but renders nothing.
 +        g_configured_backend = Settings::values.renderer_backend.GetValue();
 +        Settings::values.renderer_backend.SetValue(Settings::RendererBackend::Null);
 +        LOG_INFO(Frontend, "kart-recomp: native GPU exclusive, emulated renderer set to Null");
@@ -25222,7 +25326,7 @@ index 03f738eb63..2f8cae982c 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2092,26 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2117,26 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25249,7 +25353,7 @@ index 03f738eb63..2f8cae982c 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,6 +2144,19 @@ int main(int argc, char** argv) {
+@@ -1857,8 +2169,45 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25268,8 +25372,34 @@ index 03f738eb63..2f8cae982c 100644
 +    }
      system.GetUserChannel().clear();
  
++    // kart-recomp: KARTRECOMP_SYSARCHIVE_EXTRACT=<title id, hex>=<folder> writes the files of one data archive of the installed
++    // firmware into the folder and exits (0 = written). The launcher's Mii preview reads the player's own Mii shapes this way.
++    if (const char* want = std::getenv("KARTRECOMP_SYSARCHIVE_EXTRACT")) {
++        const std::string spec{want};
++        const auto eq = spec.find('=');
++        const auto sysnand = system.GetFileSystemController().GetSystemNANDContents();
++        if (eq == std::string::npos || !sysnand) return 3;
++        const u64 title = std::strtoull(spec.substr(0, eq).c_str(), nullptr, 16);
++        const auto nca = sysnand->GetEntry(title, FileSys::ContentRecordType::Data);
++        const auto romfs = nca ? nca->GetRomFS() : nullptr;
++        const auto dir = romfs ? FileSys::ExtractRomFS(romfs) : nullptr;
++        if (!dir) return 4;
++        int written = 0;
++        for (const auto& f : dir->GetFiles()) {
++            const auto bytes = f->ReadAllBytes();
++            const std::string path = spec.substr(eq + 1) + "/" + f->GetName();
++            if (std::FILE* out = std::fopen(path.c_str(), "wb")) {
++                if (std::fwrite(bytes.data(), 1, bytes.size(), out) == bytes.size()) ++written;
++                std::fclose(out);
++            }
++        }
++        return written > 0 ? 0 : 5;
++    }
++
      if (static_cast<u32>(load_parameters.applet_id)) {
-@@ -1925,6 +2225,9 @@ int main(int argc, char** argv) {
+         // code below based off of suyu/main.cpp : GMainWindow::OnHomeMenu()
+         // Inline minimal mapping (AppletIdToProgramId is in an anonymous namespace)
+@@ -1925,6 +2274,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25279,7 +25409,7 @@ index 03f738eb63..2f8cae982c 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2147,6 +2450,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2499,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25287,7 +25417,7 @@ index 03f738eb63..2f8cae982c 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2475,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2524,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25318,7 +25448,7 @@ index 03f738eb63..2f8cae982c 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2516,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2565,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25336,7 +25466,7 @@ index 03f738eb63..2f8cae982c 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2208,8 +2547,8 @@ int main(int argc, char** argv) {
+@@ -2208,8 +2596,8 @@ int main(int argc, char** argv) {
              std::chrono::steady_clock::now() - capture_start < next_capture) {
              continue;
          }
@@ -25347,7 +25477,7 @@ index 03f738eb63..2f8cae982c 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2575,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2624,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25359,7 +25489,7 @@ index 03f738eb63..2f8cae982c 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,6 +2587,8 @@ int main(int argc, char** argv) {
+@@ -2243,6 +2636,8 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
