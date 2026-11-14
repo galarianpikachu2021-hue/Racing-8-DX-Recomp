@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..b3205b3c73 100644
+index 408daa6839..88a9bf46b5 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -889,7 +889,15 @@ index 408daa6839..b3205b3c73 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1261,7 @@ else()
+@@ -1187,6 +1222,7 @@ add_library(core STATIC
+     tools/renderdoc.cpp
+     tools/renderdoc.h)
+ 
++
+ if (ENABLE_WIFI_SCAN)
+     target_sources(core PRIVATE internal_network/wifi_scanner.cpp)
+     if (PLATFORM_LINUX)
+@@ -1226,7 +1262,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -898,6 +906,25 @@ index 408daa6839..b3205b3c73 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
+@@ -1335,3 +1371,18 @@ endif()
+ # endif()
+ 
+ create_target_directory_groups(core)
++
++# kart-recomp: the emulated system-service modules nothing uses with native services (only the start list referred to them) are
++# left out of the Linux engine build (docs/NATIVE_ENGINE.md). Other platforms keep them unless asked.
++if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
++    set(KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT ON)
++else()
++    set(KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT OFF)
++endif()
++option(KARTRECOMP_DROP_UNUSED_SERVICES "Leave the unused emulated service modules out of the build" ${KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT})
++if (KARTRECOMP_DROP_UNUSED_SERVICES)
++    get_target_property(KR_CORE_SOURCES core SOURCES)
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(aoc|bcat|bpc|btdrv|btm|erpt|es|eupld|fatal|fgm|friend|gpio|grc|i2c|lbl|ldn|ldr|lm|mig|mm|mnpp|ncm|ngc|nifm|nim|npns|olsc|omm|pcie|pctl|pcv|prepo|ptm|ro|spl|ssl|usb)/")
++    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES})
++    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
++endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
 index 67a55424e9..d78cf6bf0c 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
@@ -8042,10 +8069,10 @@ index 8b6d05a8dc..b50e5673d5 100644
          return ReportUnimplementedFunction(ctx, info);
  
 diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
-index 7bdd89905c..10862cb426 100644
+index 7bdd89905c..a10b13901f 100644
 --- a/src/core/hle/service/services.cpp
 +++ b/src/core/hle/service/services.cpp
-@@ -5,6 +5,9 @@
+@@ -5,72 +5,166 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include "core/hle/service/services.h"
@@ -8055,7 +8082,140 @@ index 7bdd89905c..10862cb426 100644
  
  #include "core/hle/service/acc/acc.h"
  #include "core/hle/service/am/am.h"
-@@ -71,6 +74,23 @@
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/aoc/addon_content_manager.h"
++#endif
+ #include "core/hle/service/apm/apm.h"
+ #include "core/hle/service/audio/audio.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/bcat/bcat.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/bpc/bpc.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/btdrv/btdrv.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/btm/btm.h"
++#endif
+ #include "core/hle/service/caps/caps.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/erpt/erpt.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/es/es.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/eupld/eupld.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/fatal/fatal.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/fgm/fgm.h"
++#endif
+ #include "core/hle/service/filesystem/filesystem.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/friend/friend.h"
++#endif
+ #include "core/hle/service/glue/glue.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/grc/grc.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/gpio/gpio.h"
++#endif
+ #include "core/hle/service/hid/hid.h"
+ #include "core/hle/service/ipc_helpers.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/i2c/i2c.h"
++#endif
+ #ifndef SUYU_NO_JIT
+ #include "core/hle/service/jit/jit.h"
+ #endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/lbl/lbl.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ldn/ldn.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ldr/ldr.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/lm/lm.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/mig/mig.h"
++#endif
+ #include "core/hle/service/mii/mii.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/mm/mm_u.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/mnpp/mnpp_app.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ncm/ncm.h"
++#endif
+ #include "core/hle/service/nfc/nfc.h"
+ #include "core/hle/service/nfp/nfp.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ngc/ngc.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/nifm/nifm.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/nim/nim.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/npns/npns.h"
++#endif
+ #include "core/hle/service/ns/ns.h"
+ #include "core/hle/service/nvdrv/nvdrv.h"
+ #include "core/hle/service/nvnflinger/nvnflinger.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/olsc/olsc.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/omm/omm.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/pcie/pcie.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/pctl/pctl.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/pcv/pcv.h"
++#endif
+ #include "core/hle/service/pm/pm.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/prepo/prepo.h"
++#endif
+ #include "core/hle/service/psc/psc.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ptm/ptm.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ro/ro.h"
++#endif
+ #include "core/hle/service/service.h"
+ #include "core/hle/service/set/settings.h"
+ #include "core/hle/service/sm/sm.h"
+ #include "core/hle/service/sockets/sockets.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/spl/spl_module.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/ssl/ssl.h"
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ #include "core/hle/service/usb/usb.h"
++#endif
+ #include "core/hle/service/vi/vi.h"
  
  namespace Service {
  
@@ -8079,7 +8239,16 @@ index 7bdd89905c..10862cb426 100644
  Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system,
                     std::stop_token token) {
      auto& kernel = system.Kernel();
-@@ -102,8 +122,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+@@ -97,67 +191,144 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+         // which is the honest answer for a build that cannot provide one.
+         {"jit",        &JIT::LoopProcess},
+ #endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"ldn",        &LDN::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"Loader",     &LDR::LoopProcess},
++#endif
          {"nvservices", &Nvidia::LoopProcess},
          {"bsdsocket",  &Sockets::LoopProcess},
      })
@@ -8092,9 +8261,125 @@ index 7bdd89905c..10862cb426 100644
      // Avoid cold clones of lambdas -- succintly
      for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
          {"sm",         &SM::LoopProcess},
-@@ -157,7 +179,8 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+         {"account",    &Account::LoopProcess},
+         {"am",         &AM::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"aoc",        &AOC::LoopProcess},
++#endif
+         {"apm",        &APM::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"bcat",       &BCAT::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"bpc",        &BPC::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"btdrv",      &BtDrv::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"btm",        &BTM::LoopProcess},
++#endif
+         {"capsrv",     &Capture::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"erpt",       &ERPT::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"es",         &ES::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"eupld",      &EUPLD::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"fatal",      &Fatal::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"fgm",        &FGM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"friends",    &Friend::LoopProcess},
++#endif
+         {"settings",   &Set::LoopProcess},
+         {"psc",        &PSC::LoopProcess},
+         {"glue",       &Glue::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"grc",        &GRC::LoopProcess},
++#endif
+         {"hid",        &HID::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"lbl",        &LBL::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"LogManager.Prod", &LM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"mig",        &Migration::LoopProcess},
++#endif
+         {"mii",        &Mii::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"mm",         &MM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"mnpp",       &MNPP::LoopProcess},
++#endif
+         {"nvnflinger", &Nvnflinger::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"NCM",        &NCM::LoopProcess},
++#endif
+         {"nfc",        &NFC::LoopProcess},
+         {"nfp",        &NFP::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"ngc",        &NGC::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"nifm",       &NIFM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"nim",        &NIM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"npns",       &NPNS::LoopProcess},
++#endif
+         {"ns",         &NS::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"olsc",       &OLSC::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"omm",        &OMM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"pcie",       &PCIe::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"pctl",       &PCTL::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"pcv",        &PCV::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"prepo",      &PlayReport::LoopProcess},
++#endif
+         {"ProcessManager", &PM::LoopProcess},
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"ptm",        &PTM::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"ro",         &RO::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"spl",        &SPL::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"ssl",        &SSL::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+         {"usb",        &USB::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
          {"i2c",        &I2C::LoopProcess},
++#endif
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
          {"gpio",        &GPIO::LoopProcess},
++#endif
      })
 -        kernel.RunOnGuestCoreProcess(std::string(e.first), [&system, f = e.second] { f(system); });
 +        if (StartModule(e.first))

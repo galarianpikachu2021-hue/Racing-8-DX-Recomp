@@ -649,3 +649,7 @@ module), `ns` (the shared-font loader), `am` (starts the game's process through 
 controller library) and `settings` (the controller module waits for it). The other 52 (audio, file system, vi/nvnflinger,
 account, time/glue/psc, mii, sockets, ldn, ...) are not started (`KARTRECOMP_HLE_SERVICES=<list>|all`).
 Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host threads, 2 fewer log errors (the socket service's).
+- Deleted from the Linux engine build (CMake option `KARTRECOMP_DROP_UNUSED_SERVICES`, default on for Linux desktop only): the
+  37 emulated service modules that only the start list referred to (bcat, ssl, ldn, nifm, ro, olsc, spl, pctl, btm, friend, nim,
+  ptm, lm, aoc, lbl, es, fatal, pcv, usb, prepo, mm, btdrv, npns, omm, ngc, ncm, erpt, fgm, i2c, pcie, mig, bpc, ldr, eupld,
+  mnpp, grc, gpio): about 20,000 lines no longer compiled. Engine 55 MB. Checked: 1P and 4P races.
