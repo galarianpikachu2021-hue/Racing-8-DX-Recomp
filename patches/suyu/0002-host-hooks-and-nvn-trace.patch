@@ -823,10 +823,10 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..f8b59c2de5 100644
+index 408daa6839..166a9f4c92 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,22 @@ add_library(core STATIC
+@@ -12,6 +12,24 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
@@ -835,6 +835,8 @@ index 408daa6839..f8b59c2de5 100644
 +    arm/recomp/kart_hook_trace.cpp
 +    arm/recomp/kart_hook_trace.h
 +    arm/recomp/nvn_trace.cpp
++    arm/recomp/native_fs.cpp
++    arm/recomp/native_fs.h
 +    arm/recomp/native_hid.cpp
 +    arm/recomp/native_hid.h
 +    arm/recomp/native_libc.cpp
@@ -849,7 +851,7 @@ index 408daa6839..f8b59c2de5 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +152,8 @@ add_library(core STATIC
+@@ -136,6 +154,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -858,7 +860,7 @@ index 408daa6839..f8b59c2de5 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +357,10 @@ add_library(core STATIC
+@@ -339,6 +359,10 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
@@ -869,7 +871,7 @@ index 408daa6839..f8b59c2de5 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1073,8 @@ add_library(core STATIC
+@@ -1051,6 +1075,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -878,7 +880,7 @@ index 408daa6839..f8b59c2de5 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1226,7 +1250,7 @@ else()
+@@ -1226,7 +1252,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -2030,6 +2032,303 @@ index 0000000000..11a6dabdf0
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base);
 +
 +} // namespace Core::KartHookTrace
+diff --git a/src/core/arm/recomp/native_fs.cpp b/src/core/arm/recomp/native_fs.cpp
+new file mode 100644
+index 0000000000..90dfcba6fa
+--- /dev/null
++++ b/src/core/arm/recomp/native_fs.cpp
+@@ -0,0 +1,258 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/arm/recomp/native_fs.h"
++
++#include <cstdlib>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "common/logging/log.h"
++#include "core/arm/recomp/host_hooks.h"
++#include "core/arm/recomp/sdk_trace.h"
++#include "core/core.h"
++#include "core/file_sys/romfs.h"
++#include "core/file_sys/vfs/vfs.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/service/filesystem/filesystem.h"
++#include "core/hle/service/filesystem/romfs_controller.h"
++#include "core/memory.h"
++#include "kart_runtime/native_fs.h"
++
++namespace Core::NativeFs {
++namespace {
++
++using KartRuntime::NativeFs;
++using RecompHooks::HookContext;
++
++/// The game's RomFS as a NativeFs tree.
++class RomTree final : public NativeFs::Tree {
++public:
++    explicit RomTree(FileSys::VirtualDir root_) : root{std::move(root_)} {}
++
++    int64_t OpenFile(const std::string& path) override {
++        FileSys::VirtualFile f = path.empty() ? nullptr : root->GetFileRelative(path);
++        if (!f) return -1;
++        std::scoped_lock lk{lock};
++        open[next] = std::move(f);
++        return next++;
++    }
++    void CloseFile(int64_t id) override {
++        std::scoped_lock lk{lock};
++        open.erase(id);
++    }
++    uint64_t FileSize(int64_t id) override {
++        const auto f = Get(id);
++        return f ? f->GetSize() : 0;
++    }
++    uint64_t ReadFile(int64_t id, uint64_t offset, void* out, uint64_t size) override {
++        const auto f = Get(id);
++        return f ? f->Read(static_cast<u8*>(out), size, offset) : 0;
++    }
++    bool IsDirectory(const std::string& path) override {
++        return path.empty() || root->GetDirectoryRelative(path) != nullptr;
++    }
++    bool List(const std::string& path, std::vector<Entry>& out) override {
++        const FileSys::VirtualDir dir = path.empty() ? root : root->GetDirectoryRelative(path);
++        if (!dir) return false;
++        for (const auto& d : dir->GetSubdirectories()) out.push_back({d->GetName(), true, 0});
++        for (const auto& f : dir->GetFiles()) out.push_back({f->GetName(), false, f->GetSize()});
++        return true;
++    }
++
++private:
++    FileSys::VirtualFile Get(int64_t id) {
++        std::scoped_lock lk{lock};
++        const auto it = open.find(id);
++        return it == open.end() ? nullptr : it->second;
++    }
++
++    FileSys::VirtualDir root;
++    std::mutex lock;
++    std::map<int64_t, FileSys::VirtualFile> open;
++    int64_t next = 0;
++};
++
++NativeFs& Fs() {
++    static NativeFs fs;
++    return fs;
++}
++
++/// The game's content, as the file system service would open it (OpenDataStorageByCurrentProcess).
++std::shared_ptr<NativeFs::Tree> OpenContent(Core::System& system) {
++    static std::mutex lock;
++    static std::shared_ptr<NativeFs::Tree> tree;
++    std::scoped_lock lk{lock};
++    if (tree) return tree;
++    auto* process = system.ApplicationProcess();
++    if (!process) return nullptr;
++    Service::FileSystem::ProgramId program_id{};
++    std::shared_ptr<Service::FileSystem::SaveDataController> save;
++    std::shared_ptr<Service::FileSystem::RomFsController> romfs;
++    if (system.GetFileSystemController().OpenProcess(&program_id, &save, &romfs, process->GetProcessId()).IsError() || !romfs)
++        return nullptr;
++    const FileSys::VirtualFile image = romfs->OpenRomFSCurrentProcess();
++    FileSys::VirtualDir root = image ? FileSys::ExtractRomFS(image) : nullptr;
++    if (!root) return nullptr;
++    tree = std::make_shared<RomTree>(std::move(root));
++    return tree;
++}
++
++bool Return(HookContext& ctx, u64 value) {
++    ctx.x[0] = value;
++    ctx.pc = ctx.x[30];
++    return true;
++}
++
++std::string Path(Core::System& system, u64 address) {
++    return system.ApplicationMemory().ReadCString(address, 0x400);
++}
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        // On by default on Linux (KARTRECOMP_NATIVE_FS=0 turns it off); elsewhere only when asked for.
++        const char* v = std::getenv("KARTRECOMP_NATIVE_FS");
++#ifdef __linux__
++        return !(v && *v == '0');
++#else
++        return v && *v == '1';
++#endif
++    }();
++    return on;
++}
++
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
++    if (!Enabled() || name != "sdk") return;
++    std::map<std::string, u64> exports;
++    for (const auto& [fn, offset] : SdkTrace::ExportedFunctions(image)) exports.emplace(fn, load_base + offset);
++    Core::System* sys = &system;
++    int installed = 0;
++    auto hook = [&](const char* symbol, std::function<bool(HookContext&)> fn) {
++        const auto it = exports.find(symbol);
++        if (it == exports.end()) {
++            LOG_WARNING(Core_ARM, "native fs: {} not exported by sdk", symbol);
++            return;
++        }
++        RecompHooks::Install(it->second, std::move(fn));
++        ++installed;
++    };
++
++    // MountRom(name, cache, cache size): the content is ours; the cache the game allocated is not needed.
++    hook("_ZN2nn2fs8MountRomEPKcPvm", [sys](HookContext& ctx) {
++        auto tree = OpenContent(*sys);
++        if (!tree) {
++            LOG_ERROR(Core_ARM, "native fs: no content to mount; the SDK mounts it");
++            return false;
++        }
++        const std::string name = Path(*sys, ctx.x[0]);
++        Fs().Mount(name, std::move(tree));
++        LOG_INFO(Core_ARM, "native fs: '{}:' is the game's content, read on the host", name);
++        return Return(ctx, NativeFs::ResultSuccess);
++    });
++    hook("_ZN2nn2fs22QueryMountRomCacheSizeEPm", [sys](HookContext& ctx) {
++        if (!OpenContent(*sys)) return false;
++        sys->ApplicationMemory().Write64(ctx.x[0], 0x1000);
++        return Return(ctx, NativeFs::ResultSuccess);
++    });
++    hook("_ZN2nn2fs7UnmountEPKc", [sys](HookContext& ctx) {
++        if (!Fs().Unmount(Path(*sys, ctx.x[0]))) return false; // not ours: the SDK's mount
++        ctx.pc = ctx.x[30];
++        return true;
++    });
++    // Files.
++    hook("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", [sys](HookContext& ctx) {
++        const std::string path = Path(*sys, ctx.x[1]);
++        if (!Fs().Handles(path)) return false;
++        u64 handle = 0;
++        const u32 r = Fs().OpenFile(path, static_cast<int>(ctx.x[2] & 0xFFFFFFFF), &handle);
++        if (r == NativeFs::ResultSuccess) sys->ApplicationMemory().Write64(ctx.x[0], handle);
++        return Return(ctx, r);
++    });
++    hook("_ZN2nn2fs9CloseFileENS0_10FileHandleE", [](HookContext& ctx) {
++        if (!NativeFs::IsOurs(ctx.x[0])) return false;
++        Fs().CloseFile(ctx.x[0]);
++        ctx.pc = ctx.x[30];
++        return true;
++    });
++    hook("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", [sys](HookContext& ctx) {
++        if (!NativeFs::IsOurs(ctx.x[1])) return false;
++        s64 size = 0;
++        const u32 r = Fs().GetFileSize(ctx.x[1], &size);
++        if (r == NativeFs::ResultSuccess) sys->ApplicationMemory().Write64(ctx.x[0], static_cast<u64>(size));
++        return Return(ctx, r);
++    });
++    // Reads go through a host buffer into game memory (WriteBlock handles any page layout).
++    auto read = [sys](u64 handle, s64 offset, u64 buffer, u64 size, u64* out_read, bool exact) -> u32 {
++        auto& mem = sys->ApplicationMemory();
++        std::vector<u8> temp(size);
++        u64 got = 0;
++        const u32 r = exact ? Fs().ReadFileExact(handle, offset, temp.data(), size)
++                            : Fs().ReadFile(handle, offset, temp.data(), size, &got);
++        if (r != NativeFs::ResultSuccess) return r;
++        if (exact) got = size;
++        if (got) mem.WriteBlock(buffer, temp.data(), got);
++        if (out_read) *out_read = got;
++        return r;
++    };
++    // ReadFile(size_t* out, FileHandle, s64 offset, void* buffer, size_t size, const ReadOption&) and the form without option.
++    for (const char* symbol : {"_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE",
++                               "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm"}) {
++        hook(symbol, [sys, read](HookContext& ctx) {
++            if (!NativeFs::IsOurs(ctx.x[1])) return false;
++            u64 got = 0;
++            const u32 r = read(ctx.x[1], static_cast<s64>(ctx.x[2]), ctx.x[3], ctx.x[4], &got, false);
++            if (r == NativeFs::ResultSuccess) sys->ApplicationMemory().Write64(ctx.x[0], got);
++            return Return(ctx, r);
++        });
++    }
++    // ReadFile(FileHandle, s64 offset, void* buffer, size_t size) and with option: the whole range or an error.
++    for (const char* symbol : {"_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm",
++                               "_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_10ReadOptionE"}) {
++        hook(symbol, [read](HookContext& ctx) {
++            if (!NativeFs::IsOurs(ctx.x[0])) return false;
++            return Return(ctx, read(ctx.x[0], static_cast<s64>(ctx.x[1]), ctx.x[2], ctx.x[3], nullptr, true));
++        });
++    }
++    // Entries and directories.
++    hook("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", [sys](HookContext& ctx) {
++        const std::string path = Path(*sys, ctx.x[1]);
++        if (!Fs().Handles(path)) return false;
++        int type = 0;
++        const u32 r = Fs().GetEntryType(path, &type);
++        if (r == NativeFs::ResultSuccess) sys->ApplicationMemory().Write32(ctx.x[0], static_cast<u32>(type));
++        return Return(ctx, r);
++    });
++    hook("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", [sys](HookContext& ctx) {
++        const std::string path = Path(*sys, ctx.x[1]);
++        if (!Fs().Handles(path)) return false;
++        u64 handle = 0;
++        const u32 r = Fs().OpenDirectory(path, static_cast<int>(ctx.x[2] & 0xFFFFFFFF), &handle);
++        if (r == NativeFs::ResultSuccess) sys->ApplicationMemory().Write64(ctx.x[0], handle);
++        return Return(ctx, r);
++    });
++    hook("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", [sys](HookContext& ctx) {
++        if (!NativeFs::IsOurs(ctx.x[2])) return false;
++        const s64 max = static_cast<s64>(ctx.x[3]);
++        std::vector<u8> entries(static_cast<size_t>(std::max<s64>(max, 0)) * NativeFs::EntrySize);
++        s64 count = 0;
++        const u32 r = Fs().ReadDirectory(ctx.x[2], entries.data(), max, &count);
++        if (r == NativeFs::ResultSuccess) {
++            auto& mem = sys->ApplicationMemory();
++            if (count) mem.WriteBlock(ctx.x[1], entries.data(), static_cast<size_t>(count) * NativeFs::EntrySize);
++            mem.Write64(ctx.x[0], static_cast<u64>(count));
++        }
++        return Return(ctx, r);
++    });
++    hook("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", [](HookContext& ctx) {
++        if (!NativeFs::IsOurs(ctx.x[0])) return false;
++        Fs().CloseDirectory(ctx.x[0]);
++        ctx.pc = ctx.x[30];
++        return true;
++    });
++    LOG_INFO(Core_ARM, "native fs: {} nn::fs functions answered on the host for the game's content", installed);
++}
++
++} // namespace Core::NativeFs
+diff --git a/src/core/arm/recomp/native_fs.h b/src/core/arm/recomp/native_fs.h
+new file mode 100644
+index 0000000000..276599a0bb
+--- /dev/null
++++ b/src/core/arm/recomp/native_fs.h
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: native content files (native-engine plan, phase 3; docs/NATIVE_ENGINE.md "native file system") - the suyu-side
++// adapter of kart_runtime/native_fs.h.
++//
++// The game's nn::fs calls on its content mount ("rom:") are answered from the game's RomFS (with mods and text patches, the
++// same image the file system service would hand out) on the host: the SDK's own RomFS reader and its storage reads through the
++// file system service are no longer used for content. Save data and add-on content keep the SDK path.
++// KARTRECOMP_NATIVE_FS=0 turns it off.
++#pragma once
++
++#include <span>
++#include <string_view>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::NativeFs {
++
++bool Enabled();
++
++/// Called by the NSO loader with each module's image; hooks the nn::fs functions of "sdk".
++void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
++
++} // namespace Core::NativeFs
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
 index 0000000000..dbce9ea040
@@ -5638,7 +5937,7 @@ index 053fcd0bb1..3d04ec0f1a 100644
          return *nsp_type;
      } else if (const auto xci_type = IdentifyFileLoader<AppLoader_XCI>(file)) {
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..74a38ac4f7 100644
+index 3cc84acfdf..27d27fc74d 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -6,9 +6,11 @@
@@ -5653,11 +5952,12 @@ index 3cc84acfdf..74a38ac4f7 100644
  #include "common/common_funcs.h"
  #include "common/hex_util.h"
  #include "common/logging.h"
-@@ -23,6 +25,11 @@
+@@ -23,6 +25,12 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/arm/recomp/native_fs.h"
 +#include "core/arm/recomp/native_hid.h"
 +#include "core/arm/recomp/native_libc.h"
 +#include "core/arm/recomp/sdk_trace.h"
@@ -5665,7 +5965,7 @@ index 3cc84acfdf..74a38ac4f7 100644
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +224,52 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +225,57 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
@@ -5683,6 +5983,11 @@ index 3cc84acfdf..74a38ac4f7 100644
 +
 +    // kart-recomp: native controller input for the game's nn::hid reads (KARTRECOMP_NATIVE_HID=1).
 +    Core::NativeHid::NoteModuleImage(
++        system,
++        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
++        load_base + module_start, name);
++    // kart-recomp: the game's content files on the host (nn::fs on "rom:", KARTRECOMP_NATIVE_FS).
++    Core::NativeFs::NoteModuleImage(
 +        system,
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
@@ -8899,6 +9204,264 @@ index 0000000000..6b0956610e
 +}
 +
 +} // namespace KartRuntime::DirectMemory
+diff --git a/src/kart_runtime/native_fs.h b/src/kart_runtime/native_fs.h
+new file mode 100644
+index 0000000000..6fcddd551f
+--- /dev/null
++++ b/src/kart_runtime/native_fs.h
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the game's read-only content files through the console SDK's nn::fs calls, natively
++// (docs/NATIVE_ENGINE.md, "native file system").
++//
++// The game mounts its content ("rom:") and opens, reads, sizes and lists files there with nn::fs::OpenFile / ReadFile /
++// GetFileSize / GetEntryType / OpenDirectory / ReadDirectory. On the console the SDK parses the RomFS image itself and reads it
++// through the file system service. Here those calls are answered from a host tree (`Tree`: the game's RomFS with mods applied,
++// given by the engine), with the SDK's rules: "<mount>:/path" names, file and directory handles, the result codes the game
++// checks, and the 0x310-byte directory entries. Paths on other mounts (save data, add-on content) are not ours: the caller
++// lets the SDK handle them.
++//
++// Standard library only (tests: tests/test_native_fs.cpp).
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace KartRuntime {
++
++class NativeFs {
++public:
++    /// The content tree. Paths are normalised: no mount name, components joined by '/', no leading '/' ("" = the root).
++    class Tree {
++    public:
++        struct Entry {
++            std::string name;
++            bool directory = false;
++            uint64_t size = 0;
++        };
++        virtual ~Tree() = default;
++        /// An id for the file at `path`, or -1 when there is no such file.
++        virtual int64_t OpenFile(const std::string& path) = 0;
++        virtual void CloseFile(int64_t id) = 0;
++        virtual uint64_t FileSize(int64_t id) = 0;
++        /// Reads up to `size` bytes at `offset`; returns how many were read.
++        virtual uint64_t ReadFile(int64_t id, uint64_t offset, void* out, uint64_t size) = 0;
++        virtual bool IsDirectory(const std::string& path) = 0;
++        /// The directory's subdirectories, then its files (the SDK's RomFS order). False when it is not a directory.
++        virtual bool List(const std::string& path, std::vector<Entry>& out) = 0;
++    };
++
++    // nn::Result values (module 2 = fs).
++    static constexpr uint32_t ResultSuccess = 0;
++    static constexpr uint32_t ResultPathNotFound = 2 | (1u << 9);
++    static constexpr uint32_t ResultOutOfRange = 2 | (3001u << 9);
++    static constexpr uint32_t ResultInvalidOpenMode = 2 | (6200u << 9);
++    static constexpr uint32_t ResultUnsupportedOperation = 2 | (6300u << 9);
++
++    /// Handle values never collide with the SDK's (which are game heap addresses, below 2^39).
++    static constexpr uint64_t HandleTag = 0x4B52000000000000ull; // "KR"
++    static bool IsOurs(uint64_t handle) { return (handle & 0xFFFF000000000000ull) == HandleTag; }
++
++    static constexpr size_t EntrySize = 0x310; ///< nn::fs::DirectoryEntry
++    static constexpr size_t EntryNameMax = 0x300;
++
++    /// MountRom: `name` now refers to `tree`.
++    void Mount(const std::string& name, std::shared_ptr<Tree> tree) {
++        std::scoped_lock lk{mutex};
++        mounts[name] = std::move(tree);
++    }
++    bool Unmount(const std::string& name) {
++        std::scoped_lock lk{mutex};
++        return mounts.erase(name) != 0;
++    }
++
++    /// True when `path` names one of our mounts ("rom:/..."); the caller passes other paths to the SDK.
++    bool Handles(std::string_view path) {
++        std::scoped_lock lk{mutex};
++        return Find(path, nullptr) != nullptr;
++    }
++
++    uint32_t OpenFile(std::string_view path, int mode, uint64_t* out_handle) {
++        std::scoped_lock lk{mutex};
++        std::string rel;
++        const std::shared_ptr<Tree> tree = Find(path, &rel);
++        if (!tree) return ResultPathNotFound;
++        if (mode & ~7) return ResultInvalidOpenMode;
++        if (mode & 6) return ResultUnsupportedOperation; // write / append on read-only content
++        const int64_t id = tree->OpenFile(rel);
++        if (id < 0) return ResultPathNotFound;
++        const uint64_t h = HandleTag | ++next_handle;
++        files[h] = {tree, id};
++        *out_handle = h;
++        return ResultSuccess;
++    }
++
++    void CloseFile(uint64_t handle) {
++        std::scoped_lock lk{mutex};
++        if (auto it = files.find(handle); it != files.end()) {
++            it->second.tree->CloseFile(it->second.id);
++            files.erase(it);
++        }
++    }
++
++    uint32_t GetFileSize(uint64_t handle, int64_t* out) {
++        std::scoped_lock lk{mutex};
++        const auto it = files.find(handle);
++        if (it == files.end()) return ResultUnsupportedOperation;
++        *out = static_cast<int64_t>(it->second.tree->FileSize(it->second.id));
++        return ResultSuccess;
++    }
++
++    /// ReadFile with a read-size result: reads what is there (0 at the end); an offset past the end is out of range.
++    uint32_t ReadFile(uint64_t handle, int64_t offset, void* out, uint64_t size, uint64_t* out_read) {
++        File f;
++        {
++            std::scoped_lock lk{mutex};
++            const auto it = files.find(handle);
++            if (it == files.end()) return ResultUnsupportedOperation;
++            f = it->second;
++        }
++        const uint64_t file_size = f.tree->FileSize(f.id);
++        if (offset < 0 || static_cast<uint64_t>(offset) > file_size) return ResultOutOfRange;
++        const uint64_t want = std::min<uint64_t>(size, file_size - static_cast<uint64_t>(offset));
++        *out_read = want ? f.tree->ReadFile(f.id, static_cast<uint64_t>(offset), out, want) : 0;
++        return ResultSuccess;
++    }
++
++    /// ReadFile without a read-size result: the whole range must be in the file.
++    uint32_t ReadFileExact(uint64_t handle, int64_t offset, void* out, uint64_t size) {
++        uint64_t read = 0;
++        if (const uint32_t r = ReadFile(handle, offset, out, size, &read); r != ResultSuccess) return r;
++        return read == size ? ResultSuccess : ResultOutOfRange;
++    }
++
++    /// GetEntryType: 0 = directory, 1 = file.
++    uint32_t GetEntryType(std::string_view path, int* out_type) {
++        std::scoped_lock lk{mutex};
++        std::string rel;
++        const std::shared_ptr<Tree> tree = Find(path, &rel);
++        if (!tree) return ResultPathNotFound;
++        if (tree->IsDirectory(rel)) {
++            *out_type = 0;
++            return ResultSuccess;
++        }
++        const int64_t id = tree->OpenFile(rel);
++        if (id < 0) return ResultPathNotFound;
++        tree->CloseFile(id);
++        *out_type = 1;
++        return ResultSuccess;
++    }
++
++    /// OpenDirectory: mode bit 0 = directories, bit 1 = files.
++    uint32_t OpenDirectory(std::string_view path, int mode, uint64_t* out_handle) {
++        std::scoped_lock lk{mutex};
++        std::string rel;
++        const std::shared_ptr<Tree> tree = Find(path, &rel);
++        if (!tree) return ResultPathNotFound;
++        if ((mode & 3) == 0 || (mode & ~0x80000003)) return ResultInvalidOpenMode;
++        std::vector<Tree::Entry> all;
++        if (!tree->List(rel, all)) return ResultPathNotFound;
++        Dir d;
++        for (auto& e : all) {
++            if ((e.directory && (mode & 1)) || (!e.directory && (mode & 2))) d.entries.push_back(std::move(e));
++        }
++        const uint64_t h = HandleTag | ++next_handle;
++        dirs[h] = std::move(d);
++        *out_handle = h;
++        return ResultSuccess;
++    }
++
++    /// ReadDirectory: up to `max` entries into `out` (EntrySize bytes each); `*out_count` = how many (0 when all were read).
++    uint32_t ReadDirectory(uint64_t handle, uint8_t* out, int64_t max, int64_t* out_count) {
++        std::scoped_lock lk{mutex};
++        const auto it = dirs.find(handle);
++        if (it == dirs.end()) return ResultUnsupportedOperation;
++        Dir& d = it->second;
++        int64_t n = 0;
++        while (n < max && d.next < d.entries.size()) {
++            const auto& e = d.entries[d.next++];
++            uint8_t* p = out + static_cast<size_t>(n) * EntrySize;
++            std::memset(p, 0, EntrySize);
++            std::memcpy(p, e.name.data(), std::min(e.name.size(), EntryNameMax));
++            p[0x304] = e.directory ? 0 : 1;
++            const int64_t size = e.directory ? 0 : static_cast<int64_t>(e.size);
++            std::memcpy(p + 0x308, &size, sizeof(size));
++            ++n;
++        }
++        *out_count = n;
++        return ResultSuccess;
++    }
++
++    void CloseDirectory(uint64_t handle) {
++        std::scoped_lock lk{mutex};
++        dirs.erase(handle);
++    }
++
++    size_t OpenCount() {
++        std::scoped_lock lk{mutex};
++        return files.size() + dirs.size();
++    }
++
++    /// "rom:/a//b/./c/../d" -> mount "rom", path "a/b/d". False when there is no "<name>:" prefix.
++    static bool Split(std::string_view path, std::string* mount, std::string* rel) {
++        const size_t colon = path.find(':');
++        if (colon == std::string_view::npos || colon == 0) return false;
++        *mount = std::string{path.substr(0, colon)};
++        std::vector<std::string_view> parts;
++        std::string_view rest = path.substr(colon + 1);
++        while (!rest.empty()) {
++            const size_t slash = rest.find_first_of("/\\");
++            const std::string_view part = rest.substr(0, slash);
++            rest = slash == std::string_view::npos ? std::string_view{} : rest.substr(slash + 1);
++            if (part.empty() || part == ".") continue;
++            if (part == "..") {
++                if (!parts.empty()) parts.pop_back();
++                continue;
++            }
++            parts.push_back(part);
++        }
++        rel->clear();
++        for (size_t i = 0; i < parts.size(); ++i) {
++            if (i) rel->push_back('/');
++            rel->append(parts[i]);
++        }
++        return true;
++    }
++
++private:
++    struct File {
++        std::shared_ptr<Tree> tree;
++        int64_t id = -1;
++    };
++    struct Dir {
++        std::vector<Tree::Entry> entries;
++        size_t next = 0;
++    };
++
++    std::shared_ptr<Tree> Find(std::string_view path, std::string* rel) {
++        std::string mount, r;
++        if (!Split(path, &mount, &r)) return nullptr;
++        const auto it = mounts.find(mount);
++        if (it == mounts.end()) return nullptr;
++        if (rel) *rel = std::move(r);
++        return it->second;
++    }
++
++    std::mutex mutex;
++    std::map<std::string, std::shared_ptr<Tree>> mounts;
++    std::map<uint64_t, File> files;
++    std::map<uint64_t, Dir> dirs;
++    uint64_t next_handle = 0;
++};
++
++} // namespace KartRuntime
 diff --git a/src/kart_runtime/sync_arbiter.h b/src/kart_runtime/sync_arbiter.h
 new file mode 100644
 index 0000000000..a5c0ed8498
@@ -9521,6 +10084,126 @@ index 0000000000..bbaebea55b
 +    return KartRuntime::DirectMemory::Install(nullptr, 0, nullptr) ? 1 : 0;
 +}
 +#endif
+diff --git a/src/kart_runtime/tests/test_native_fs.cpp b/src/kart_runtime/tests/test_native_fs.cpp
+new file mode 100644
+index 0000000000..adf06efe2d
+--- /dev/null
++++ b/src/kart_runtime/tests/test_native_fs.cpp
+@@ -0,0 +1,114 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Tests for kart_runtime/native_fs.h: nn::fs rules (paths, handles, results, directory entries) over an in-memory tree.
++#include "../native_fs.h"
++
++#include <cassert>
++#include <cstdio>
++
++using KartRuntime::NativeFs;
++
++namespace {
++
++class FakeTree : public NativeFs::Tree {
++public:
++    std::map<std::string, std::string> files{{"Course/a.bin", "0123456789"}, {"Course/b.bin", "xy"}, {"top.txt", "hello"}};
++    std::vector<std::string> dirs{"", "Course", "Course/Empty"};
++    std::map<int64_t, std::string> open;
++    int64_t next = 0;
++
++    int64_t OpenFile(const std::string& p) override {
++        const auto it = files.find(p);
++        if (it == files.end()) return -1;
++        open[next] = p;
++        return next++;
++    }
++    void CloseFile(int64_t id) override { open.erase(id); }
++    uint64_t FileSize(int64_t id) override { return files[open.at(id)].size(); }
++    uint64_t ReadFile(int64_t id, uint64_t off, void* out, uint64_t size) override {
++        const std::string& d = files[open.at(id)];
++        const uint64_t n = std::min<uint64_t>(size, d.size() - off);
++        std::memcpy(out, d.data() + off, n);
++        return n;
++    }
++    bool IsDirectory(const std::string& p) override { return std::find(dirs.begin(), dirs.end(), p) != dirs.end(); }
++    bool List(const std::string& p, std::vector<Entry>& out) override {
++        if (!IsDirectory(p)) return false;
++        const std::string prefix = p.empty() ? "" : p + "/";
++        for (const auto& d : dirs)
++            if (!d.empty() && d.starts_with(prefix) && d.find('/', prefix.size()) == std::string::npos && d != p)
++                out.push_back({d.substr(prefix.size()), true, 0});
++        for (const auto& [f, data] : files)
++            if (f.starts_with(prefix) && f.find('/', prefix.size()) == std::string::npos)
++                out.push_back({f.substr(prefix.size()), false, data.size()});
++        return true;
++    }
++};
++
++} // namespace
++
++int main() {
++    NativeFs fs;
++    auto tree = std::make_shared<FakeTree>();
++    fs.Mount("rom", tree);
++
++    std::string mount, rel;
++    assert(NativeFs::Split("rom:/a//b/./c/../d", &mount, &rel) && mount == "rom" && rel == "a/b/d");
++    assert(NativeFs::Split("rom:/", &mount, &rel) && rel.empty());
++    assert(!NativeFs::Split("/no/mount", &mount, &rel));
++    assert(fs.Handles("rom:/top.txt") && !fs.Handles("save:/x") && !fs.Handles("plain"));
++
++    uint64_t h = 0;
++    assert(fs.OpenFile("rom:/Course/a.bin", 1, &h) == NativeFs::ResultSuccess && NativeFs::IsOurs(h));
++    assert(!NativeFs::IsOurs(0x0000'0080'1234'5678ull));
++    int64_t size = 0;
++    assert(fs.GetFileSize(h, &size) == 0 && size == 10);
++    char buf[16]{};
++    uint64_t read = 0;
++    assert(fs.ReadFile(h, 4, buf, 16, &read) == 0 && read == 6 && std::memcmp(buf, "456789", 6) == 0);
++    assert(fs.ReadFile(h, 10, buf, 4, &read) == 0 && read == 0);                 // at the end: nothing, no error
++    assert(fs.ReadFile(h, 11, buf, 4, &read) == NativeFs::ResultOutOfRange);    // past the end
++    assert(fs.ReadFileExact(h, 8, buf, 2) == 0 && buf[0] == '8');
++    assert(fs.ReadFileExact(h, 8, buf, 3) == NativeFs::ResultOutOfRange);
++    fs.CloseFile(h);
++    assert(tree->open.empty());
++
++    assert(fs.OpenFile("rom:/Course/missing.bin", 1, &h) == NativeFs::ResultPathNotFound);
++    assert(fs.OpenFile("rom:/Course", 1, &h) == NativeFs::ResultPathNotFound); // a directory
++    assert(fs.OpenFile("rom:/top.txt", 3, &h) == NativeFs::ResultUnsupportedOperation);
++
++    int type = -1;
++    assert(fs.GetEntryType("rom:/Course", &type) == 0 && type == 0);
++    assert(fs.GetEntryType("rom:/Course/b.bin", &type) == 0 && type == 1);
++    assert(fs.GetEntryType("rom:/nothing", &type) == NativeFs::ResultPathNotFound);
++    assert(tree->open.empty());
++
++    uint64_t d = 0;
++    assert(fs.OpenDirectory("rom:/Course", 3, &d) == 0 && NativeFs::IsOurs(d));
++    std::vector<uint8_t> entries(NativeFs::EntrySize * 2);
++    int64_t count = 0;
++    assert(fs.ReadDirectory(d, entries.data(), 2, &count) == 0 && count == 2);
++    assert(std::string(reinterpret_cast<char*>(entries.data())) == "Empty" && entries[0x304] == 0); // directories first
++    assert(std::string(reinterpret_cast<char*>(entries.data() + NativeFs::EntrySize)) == "a.bin");
++    assert(entries[NativeFs::EntrySize + 0x304] == 1);
++    int64_t esize = 0;
++    std::memcpy(&esize, entries.data() + NativeFs::EntrySize + 0x308, 8);
++    assert(esize == 10);
++    assert(fs.ReadDirectory(d, entries.data(), 2, &count) == 0 && count == 1); // b.bin
++    assert(fs.ReadDirectory(d, entries.data(), 2, &count) == 0 && count == 0);
++    fs.CloseDirectory(d);
++    assert(fs.OpenDirectory("rom:/", 2, &d) == 0); // files only
++    assert(fs.ReadDirectory(d, entries.data(), 2, &count) == 0 && count == 1);
++    assert(std::string(reinterpret_cast<char*>(entries.data())) == "top.txt");
++    fs.CloseDirectory(d);
++    assert(fs.OpenDirectory("rom:/top.txt", 3, &d) == NativeFs::ResultPathNotFound);
++    assert(fs.OpenCount() == 0);
++
++    // A file stays readable after its mount is gone (the tree is kept alive by the open file).
++    assert(fs.OpenFile("rom:/top.txt", 1, &h) == 0);
++    fs.Unmount("rom");
++    assert(fs.ReadFileExact(h, 0, buf, 5) == 0 && std::memcmp(buf, "hello", 5) == 0);
++    fs.CloseFile(h);
++    assert(!fs.Handles("rom:/top.txt"));
++    std::printf("native_fs: all tests passed\n");
++    return 0;
++}
 diff --git a/src/kart_runtime/tests/test_sync_arbiter.cpp b/src/kart_runtime/tests/test_sync_arbiter.cpp
 new file mode 100644
 index 0000000000..0ee9d49577

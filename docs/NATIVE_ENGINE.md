@@ -521,3 +521,19 @@ signalled as soon as it had read the commands), `nvnWindowAcquireTexture` (the w
 Not done yet: the emulated GPU is still created (about 40 MB) because the game's driver still uses the GPU service for channel
 setup and GPU address-space mappings at boot (`nvhost_as_gpu`, `nvhost_gpu`); those need native answers before `Tegra::GPU`
 can go.
+
+## Native file system: the game's content on the host (2026-11-14)
+
+On by default on Linux (`KARTRECOMP_NATIVE_FS=0` turns it off; elsewhere opt-in with `=1`).
+- `kart_runtime/native_fs.h` (standalone, test `tests/test_native_fs.cpp`): the SDK's rules for content files - `<mount>:/path`
+  names (`//`, `.`, `..`), file and directory handles (tagged values that cannot be game heap addresses, so calls on other
+  handles go to the SDK), the result codes (path not found 0x202, out of range 0x177202, ...), reads with and without a size
+  result, entry types, directory listings (subdirectories first, then files, 0x310-byte `DirectoryEntry`), mode checks.
+- Adapter `core/arm/recomp/native_fs.{h,cpp}` hooks 14 `nn::fs` functions of the sdk module (`MountRom`,
+  `QueryMountRomCacheSize`, `Unmount`, `OpenFile`, `CloseFile`, `GetFileSize`, four `ReadFile` forms, `GetEntryType`,
+  `OpenDirectory`, `ReadDirectory`, `CloseDirectory`). The tree is the game's RomFS exactly as the file system service hands
+  it out (`RomFsController::OpenRomFSCurrentProcess`: update, mods and text patches applied), read with suyu's RomFS reader.
+- The game mounts its content as `content:`. Storage reads through the file system service in a 150 s race: 1,907 -> 18 (the
+  rest are the system archives: fonts and Mii data). Save data, add-on content and system data keep the SDK path.
+- Checked: 1P races on 4.0.1 and 3.0.4 (60 fps, same pictures), the keyless "decrypted files" boot. Not checked: a run with
+  mods (they come through the same RomFS image, so they should apply the same way).
