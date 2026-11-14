@@ -88,26 +88,26 @@ QString GamePackage::coverageReport() const {
 
 QString GamePackage::problems() const {
     if (installed) {
-        if (!QFileInfo(engine_path).isExecutable()) return QStringLiteral("The game engine is missing (%1). Reinstall the launcher.").arg(engine_path);
-        if (!IsBuilt(layout, engine_version)) return QStringLiteral("The game has not been built yet: use the Setup page.");
+        if (!QFileInfo(engine_path).isExecutable()) return QCoreApplication::translate("Messages", "The game engine is missing (%1). Reinstall the launcher.").arg(engine_path);
+        if (!IsBuilt(layout, engine_version)) return QCoreApplication::translate("Messages", "The game has not been built yet: use the Setup page.");
         return {};
     }
     QStringList missing;
     if (root_dir.isEmpty() || !QFileInfo(root_dir).isDir()) {
-        return QStringLiteral("No game folder selected.");
+        return QCoreApplication::translate("Messages", "No game folder selected.");
     }
     if (!QFileInfo(executable()).isExecutable()) {
-        missing << QStringLiteral("Game executable (build it from your own dump first): ") + executable();
+        missing << QCoreApplication::translate("Messages", "Game executable (build it from your own dump first): ") + executable();
     }
     if (!QFileInfo::exists(baseNsp())) {
-        missing << QStringLiteral("Base game: ") + baseNsp();
+        missing << QCoreApplication::translate("Messages", "Base game: ") + baseNsp();
     }
     if (!QFileInfo::exists(updateNsp())) {
-        missing << QStringLiteral("Update 3.0.4: ") + updateNsp();
+        missing << QCoreApplication::translate("Messages", "Update 3.0.4: ") + updateNsp();
     }
     const QString keys = QDir(suyu_home).filePath(QStringLiteral("suyu/keys/prod.keys"));
     if (suyu_home.isEmpty() || !QFileInfo::exists(keys)) {
-        missing << QStringLiteral("Your keys (prod.keys): ") + keys;
+        missing << QCoreApplication::translate("Messages", "Your keys (prod.keys): ") + keys;
     }
     return missing.join(QLatin1Char('\n'));
 }

@@ -19,8 +19,10 @@
 #include <thread>
 
 #include <QComboBox>
+#include <algorithm>
 
 #include "build_runner.h"
+#include "launcher_language.h"
 #include "keys_check.h"
 #include "nsp_info.h"
 #include "setup_pipeline.h"
@@ -32,6 +34,27 @@ QString StatusText(const QString& reason) { return reason.isEmpty() ? QStringLit
 SetupPage::SetupPage(QWidget* parent)
     : QWidget(parent), paths(BuilderPaths::Detect()), layout(DataLayout::Default()) {
     auto* top = new QVBoxLayout(this);
+    {
+        // The launcher's language (the game's own is the Console language on the Play tab). It applies after a restart.
+        auto* row = new QHBoxLayout;
+        auto* language = new QComboBox;
+        for (const auto& l : LauncherLanguage::Available())
+            language->addItem(l.code.isEmpty() ? tr("Automatic (system language)") : l.native, l.code);
+        language->setCurrentIndex(std::max(0, language->findData(LauncherLanguage::Chosen())));
+        language->setToolTip(tr("The language of this launcher. The game's own language is the Console language on the Play tab."));
+        connect(language, &QComboBox::activated, this, [this, language] {
+            const QString code = language->currentData().toString();
+            if (code == LauncherLanguage::Chosen()) return;
+            LauncherLanguage::SetChosen(code);
+            if (QMessageBox::question(this, tr("Launcher language"), tr("The new language is used when the launcher starts again. Restart it now?"))
+                == QMessageBox::Yes)
+                LauncherLanguage::Restart();
+        });
+        row->addWidget(new QLabel(tr("Launcher language:")));
+        row->addWidget(language);
+        row->addStretch();
+        top->addLayout(row);
+    }
     auto* intro = new QLabel(tr("Pick your own game files. Nothing leaves your PC: the game is built here from them, in a few minutes, "
                                 "and stays on this PC."));
     intro->setWordWrap(true);

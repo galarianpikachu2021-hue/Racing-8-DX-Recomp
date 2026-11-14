@@ -1,0 +1,2667 @@
+[
+[
+"ControllerMapper",
+"Choose a player and what it plays on. Each controller keeps its own layout: whichever player gets it gets its buttons. To change one, press Change and then the button you want for it. Swap A/B and X/Y suits Xbox and PlayStation controllers (the button labelled A then acts as in-game A). Close the game before changing anything.",
+false
+],
+[
+"ControllerMapper",
+"Player %1",
+false
+],
+[
+"ControllerMapper",
+"Refresh",
+false
+],
+[
+"ControllerMapper",
+"plays on",
+false
+],
+[
+"ControllerMapper",
+"Standard layout",
+false
+],
+[
+"ControllerMapper",
+"Swap A/B and X/Y",
+false
+],
+[
+"ControllerMapper",
+"Give controllers to players automatically when they connect",
+false
+],
+[
+"ControllerMapper",
+"→ In-game %1",
+false
+],
+[
+"ControllerMapper",
+"Change",
+false
+],
+[
+"ControllerMapper",
+"Clear",
+false
+],
+[
+"ControllerMapper",
+"Cancel",
+false
+],
+[
+"ControllerMapper",
+"A/B and X/Y swapped for %1.",
+false
+],
+[
+"ControllerMapper",
+"Standard layout for %1.",
+false
+],
+[
+"ControllerMapper",
+"The controller didn't answer (is it still connected?).",
+false
+],
+[
+"ControllerMapper",
+"Reading the standard layout...",
+false
+],
+[
+"ControllerMapper",
+"Start the game once so it creates its config, then map the controls.",
+false
+],
+[
+"ControllerMapper",
+"Could not write %1",
+false
+],
+[
+"ControllerMapper",
+"Keyboard",
+false
+],
+[
+"ControllerMapper",
+"(nothing)",
+false
+],
+[
+"ControllerMapper",
+"Keys",
+false
+],
+[
+"ControllerMapper",
+"Left stick",
+false
+],
+[
+"ControllerMapper",
+"Right stick",
+false
+],
+[
+"ControllerMapper",
+"Stick (axes %1/%2)",
+false
+],
+[
+"ControllerMapper",
+"D-pad %1",
+false
+],
+[
+"ControllerMapper",
+"Axis %1",
+false
+],
+[
+"ControllerMapper",
+"Button %1",
+false
+],
+[
+"ControllerMapper",
+"Nobody (not playing)",
+false
+],
+[
+"ControllerMapper",
+"Controller",
+false
+],
+[
+"ControllerMapper",
+"%1 (not connected)",
+false
+],
+[
+"ControllerMapper",
+"The game engine isn't set up yet (Setup page).",
+false
+],
+[
+"ControllerMapper",
+"Could not start the game engine to ask about controllers.",
+false
+],
+[
+"ControllerMapper",
+"No controller found (is it connected and switched on?).",
+false
+],
+[
+"ControllerMapper",
+"%n controller(s) found.",
+true
+],
+[
+"ControllerMapper",
+"Looking for controllers...",
+false
+],
+[
+"ControllerMapper",
+"Player %1 isn't playing.",
+false
+],
+[
+"ControllerMapper",
+"Player %1 plays on %2%3.",
+false
+],
+[
+"ControllerMapper",
+" with its saved layout",
+false
+],
+[
+"ControllerMapper",
+"Reading the controller's layout...",
+false
+],
+[
+"ControllerMapper",
+"A stick on the keyboard is four keys; Standard layout gives W/A/S/D and the arrow keys.",
+false
+],
+[
+"ControllerMapper",
+"Press the key for in-game %1",
+false
+],
+[
+"ControllerMapper",
+"That key can't be used (F10 and F11 are the game's menu and fullscreen keys).",
+false
+],
+[
+"ControllerMapper",
+"%1 now does in-game %2.",
+false
+],
+[
+"ControllerMapper",
+"Move the stick for in-game %1 on the controller",
+false
+],
+[
+"ControllerMapper",
+"Press the button for in-game %1 on the controller",
+false
+],
+[
+"ControllerMapper",
+"The controller didn't answer: in-game %1 is unchanged.",
+false
+],
+[
+"ControllerMapper",
+"Player %1 plays on %2.",
+false
+],
+[
+"ControllerMapper",
+"The game is running: controls can be changed after it closes.",
+false
+],
+[
+"MainWindow",
+"Setup",
+false
+],
+[
+"MainWindow",
+"Play",
+false
+],
+[
+"MainWindow",
+"Display",
+false
+],
+[
+"MainWindow",
+"Frame rate",
+false
+],
+[
+"MainWindow",
+"Enhancements",
+false
+],
+[
+"MainWindow",
+"Controllers",
+false
+],
+[
+"MainWindow",
+"Miis (experimental)",
+false
+],
+[
+"MainWindow",
+"DLC",
+false
+],
+[
+"MainWindow",
+"Mods",
+false
+],
+[
+"MainWindow",
+"(set on the Setup page)",
+false
+],
+[
+"MainWindow",
+"Game exited (code %1).",
+false
+],
+[
+"MainWindow",
+"The built game does not match this engine, or is missing: build it again on the Setup page.",
+false
+],
+[
+"MainWindow",
+"Build running",
+false
+],
+[
+"MainWindow",
+"The game is still being built. Stop the build and close? (Building again resumes where it stopped.)",
+false
+],
+[
+"MainWindow",
+"Browse…",
+false
+],
+[
+"MainWindow",
+"Game folder:",
+false
+],
+[
+"MainWindow",
+"Select your built game folder",
+false
+],
+[
+"MainWindow",
+"Keys + firmware:",
+false
+],
+[
+"MainWindow",
+"Select the suyu data folder with your keys",
+false
+],
+[
+"MainWindow",
+"The language the game runs in, chosen before you start. Saved in the game's config and used every launch until you pick another here (or in game, where it can also be changed and overrides this). Not every course or text string is translated, so a non-English language can still fall back to English in places.",
+false
+],
+[
+"MainWindow",
+"Console language:",
+false
+],
+[
+"MainWindow",
+"720p",
+false
+],
+[
+"MainWindow",
+"1080p",
+false
+],
+[
+"MainWindow",
+"1440p",
+false
+],
+[
+"MainWindow",
+"4K (2160p)",
+false
+],
+[
+"MainWindow",
+"The output resolution: the size of the final picture, the HUD included. The 3D scene can be drawn smaller than this and upscaled in the in-game menu (F10).",
+false
+],
+[
+"MainWindow",
+"Output resolution:",
+false
+],
+[
+"MainWindow",
+"16:9 (standard)",
+false
+],
+[
+"MainWindow",
+"Match the screen (ultrawide)",
+false
+],
+[
+"MainWindow",
+"21:9",
+false
+],
+[
+"MainWindow",
+"32:9",
+false
+],
+[
+"MainWindow",
+"Ultrawide races: more of the track to the left and right, not a stretched picture. The HUD and the menus stay 16:9 in the middle. Needs a game built with this version (Setup, Build): an older build stays 16:9.",
+false
+],
+[
+"MainWindow",
+"Picture shape:",
+false
+],
+[
+"MainWindow",
+"In game, F10 (or both stick buttons, L3 + R3, on a controller) opens a settings menu: upscaler, render scale, sharpening, frame generation, HDR, present mode, speed limit, an FPS counter and which controller plays as Players 1 to 4. The Enhancements tab holds the same settings.",
+false
+],
+[
+"MainWindow",
+"Off (default)",
+false
+],
+[
+"MainWindow",
+"On",
+false
+],
+[
+"MainWindow",
+"Pins each of the game's main threads (and the renderer's) to its own CPU, so the caches stay warm instead of being refilled after every migration. It helps a little in heavy moments (fewer dropped frames). Leave it off if the CPU is busy with other programs, because pinned threads can't move away from them. Needs 6 or more CPU threads.",
+false
+],
+[
+"MainWindow",
+"Pin CPU threads (Linux):",
+false
+],
+[
+"MainWindow",
+"Faster memory allocator (tcmalloc, if installed)",
+false
+],
+[
+"MainWindow",
+"Preloads gperftools' tcmalloc: the renderer and the graphics hooks allocate a lot, and it is worth several fps in split-screen races. Install the gperftools package (libtcmalloc_minimal.so.4) to use it.",
+false
+],
+[
+"MainWindow",
+"Fullscreen",
+false
+],
+[
+"MainWindow",
+"Record graphics trace (developer)",
+false
+],
+[
+"MainWindow",
+"Logs the game's NVN graphics calls to user/log (nvn_trace.txt, nvn_frames.csv and two-frame captures every 30 s). Used to build the native GPU backend. Slower.",
+false
+],
+[
+"MainWindow",
+"Stop",
+false
+],
+[
+"MainWindow",
+"Package as AppImage…",
+false
+],
+[
+"MainWindow",
+"Packs the game built on this PC into one AppImage for this PC (never share it: it contains the translated game code). Saves, settings and mods move to ~/.local/share/kartrecomp and ~/.config/kartrecomp; your game files, firmware and mods are linked there, not copied.",
+false
+],
+[
+"MainWindow",
+"Open saves folder",
+false
+],
+[
+"MainWindow",
+"Your game save (userdata.dat). Copy it to back it up.",
+false
+],
+[
+"MainWindow",
+"Check for updates",
+false
+],
+[
+"MainWindow",
+"Packaging: step %v of %m",
+false
+],
+[
+"MainWindow",
+"Output:",
+false
+],
+[
+"MainWindow",
+"Fit in the window:",
+false
+],
+[
+"MainWindow",
+"VSync:",
+false
+],
+[
+"MainWindow",
+"Fullscreen mode:",
+false
+],
+[
+"MainWindow",
+"Graphics quality:",
+false
+],
+[
+"MainWindow",
+"Graphics quality: High uses the game's full effects, Low its lighter ones (the console's docked and handheld modes). The resolution is the same in both: it follows the output resolution and render scale. It can also be changed in game (F10). Changes are saved immediately and apply from the next launch; they are locked while the game runs.",
+false
+],
+[
+"MainWindow",
+"60 fps (the game's own)",
+false
+],
+[
+"MainWindow",
+"120 fps",
+false
+],
+[
+"MainWindow",
+"180 fps",
+false
+],
+[
+"MainWindow",
+"240 fps",
+false
+],
+[
+"MainWindow",
+"Above 60, the renderer draws extra frames between the game's own (frame generation). The game's speed and physics do not change. It needs a temporal upscaler for the motion vectors: FSR 3 is switched on at 100% when no upscaler is chosen (Enhancements tab).",
+false
+],
+[
+"MainWindow",
+"Rates above 60 need the FSR 3 or DLSS upscaler plugin (Enhancements tab).",
+false
+],
+[
+"MainWindow",
+"Frame rate:",
+false
+],
+[
+"MainWindow",
+"Limit game speed",
+false
+],
+[
+"MainWindow",
+"Speed limit:",
+false
+],
+[
+"MainWindow",
+"Speed limit: 100 % is the game's normal speed; another value speeds up or slows down the whole game. In 3-4 player split-screen the game draws each view at 30 fps; \"60 fps split-screen\" on the Setup page builds a game that draws every view every frame.",
+false
+],
+[
+"MainWindow",
+"Add-on content NSPs from your own dump. Each one is passed to the game with --content-dlc. DLC is data only, so no rebuild is needed.",
+false
+],
+[
+"MainWindow",
+"Add DLC…",
+false
+],
+[
+"MainWindow",
+"Remove selected",
+false
+],
+[
+"MainWindow",
+"Add DLC",
+false
+],
+[
+"MainWindow",
+"NSP files (*.nsp)",
+false
+],
+[
+"MainWindow",
+"Could not add %1",
+false
+],
+[
+"MainWindow",
+"Ready.",
+false
+],
+[
+"MainWindow",
+"Launch the game once so it creates its config; settings can be changed after that.",
+false
+],
+[
+"MainWindow",
+"Could not write %1",
+false
+],
+[
+"MainWindow",
+"Cannot start",
+false
+],
+[
+"MainWindow",
+"Open the launcher without --nolauncher to fix this.",
+false
+],
+[
+"MainWindow",
+"Preparing your mods failed: %1",
+false
+],
+[
+"MainWindow",
+"Settings",
+false
+],
+[
+"MainWindow",
+"Adapting your menu mods to this game version; press Play again when it is done.",
+false
+],
+[
+"MainWindow",
+"Updating the merged mod texts for this game version; press Play again when it is done.",
+false
+],
+[
+"MainWindow",
+"Running…",
+false
+],
+[
+"MainWindow",
+"AppImage",
+false
+],
+[
+"MainWindow",
+"Needs the built game (%1) and packaging/make-appimage.sh.",
+false
+],
+[
+"MainWindow",
+"Where should the AppImage go?",
+false
+],
+[
+"MainWindow",
+"Packaging…",
+false
+],
+[
+"MainWindow",
+"Packaging: %1…",
+false
+],
+[
+"MainWindow",
+"AppImage written to %1",
+false
+],
+[
+"MainWindow",
+"Packaging failed (see the output).",
+false
+],
+[
+"MainWindow",
+"Upscales (or, at 100%, anti-aliases) the 3D picture; the HUD is never upscaled. FSR 3 and DLSS are plugins found in the game's plugins folder; DLSS needs an NVIDIA GPU.",
+false
+],
+[
+"MainWindow",
+"Off (3D drawn at the output resolution)",
+false
+],
+[
+"MainWindow",
+"100% (DLAA / native anti-aliasing)",
+false
+],
+[
+"MainWindow",
+"67% (quality)",
+false
+],
+[
+"MainWindow",
+"58% (balanced)",
+false
+],
+[
+"MainWindow",
+"50% (performance)",
+false
+],
+[
+"MainWindow",
+"33% (ultra performance)",
+false
+],
+[
+"MainWindow",
+"150% (supersampling)",
+false
+],
+[
+"MainWindow",
+"200% (supersampling)",
+false
+],
+[
+"MainWindow",
+"The size the 3D scene is drawn at, as pixels (from the native output resolution on the Play tab; the HUD stays at the output resolution). Smaller than the output resolution needs a temporal upscaler.",
+false
+],
+[
+"MainWindow",
+"Off: %1 (the output resolution)",
+false
+],
+[
+"MainWindow",
+"%1 (DLAA / native anti-aliasing)",
+false
+],
+[
+"MainWindow",
+"%1 (quality)",
+false
+],
+[
+"MainWindow",
+"%1 (balanced)",
+false
+],
+[
+"MainWindow",
+"%1 (performance)",
+false
+],
+[
+"MainWindow",
+"%1 (ultra performance)",
+false
+],
+[
+"MainWindow",
+"%1 (supersampling)",
+false
+],
+[
+"MainWindow",
+"Off",
+false
+],
+[
+"MainWindow",
+"Low",
+false
+],
+[
+"MainWindow",
+"Medium",
+false
+],
+[
+"MainWindow",
+"High",
+false
+],
+[
+"MainWindow",
+"Camera jitter (needed by temporal upscalers; they switch it on themselves)",
+false
+],
+[
+"MainWindow",
+"Generated frames between the game's own 60 per second: 2x = 120 fps, 3x = 180 fps, 4x = 240 fps (the built-in generator; FSR 3 makes 2x). The HUD is drawn over every generated frame, so it never smears. Needs an upscaler on, and a display at least that fast (180/240 Hz) for 3x/4x.",
+false
+],
+[
+"MainWindow",
+"HDR10 output (needs the display in HDR mode)",
+false
+],
+[
+"MainWindow",
+"100 nits",
+false
+],
+[
+"MainWindow",
+"150 nits",
+false
+],
+[
+"MainWindow",
+"203 nits (standard)",
+false
+],
+[
+"MainWindow",
+"250 nits",
+false
+],
+[
+"MainWindow",
+"300 nits",
+false
+],
+[
+"MainWindow",
+"400 nits",
+false
+],
+[
+"MainWindow",
+"600 nits",
+false
+],
+[
+"MainWindow",
+"800 nits",
+false
+],
+[
+"MainWindow",
+"1000 nits",
+false
+],
+[
+"MainWindow",
+"1500 nits",
+false
+],
+[
+"MainWindow",
+"Mailbox",
+false
+],
+[
+"MainWindow",
+"FIFO (vsync)",
+false
+],
+[
+"MainWindow",
+"Immediate",
+false
+],
+[
+"MainWindow",
+"Show an FPS counter",
+false
+],
+[
+"MainWindow",
+"Upscaler:",
+false
+],
+[
+"MainWindow",
+"Set up NVIDIA DLSS...",
+false
+],
+[
+"MainWindow",
+"For NVIDIA GPUs. Downloads NVIDIA's DLSS SDK to this PC and builds a small plugin here, because NVIDIA's files cannot be shipped with the game. Needs a C++ compiler and the Vulkan headers.",
+false
+],
+[
+"MainWindow",
+"3D render scale:",
+false
+],
+[
+"MainWindow",
+"Sharpening:",
+false
+],
+[
+"MainWindow",
+"Frame generation:",
+false
+],
+[
+"MainWindow",
+"HDR paper white:",
+false
+],
+[
+"MainWindow",
+"HDR peak brightness:",
+false
+],
+[
+"MainWindow",
+"Present mode:",
+false
+],
+[
+"MainWindow",
+"These are the same settings as the in-game menu (F10, or both stick buttons on a controller) and they are shared: a change in game is saved here, and the values below are what the game starts with. They only apply to the Native Vulkan renderer, and are locked while the game runs.",
+false
+],
+[
+"MainWindow",
+"NVIDIA DLSS",
+false
+],
+[
+"MainWindow",
+"The DLSS plugin source is not part of this install.",
+false
+],
+[
+"MainWindow",
+"Set up NVIDIA DLSS",
+false
+],
+[
+"MainWindow",
+"This downloads NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS) to this PC, builds a small plugin with your C++ compiler and installs it in:\n%1\n\nNVIDIA's files stay on this PC; they are never part of the game's download. It works on NVIDIA GPUs with a current driver. Continue?",
+false
+],
+[
+"MainWindow",
+"\nFinished.",
+false
+],
+[
+"MainWindow",
+"\nFailed (exit code %1). Fix what is listed above and try again.",
+false
+],
+[
+"MainWindow",
+"Could not start the setup script (is bash installed?).",
+false
+],
+[
+"MainWindow",
+"FSR 1 (spatial)",
+false
+],
+[
+"MainWindow",
+"FSR 3.1 (temporal)",
+false
+],
+[
+"MainWindow",
+"Built-in 2x (120 fps)",
+false
+],
+[
+"MainWindow",
+"Built-in 3x (180 fps)",
+false
+],
+[
+"MainWindow",
+"Built-in 4x (240 fps)",
+false
+],
+[
+"MainWindow",
+"FSR 3 frame generation (2x)",
+false
+],
+[
+"MainWindow",
+"Mods for the game. Standard Mario Kart 8 Deluxe data mods work: a folder or zip with a romfs (and exefs) folder, in the usual layouts (plain, Atmosphere's atmosphere/contents/..., or yuzu's load/...). Their files are layered over the game's own. Code patches (exefs, IPS) cannot be applied to this recompiled build and are marked. Everything is kept inside the game folder.",
+false
+],
+[
+"MainWindow",
+"Convert CTGP DX zip…",
+false
+],
+[
+"MainWindow",
+"Add mod folder…",
+false
+],
+[
+"MainWindow",
+"Add mod zip…",
+false
+],
+[
+"MainWindow",
+"Disable",
+false
+],
+[
+"MainWindow",
+"Remove",
+false
+],
+[
+"MainWindow",
+"About this conversion",
+false
+],
+[
+"MainWindow",
+"Select a mod folder (or a folder of mods)",
+false
+],
+[
+"MainWindow",
+"Select mod zips",
+false
+],
+[
+"MainWindow",
+"Zip files (*.zip)",
+false
+],
+[
+"MainWindow",
+"CTGP DX",
+false
+],
+[
+"MainWindow",
+"Remove mod",
+false
+],
+[
+"MainWindow",
+"Delete %1 from the game folder?",
+false
+],
+[
+"MainWindow",
+"Import",
+false
+],
+[
+"MainWindow",
+"Nothing was imported.",
+false
+],
+[
+"MainWindow",
+"CTGP DX  (not imported)",
+false
+],
+[
+"MainWindow",
+"CTGP DX  (off)",
+false
+],
+[
+"MainWindow",
+"  [has code patches]",
+false
+],
+[
+"MainWindow",
+"CTGP DX is not added yet. Choose your own CTGP Deluxe zip (the release for Mario Kart 8 Deluxe, the one with an atmosphere/contents folder) and its 64 tracks are added as extra cups with their own names, pictures and music. None of the game's courses are changed. Pick a cup in the in-game menu (F10, \"Extra cup\") before starting a Grand Prix. The pack's code cannot run in this recompiled build; see \"About this conversion\".",
+false
+],
+[
+"MainWindow",
+"CTGP DX: added, enabled. 16 extra cups (F10 menu, \"Extra cup\"); the game's own courses are untouched.",
+false
+],
+[
+"MainWindow",
+"CTGP DX: added, turned off (the game plays normally).",
+false
+],
+[
+"MainWindow",
+"%1: %2, %3 files (%4 MB).",
+false
+],
+[
+"MainWindow",
+"enabled",
+false
+],
+[
+"MainWindow",
+"disabled",
+false
+],
+[
+"MainWindow",
+"Data (romfs): applied over the game's files.",
+false
+],
+[
+"MainWindow",
+"No romfs data.",
+false
+],
+[
+"MainWindow",
+"Code patches (exefs): this recompiled build cannot apply them, so they are ignored.",
+false
+],
+[
+"MainWindow",
+"Enable",
+false
+],
+[
+"MainWindow",
+"Shows why the pack's code cannot be recompiled into this build yet.",
+false
+],
+[
+"MainWindow",
+"CTGP DX's cups only work with every other mod turned off.\n\nTurn off these mods?\n\n%1",
+false
+],
+[
+"MainWindow",
+"CTGP DX's cups only work with every other mod turned off.\n\nTurn CTGP DX off and keep your other mods?",
+false
+],
+[
+"MainWindow",
+"Select the CTGP DX zip",
+false
+],
+[
+"MainWindow",
+"Add CTGP DX",
+false
+],
+[
+"MainWindow",
+"This adds CTGP DX's 64 tracks as extra cups. None of the game's own courses are changed or replaced.\n\n%1\n\nIt takes a few minutes and about 5 GB. Continue?",
+false
+],
+[
+"MiiEditor",
+"<b>Experimental.</b> Keep a copy of your Miis folder before saving (Open Miis folder). Miis you make here show up in the game's character select (Mii racer). Values are the game's own numbers (the same ones the console's Mii Maker uses); the picture shows the face as you change them. Close the game before saving.",
+false
+],
+[
+"MiiEditor",
+"New (male)",
+false
+],
+[
+"MiiEditor",
+"New (female)",
+false
+],
+[
+"MiiEditor",
+"Duplicate",
+false
+],
+[
+"MiiEditor",
+"Delete",
+false
+],
+[
+"MiiEditor",
+"Up",
+false
+],
+[
+"MiiEditor",
+"Down",
+false
+],
+[
+"MiiEditor",
+"Name",
+false
+],
+[
+"MiiEditor",
+"Male",
+false
+],
+[
+"MiiEditor",
+"Female",
+false
+],
+[
+"MiiEditor",
+"Gender",
+false
+],
+[
+"MiiEditor",
+"Favourite colour",
+false
+],
+[
+"MiiEditor",
+"0 to %1",
+false
+],
+[
+"MiiEditor",
+"Open Miis folder",
+false
+],
+[
+"MiiEditor",
+"Save Miis",
+false
+],
+[
+"MiiEditor",
+"Undo changes",
+false
+],
+[
+"MiiEditor",
+"New Mii",
+false
+],
+[
+"MiiEditor",
+"Miis",
+false
+],
+[
+"MiiEditor",
+"The database is full (%1 Miis).",
+false
+],
+[
+"MiiEditor",
+"Delete Mii",
+false
+],
+[
+"MiiEditor",
+"Delete \"%1\"? Races and records that used this Mii will show a default Mii instead.",
+false
+],
+[
+"MiiEditor",
+"%n Mii(s) in %1",
+true
+],
+[
+"MiiEditor",
+"Could not read %1 (%2). Saving writes a new database.",
+false
+],
+[
+"MiiEditor",
+"No Miis yet. They will be saved to %1.",
+false
+],
+[
+"MiiEditor",
+"%1 (special)",
+false
+],
+[
+"MiiEditor",
+"Miis need your console's firmware.\nAdd it on the Setup page.",
+false
+],
+[
+"MiiEditor",
+"No preview: the Mii face data could not be read from the firmware.",
+false
+],
+[
+"MiiEditor",
+"Reading the Mii face data from your firmware...",
+false
+],
+[
+"MiiEditor",
+"Unsaved changes.",
+false
+],
+[
+"MiiEditor",
+"\"%1\" is not valid (%2); nothing was saved.",
+false
+],
+[
+"MiiEditor",
+"Saved %n Mii(s) to %1. They appear in the game the next time it starts.",
+true
+],
+[
+"MiiEditor",
+"Miis need your console's firmware (Setup page). Without it the game has no Mii racers either.",
+false
+],
+[
+"MiiEditor",
+"The game is running: Miis can be edited after it closes.",
+false
+],
+[
+"PressDialog",
+"Change button",
+false
+],
+[
+"PressDialog",
+"Cancel",
+false
+],
+[
+"SetupPage",
+"Pick your own game files. Nothing leaves your PC: the game is built here from them, in a few minutes, and stays on this PC.",
+false
+],
+[
+"SetupPage",
+"Game files (NSP) with keys and firmware",
+false
+],
+[
+"SetupPage",
+"Decrypted files (no keys or firmware)",
+false
+],
+[
+"SetupPage",
+"Game code",
+false
+],
+[
+"SetupPage",
+"ExeFS folder: main, main.npdm, rtld, sdk, subsdk0 (update 3.0.4 or 4.0.1 applied)",
+false
+],
+[
+"SetupPage",
+"Select the ExeFS folder",
+false
+],
+[
+"SetupPage",
+"Game data",
+false
+],
+[
+"SetupPage",
+"RomFS folder (the game's files), or a romfs.bin image",
+false
+],
+[
+"SetupPage",
+"Select the RomFS folder (cancel to pick a romfs.bin instead)",
+false
+],
+[
+"SetupPage",
+"Select the RomFS image",
+false
+],
+[
+"SetupPage",
+"RomFS images (*.bin *.romfs);;All files (*)",
+false
+],
+[
+"SetupPage",
+"Keys (optional)",
+false
+],
+[
+"SetupPage",
+"prod.keys, only to read the firmware",
+false
+],
+[
+"SetupPage",
+"Select prod.keys",
+false
+],
+[
+"SetupPage",
+"Key files (*.keys)",
+false
+],
+[
+"SetupPage",
+"Firmware (optional)",
+false
+],
+[
+"SetupPage",
+"Folder of firmware files, or a .zip: gives the game its Mii data",
+false
+],
+[
+"SetupPage",
+"Select the firmware folder (cancel to pick a zip instead)",
+false
+],
+[
+"SetupPage",
+"Select the firmware zip",
+false
+],
+[
+"SetupPage",
+"Zip files (*.zip)",
+false
+],
+[
+"SetupPage",
+"The code and data are used where they are (nothing is copied or moved), so keep them there. DLC is not available in this mode. Keys and firmware are optional: without them the game runs, but Miis have no faces or bodies (Mii racers, the Mii screens and the Mii editor need the firmware).",
+false
+],
+[
+"SetupPage",
+"Base game",
+false
+],
+[
+"SetupPage",
+"Mario Kart 8 Deluxe (.nsp)",
+false
+],
+[
+"SetupPage",
+"Select the base game",
+false
+],
+[
+"SetupPage",
+"NSP files (*.nsp)",
+false
+],
+[
+"SetupPage",
+"Update",
+false
+],
+[
+"SetupPage",
+"The 3.0.4 or 4.0.1 update (.nsp)",
+false
+],
+[
+"SetupPage",
+"Select the 3.0.4 or 4.0.1 update",
+false
+],
+[
+"SetupPage",
+"DLC (optional)",
+false
+],
+[
+"SetupPage",
+"Booster Course Pass and other add-ons (.nsp)",
+false
+],
+[
+"SetupPage",
+"Keys",
+false
+],
+[
+"SetupPage",
+"prod.keys from your own console",
+false
+],
+[
+"SetupPage",
+"Firmware",
+false
+],
+[
+"SetupPage",
+"Folder of firmware files, or a .zip",
+false
+],
+[
+"SetupPage",
+"60 fps split-screen in 3-4 player races (the game's own is 30 fps per player). Needs a fast CPU: when the PC can't keep 60, the race slows down. Changing it needs Rebuild game, which only rebuilds the part that changes.",
+false
+],
+[
+"SetupPage",
+"Built into the game when it is compiled (no JIT): every player's view is drawn every frame.",
+false
+],
+[
+"SetupPage",
+"Build game",
+false
+],
+[
+"SetupPage",
+"Cancel",
+false
+],
+[
+"SetupPage",
+"Play",
+false
+],
+[
+"SetupPage",
+"Browse…",
+false
+],
+[
+"SetupPage",
+"Select DLC (.nsp)",
+false
+],
+[
+"SetupPage",
+"Give the keys too: the firmware cannot be read without them.",
+false
+],
+[
+"SetupPage",
+"Give the firmware too.",
+false
+],
+[
+"SetupPage",
+"The exporter is missing: unzip the whole download and run kartrecomp.exe from inside that folder (tools\\kartrecomp-export.exe must be beside it).",
+false
+],
+[
+"SetupPage",
+"Pick your keys first.",
+false
+],
+[
+"SetupPage",
+"Rebuild game",
+false
+],
+[
+"SetupPage",
+"Build",
+false
+],
+[
+"SetupPage",
+"Move your game files?",
+false
+],
+[
+"SetupPage",
+"To build the game, these files will be MOVED out of their current folder into the launcher's data folder (%1). They will no longer be where they are now. Keep your own backup if you want one.\n\n%2\n\nContinue?",
+false
+],
+[
+"SetupPage",
+"The game is built. Press Play.",
+false
+],
+[
+"SetupPage",
+"Build failed: %1",
+false
+],
+[
+"SetupPage",
+"Cancelling…",
+false
+],
+[
+"Updater",
+"Updates",
+false
+],
+[
+"Updater",
+"Could not check for updates: %1",
+false
+],
+[
+"Updater",
+"You have the latest version (%1).",
+false
+],
+[
+"Updater",
+"Update pulls the new source and rebuilds the launcher.",
+false
+],
+[
+"Updater",
+"Update downloads the new launcher and replaces this one.",
+false
+],
+[
+"Updater",
+"Update opens the release page.",
+false
+],
+[
+"Updater",
+"Update available",
+false
+],
+[
+"Updater",
+"Racing 8 DX Recomp %1 is available (you have %2).",
+false
+],
+[
+"Updater",
+"Changes to the game itself take effect after you rebuild the game from your files.",
+false
+],
+[
+"Updater",
+"Update",
+false
+],
+[
+"Updater",
+"Later",
+false
+],
+[
+"Updater",
+"git pull failed (see the output). Local changes in %1?",
+false
+],
+[
+"Updater",
+"The launcher did not build (see the output).",
+false
+],
+[
+"Updater",
+"Updated. Restart the launcher now?",
+false
+],
+[
+"Updater",
+"Rebuilding the launcher…",
+false
+],
+[
+"Updater",
+"Pulling the new version…",
+false
+],
+[
+"Updater",
+"Downloading the new launcher…",
+false
+],
+[
+"Updater",
+"The download failed: %1",
+false
+],
+[
+"Updater",
+"Could not replace %1.",
+false
+],
+[
+"MiiEditor",
+"Gender (0 male, 1 female)",
+false
+],
+[
+"MiiEditor",
+"Height",
+false
+],
+[
+"MiiEditor",
+"Build",
+false
+],
+[
+"MiiEditor",
+"Face shape",
+false
+],
+[
+"MiiEditor",
+"Skin colour",
+false
+],
+[
+"MiiEditor",
+"Wrinkles",
+false
+],
+[
+"MiiEditor",
+"Makeup",
+false
+],
+[
+"MiiEditor",
+"Hair style",
+false
+],
+[
+"MiiEditor",
+"Hair colour",
+false
+],
+[
+"MiiEditor",
+"Hair parted the other way",
+false
+],
+[
+"MiiEditor",
+"Eyes",
+false
+],
+[
+"MiiEditor",
+"Eye colour",
+false
+],
+[
+"MiiEditor",
+"Eye size",
+false
+],
+[
+"MiiEditor",
+"Eye stretch",
+false
+],
+[
+"MiiEditor",
+"Eye rotation",
+false
+],
+[
+"MiiEditor",
+"Eye spacing",
+false
+],
+[
+"MiiEditor",
+"Eye height",
+false
+],
+[
+"MiiEditor",
+"Eyebrows",
+false
+],
+[
+"MiiEditor",
+"Eyebrow colour",
+false
+],
+[
+"MiiEditor",
+"Eyebrow size",
+false
+],
+[
+"MiiEditor",
+"Eyebrow stretch",
+false
+],
+[
+"MiiEditor",
+"Eyebrow rotation",
+false
+],
+[
+"MiiEditor",
+"Eyebrow spacing",
+false
+],
+[
+"MiiEditor",
+"Eyebrow height",
+false
+],
+[
+"MiiEditor",
+"Nose",
+false
+],
+[
+"MiiEditor",
+"Nose size",
+false
+],
+[
+"MiiEditor",
+"Nose height",
+false
+],
+[
+"MiiEditor",
+"Mouth",
+false
+],
+[
+"MiiEditor",
+"Mouth colour",
+false
+],
+[
+"MiiEditor",
+"Mouth size",
+false
+],
+[
+"MiiEditor",
+"Mouth stretch",
+false
+],
+[
+"MiiEditor",
+"Mouth height",
+false
+],
+[
+"MiiEditor",
+"Beard",
+false
+],
+[
+"MiiEditor",
+"Beard colour",
+false
+],
+[
+"MiiEditor",
+"Mustache",
+false
+],
+[
+"MiiEditor",
+"Mustache size",
+false
+],
+[
+"MiiEditor",
+"Mustache height",
+false
+],
+[
+"MiiEditor",
+"Glasses",
+false
+],
+[
+"MiiEditor",
+"Glasses colour",
+false
+],
+[
+"MiiEditor",
+"Glasses size",
+false
+],
+[
+"MiiEditor",
+"Glasses height",
+false
+],
+[
+"MiiEditor",
+"Mole",
+false
+],
+[
+"MiiEditor",
+"Mole size",
+false
+],
+[
+"MiiEditor",
+"Mole across",
+false
+],
+[
+"MiiEditor",
+"Mole height",
+false
+],
+[
+"MiiEditor",
+"Body",
+false
+],
+[
+"MiiEditor",
+"Face",
+false
+],
+[
+"MiiEditor",
+"Hair",
+false
+],
+[
+"MiiEditor",
+"Facial hair",
+false
+],
+[
+"MiiEditor",
+"Red",
+false
+],
+[
+"MiiEditor",
+"Orange",
+false
+],
+[
+"MiiEditor",
+"Yellow",
+false
+],
+[
+"MiiEditor",
+"Light green",
+false
+],
+[
+"MiiEditor",
+"Green",
+false
+],
+[
+"MiiEditor",
+"Blue",
+false
+],
+[
+"MiiEditor",
+"Light blue",
+false
+],
+[
+"MiiEditor",
+"Pink",
+false
+],
+[
+"MiiEditor",
+"Purple",
+false
+],
+[
+"MiiEditor",
+"Brown",
+false
+],
+[
+"MiiEditor",
+"White",
+false
+],
+[
+"MiiEditor",
+"Black",
+false
+],
+[
+"MainWindow",
+"Japanese",
+false
+],
+[
+"MainWindow",
+"English (US)",
+false
+],
+[
+"MainWindow",
+"French",
+false
+],
+[
+"MainWindow",
+"German",
+false
+],
+[
+"MainWindow",
+"Italian",
+false
+],
+[
+"MainWindow",
+"Spanish (Spain)",
+false
+],
+[
+"MainWindow",
+"Chinese",
+false
+],
+[
+"MainWindow",
+"Korean",
+false
+],
+[
+"MainWindow",
+"Dutch",
+false
+],
+[
+"MainWindow",
+"Portuguese",
+false
+],
+[
+"MainWindow",
+"Russian",
+false
+],
+[
+"MainWindow",
+"Chinese (Taiwan, traditional)",
+false
+],
+[
+"MainWindow",
+"English (UK)",
+false
+],
+[
+"MainWindow",
+"French (Canada)",
+false
+],
+[
+"MainWindow",
+"Spanish (Latin America)",
+false
+],
+[
+"MainWindow",
+"Chinese (simplified)",
+false
+],
+[
+"MainWindow",
+"Chinese (traditional)",
+false
+],
+[
+"MainWindow",
+"Portuguese (Brazil)",
+false
+],
+[
+"MainWindow",
+"Polish",
+false
+],
+[
+"MainWindow",
+"Thai",
+false
+],
+[
+"MainWindow",
+"Stretch to window",
+false
+],
+[
+"MainWindow",
+"Off (immediate)",
+false
+],
+[
+"MainWindow",
+"FIFO relaxed",
+false
+],
+[
+"MainWindow",
+"Borderless window",
+false
+],
+[
+"MainWindow",
+"Exclusive",
+false
+],
+[
+"SetupPage",
+"Automatic (system language)",
+false
+],
+[
+"SetupPage",
+"The language of this launcher. The game's own language is the Console language on the Play tab.",
+false
+],
+[
+"SetupPage",
+"Launcher language",
+false
+],
+[
+"SetupPage",
+"The new language is used when the launcher starts again. Restart it now?",
+false
+],
+[
+"SetupPage",
+"Launcher language:",
+false
+],
+[
+"Messages",
+"cannot write %1",
+false
+],
+[
+"Messages",
+"cannot start %1: %2",
+false
+],
+[
+"Messages",
+"cannot start %1",
+false
+],
+[
+"Messages",
+"The compiler was stopped, most likely because the PC ran out of memory. Close other programs and press Build again: it resumes where it stopped.",
+false
+],
+[
+"Messages",
+"Out of disk space. Free some space and press Build again: it resumes where it stopped.",
+false
+],
+[
+"Messages",
+"cannot read the hot block list %1",
+false
+],
+[
+"Messages",
+"%1 holds no exported modules",
+false
+],
+[
+"Messages",
+"compiling %1 failed: %2",
+false
+],
+[
+"Messages",
+"linking %1 failed: %2",
+false
+],
+[
+"Messages",
+"linked %1",
+false
+],
+[
+"Messages",
+"linking was interrupted",
+false
+],
+[
+"Messages",
+"This zip has no CTGP DX tracks (Course/CT_xx)",
+false
+],
+[
+"Messages",
+"The pack's English message file is unreadable",
+false
+],
+[
+"Messages",
+"Cannot read the game's English message file",
+false
+],
+[
+"Messages",
+"Cannot read the game's message file for %1",
+false
+],
+[
+"Messages",
+"The pack's message file for %1 is unreadable",
+false
+],
+[
+"Messages",
+"Cannot read message tables for %1",
+false
+],
+[
+"Messages",
+"Cannot write the message files",
+false
+],
+[
+"Messages",
+"Cannot write the cup list",
+false
+],
+[
+"Messages",
+"The game engine is missing (%1). Reinstall the launcher.",
+false
+],
+[
+"Messages",
+"The game has not been built yet: use the Setup page.",
+false
+],
+[
+"Messages",
+"No game folder selected.",
+false
+],
+[
+"Messages",
+"Game executable (build it from your own dump first): ",
+false
+],
+[
+"Messages",
+"Base game: ",
+false
+],
+[
+"Messages",
+"Update 3.0.4: ",
+false
+],
+[
+"Messages",
+"Your keys (prod.keys): ",
+false
+],
+[
+"Messages",
+"prod.keys could not be read.",
+false
+],
+[
+"Messages",
+"This prod.keys has no header_key; dump it again from your own console.",
+false
+],
+[
+"Messages",
+"This prod.keys has no master_key_XX entries; dump it again from your own console.",
+false
+],
+[
+"Messages",
+"This prod.keys is missing the entry %1; dump it again from your own console.",
+false
+],
+[
+"Messages",
+"(a key-derivation source)",
+false
+],
+[
+"Messages",
+"Start the game once so it creates its config, then try again.",
+false
+],
+[
+"Messages",
+"Could not write the game's config.",
+false
+],
+[
+"Messages",
+"This zip has no content for Mario Kart 8 Deluxe (expected atmosphere/contents/%1/...).",
+false
+],
+[
+"Messages",
+"Could not remove every file",
+false
+],
+[
+"Messages",
+"No romfs or exefs folder found in %1.",
+false
+],
+[
+"Messages",
+"Skipped %1: it only holds code patches, which this recompiled build cannot apply.",
+false
+],
+[
+"Messages",
+"Could not copy %1",
+false
+],
+[
+"Messages",
+"The zip has no romfs or exefs folder.",
+false
+],
+[
+"Messages",
+"Skipped: the zip only holds code patches, which this recompiled build cannot apply.",
+false
+],
+[
+"Messages",
+"The menu merge data (%1) is missing.",
+false
+],
+[
+"Messages",
+"The %1 is missing (%2). Reinstall the launcher: unzip the whole download and run kartrecomp.exe from inside that folder, with its tools, engine and toolchain folders beside it.",
+false
+],
+[
+"Messages",
+"not found next to %1",
+false
+],
+[
+"Messages",
+"%1 was not found.",
+false
+],
+[
+"Messages",
+"Could not copy %1 to %2 (is there enough free space?).",
+false
+],
+[
+"Messages",
+"Could not copy the firmware file %1.",
+false
+],
+[
+"Messages",
+"The firmware folder holds no .nca files.",
+false
+],
+[
+"Messages",
+"Cannot open the firmware zip: %1",
+false
+],
+[
+"Messages",
+"Cannot unpack the firmware: %1",
+false
+],
+[
+"Messages",
+"The firmware zip holds no .nca files.",
+false
+],
+[
+"Messages",
+"Cannot write %1.",
+false
+],
+[
+"Messages",
+"Checking your files",
+false
+],
+[
+"Messages",
+"Not enough free memory: close other programs (the build needs at least 3 GB free) and try again.",
+false
+],
+[
+"Messages",
+"Not enough free disk space in %1: the build needs about 7 GB there.",
+false
+],
+[
+"Messages",
+"Not enough free disk space in %1: the game needs about 2 GB there.",
+false
+],
+[
+"Messages",
+"Installing your files",
+false
+],
+[
+"Messages",
+"Reading the game",
+false
+],
+[
+"Messages",
+"Cannot start the exporter (%1).",
+false
+],
+[
+"Messages",
+"Reading the game failed: %1",
+false
+],
+[
+"Messages",
+"exit code %1",
+false
+],
+[
+"Messages",
+"Compiling %1 of %2: %3",
+false
+],
+[
+"Messages",
+"Cannot write the code patch list into %1.",
+false
+],
+[
+"Messages",
+"Testing the game",
+false
+],
+[
+"Messages",
+"The game is built",
+false
+],
+[
+"Messages",
+"Cannot read this file: %1.",
+false
+],
+[
+"Messages",
+"This is not the Mario Kart 8 Deluxe base game (title id %1, expected %2).",
+false
+],
+[
+"Messages",
+"This is not the Mario Kart 8 Deluxe update (title id %1, expected %2).",
+false
+],
+[
+"Messages",
+"This is update version %1; only updates 3.0.4 (version %2) and 4.0.1 (version %3) are supported.",
+false
+],
+[
+"Messages",
+"The firmware was not found.",
+false
+],
+[
+"Messages",
+"The firmware must be a folder of .nca files or a .zip.",
+false
+],
+[
+"Messages",
+"This folder holds no firmware (.nca files).",
+false
+],
+[
+"Messages",
+"%1 is not an .nsp file.",
+false
+],
+[
+"Messages",
+"The game code folder was not found.",
+false
+],
+[
+"Messages",
+"This folder has no file named %1: pick the ExeFS folder (main, main.npdm, rtld, sdk, subsdk0).",
+false
+],
+[
+"Messages",
+"The file main is not decrypted game code (it does not start with NSO0).",
+false
+],
+[
+"Messages",
+"This is not the code of update 3.0.4 or 4.0.1 (build id %1). Dump the game with the update applied.",
+false
+],
+[
+"Messages",
+"The game data was not found.",
+false
+],
+[
+"Messages",
+"This file is too small to be the game's RomFS image.",
+false
+],
+[
+"Messages",
+"This folder is empty.",
+false
+],
+[
+"Messages",
+"Give both keys and firmware, or neither.",
+false
+],
+[
+"Messages",
+"%1 has an unreadable message file for %2",
+false
+],
+[
+"Messages",
+"Cannot write %1",
+false
+],
+[
+"Messages",
+"Could not move %1 to %2 (is there enough free space?).",
+false
+],
+[
+"Messages",
+"Cannot start the game engine (%1).",
+false
+],
+[
+"Messages",
+"\n\nThis crash comes from keys older than the firmware: use prod.keys from the same firmware version or newer (or an older firmware that matches your keys) and build again.",
+false
+],
+[
+"Messages",
+"The game stopped during its test boot: %1%2",
+false
+],
+[
+"Messages",
+"no message (exit %1)",
+false
+],
+[
+"Messages",
+"The game's test boot lost a thread: some code was not recompiled.",
+false
+],
+[
+"Messages",
+"The build is not fully static (%1 transitions to a JIT, which this project never allows).",
+false
+],
+[
+"Messages",
+"The game ran but never presented frames in %1 s of the test boot: it is probably stuck (check the firmware and keys).",
+false
+],
+[
+"Messages",
+"The game did not reach its main loop within %1 s of the test boot.",
+false
+],
+[
+"Messages",
+"Cannot open %1",
+false
+],
+[
+"Messages",
+"Not a zip file",
+false
+],
+[
+"Messages",
+"Read error",
+false
+],
+[
+"Messages",
+"Not a zip file (no end record)",
+false
+],
+[
+"Messages",
+"Corrupt zip64 end record",
+false
+],
+[
+"Messages",
+"Corrupt central directory",
+false
+],
+[
+"Messages",
+"Corrupt central directory entry",
+false
+],
+[
+"Messages",
+"%1: unsupported compression method %2",
+false
+],
+[
+"Messages",
+"%1: bad local header",
+false
+],
+[
+"Messages",
+"zlib init failed",
+false
+],
+[
+"Messages",
+"%1: truncated",
+false
+],
+[
+"Messages",
+"Write error on %1",
+false
+],
+[
+"Messages",
+"%1: corrupt data",
+false
+],
+[
+"Messages",
+"%1: checksum mismatch",
+false
+]
+]

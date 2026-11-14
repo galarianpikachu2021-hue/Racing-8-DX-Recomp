@@ -77,8 +77,8 @@ bool BuilderPaths::complete(QString* missing) const {
     const std::pair<const char*, QString> parts[] = {{"exporter", exporter}, {"engine", engine}, {"toolchain", toolchain}, {"hot block list", hotList}};
     for (const auto& [name, path] : parts) {
         if (path.isEmpty() || !QFileInfo::exists(path)) {
-            if (missing) *missing = QStringLiteral("The %1 is missing (%2). Reinstall the launcher: unzip the whole download and run kartrecomp.exe from inside that folder, with its tools, engine and toolchain folders beside it.")
-                                        .arg(name, path.isEmpty() ? QStringLiteral("not found next to %1").arg(QCoreApplication::applicationDirPath()) : path);
+            if (missing) *missing = QCoreApplication::translate("Messages", "The %1 is missing (%2). Reinstall the launcher: unzip the whole download and run kartrecomp.exe from inside that folder, with its tools, engine and toolchain folders beside it.")
+                                        .arg(name, path.isEmpty() ? QCoreApplication::translate("Messages", "not found next to %1").arg(QCoreApplication::applicationDirPath()) : path);
             return false;
         }
     }
@@ -92,7 +92,7 @@ bool PlaceFile(const QString& from, const QString& to, bool move, QString* error
     const QFileInfo src(from);
     if (move && !src.isFile() && QFileInfo(to).isFile()) return true; // moved by an earlier build; the installed copy is the game file
     if (!src.isFile()) {
-        *error = QStringLiteral("%1 was not found.").arg(from);
+        *error = QCoreApplication::translate("Messages", "%1 was not found.").arg(from);
         return false;
     }
     if (QFileInfo(to).exists() && QFileInfo(to).canonicalFilePath() == src.canonicalFilePath()) return true; // already in place
@@ -104,7 +104,8 @@ bool PlaceFile(const QString& from, const QString& to, bool move, QString* error
         return true;
     }
     QFile::remove(to); // never leave half a file behind
-    *error = QStringLiteral("Could not %1 %2 to %3 (is there enough free space?).").arg(move ? QStringLiteral("move") : QStringLiteral("copy"), from, to);
+    *error = (move ? QCoreApplication::translate("Messages", "Could not move %1 to %2 (is there enough free space?).")
+                    : QCoreApplication::translate("Messages", "Could not copy %1 to %2 (is there enough free space?).")).arg(from, to);
     return false;
 }
 } // namespace
@@ -147,20 +148,20 @@ QString InstallFirmware(const QString& firmware, const DataLayout& l) {
         int n = 0;
         while (it.hasNext()) {
             it.next();
-            if (!QFile::copy(it.filePath(), l.firmwareDir() + "/" + it.fileName())) return QStringLiteral("Could not copy the firmware file %1.").arg(it.fileName());
+            if (!QFile::copy(it.filePath(), l.firmwareDir() + "/" + it.fileName())) return QCoreApplication::translate("Messages", "Could not copy the firmware file %1.").arg(it.fileName());
             ++n;
         }
-        if (n == 0) return QStringLiteral("The firmware folder holds no .nca files.");
+        if (n == 0) return QCoreApplication::translate("Messages", "The firmware folder holds no .nca files.");
     } else {
         ZipArchive zip;
-        if (!zip.open(in.firmware, &error)) return QStringLiteral("Cannot open the firmware zip: %1").arg(error);
+        if (!zip.open(in.firmware, &error)) return QCoreApplication::translate("Messages", "Cannot open the firmware zip: %1").arg(error);
         int n = 0;
         for (const ZipEntry& e : zip.entries()) {
             if (e.is_directory() || !e.name.endsWith(".nca", Qt::CaseInsensitive)) continue;
-            if (!zip.extract(e, l.firmwareDir() + "/" + QFileInfo(e.name).fileName(), &error)) return QStringLiteral("Cannot unpack the firmware: %1").arg(error);
+            if (!zip.extract(e, l.firmwareDir() + "/" + QFileInfo(e.name).fileName(), &error)) return QCoreApplication::translate("Messages", "Cannot unpack the firmware: %1").arg(error);
             ++n;
         }
-        if (n == 0) return QStringLiteral("The firmware zip holds no .nca files.");
+        if (n == 0) return QCoreApplication::translate("Messages", "The firmware zip holds no .nca files.");
     }
     return {};
 }
@@ -171,7 +172,7 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
         // Used in place: the data is about 12 GB of files the user keeps where they are.
         QDir().mkpath(l.content());
         QFile f(l.decryptedFile());
-        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return QStringLiteral("Cannot write %1.").arg(l.decryptedFile());
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return QCoreApplication::translate("Messages", "Cannot write %1.").arg(l.decryptedFile());
         f.write("exefs=" + QFileInfo(in.exefs).absoluteFilePath().toUtf8() + "\nromfs=" + QFileInfo(in.romfs).absoluteFilePath().toUtf8() + "\n");
         f.close();
         // Optional in this mode: with keys and firmware the game has its Mii data.

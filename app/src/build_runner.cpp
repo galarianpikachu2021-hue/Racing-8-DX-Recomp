@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "build_runner.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QHash>
 #include <QDir>
@@ -93,7 +94,7 @@ bool BuildRunner::LinkModule(const QString& compiler, const QStringList& linkArg
     QDir().mkpath(QFileInfo(rspPath).absolutePath());
     QFile rsp(rspPath);
     if (!rsp.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        if (error) *error = QStringLiteral("cannot write %1").arg(rspPath);
+        if (error) *error = QCoreApplication::translate("Messages", "cannot write %1").arg(rspPath);
         return false;
     }
     for (const QString& o : objects) rsp.write("\"" + QString(o).replace('\\', '/').toUtf8() + "\"\n");
@@ -102,7 +103,7 @@ bool BuildRunner::LinkModule(const QString& compiler, const QStringList& linkArg
     DieWithParent(link);
     link.start(compiler, QStringList{"-shared"} + linkArgs + QStringList{"-o", out, "@" + rspPath} + libs + builtins);
     if (!link.waitForStarted()) {
-        if (error) *error = QStringLiteral("cannot start %1: %2").arg(compiler, link.errorString());
+        if (error) *error = QCoreApplication::translate("Messages", "cannot start %1: %2").arg(compiler, link.errorString());
         return false;
     }
     while (!link.waitForFinished(200)) {
@@ -191,7 +192,7 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
     DieWithParent(p);
     p.start(compiler, job.args + QStringList{"-c", job.source, "-o", job.object});
     if (!p.waitForStarted()) {
-        if (error) *error = QStringLiteral("cannot start %1").arg(compiler);
+        if (error) *error = QCoreApplication::translate("Messages", "cannot start %1").arg(compiler);
         return false;
     }
     while (!p.waitForFinished(200)) {
@@ -205,18 +206,18 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
     }
     if (p.exitStatus() != QProcess::NormalExit) {
         QFile::remove(job.object);
-        if (error) *error = QStringLiteral("The compiler was stopped, most likely because the PC ran out of memory. Close other programs and press Build again: it resumes where it stopped.");
+        if (error) *error = QCoreApplication::translate("Messages", "The compiler was stopped, most likely because the PC ran out of memory. Close other programs and press Build again: it resumes where it stopped.");
         return false;
     }
     if (p.exitCode() != 0 || !QFile::exists(job.object)) {
         const QString text = QString::fromLocal8Bit(p.readAllStandardError()).trimmed();
-        if (error) *error = text.contains(QStringLiteral("No space left")) ? QStringLiteral("Out of disk space. Free some space and press Build again: it resumes where it stopped.") : text;
+        if (error) *error = text.contains(QStringLiteral("No space left")) ? QCoreApplication::translate("Messages", "Out of disk space. Free some space and press Build again: it resumes where it stopped.") : text;
         QFile::remove(job.object);
         return false;
     }
     QFile marker(job.marker);
     if (!marker.open(QIODevice::WriteOnly)) {
-        if (error) *error = QStringLiteral("cannot write %1").arg(job.marker);
+        if (error) *error = QCoreApplication::translate("Messages", "cannot write %1").arg(job.marker);
         return false;
     }
     marker.write(job.key);
@@ -258,7 +259,7 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
     QSet<QByteArray> hot;
     if (!plan.hotList.isEmpty()) {
         QFile f(plan.hotList);
-        if (!f.open(QIODevice::ReadOnly)) return {false, QStringLiteral("cannot read the hot block list %1").arg(plan.hotList)};
+        if (!f.open(QIODevice::ReadOnly)) return {false, QCoreApplication::translate("Messages", "cannot read the hot block list %1").arg(plan.hotList)};
         hot = UnitSplit::ParseHotList(f.readAll());
     }
     static const QStringList kModuleDirs = {"rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4",
@@ -292,7 +293,7 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
             m.jobs += PlanCompileJobs(QDir(mdir).filePath("src"), work + "/obj-index", {index}, {index}, mdir);
         modules.append(std::move(m));
     }
-    if (modules.isEmpty()) return {false, QStringLiteral("%1 holds no exported modules").arg(plan.exportDir)};
+    if (modules.isEmpty()) return {false, QCoreApplication::translate("Messages", "%1 holds no exported modules").arg(plan.exportDir)};
 
     for (Module& m : modules)
         for (CompileJob& j : m.jobs) j.args = plan.compileArgs + j.args;
@@ -392,7 +393,7 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
             const bool ok = RunCompileJob(plan.compiler, job, &error, cancel);
             std::lock_guard<std::mutex> lock(mutex);
             if (!ok) {
-                if (failure.isEmpty()) failure = QStringLiteral("compiling %1 failed: %2").arg(QFileInfo(job.source).fileName(), error);
+                if (failure.isEmpty()) failure = QCoreApplication::translate("Messages", "compiling %1 failed: %2").arg(QFileInfo(job.source).fileName(), error);
                 return;
             }
             ++done;
@@ -422,16 +423,16 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
                                        QDir(plan.workDir).filePath(mp->name + ".link.rsp"), &error, cancel);
             std::lock_guard<std::mutex> lock(mutex);
             if (!ok) {
-                if (linkFailure.isEmpty()) linkFailure = QStringLiteral("linking %1 failed: %2").arg(out, error);
+                if (linkFailure.isEmpty()) linkFailure = QCoreApplication::translate("Messages", "linking %1 failed: %2").arg(out, error);
                 return;
             }
             ++linked;
-            if (progress) progress(total, total, QStringLiteral("linked %1").arg(QFileInfo(out).fileName()));
+            if (progress) progress(total, total, QCoreApplication::translate("Messages", "linked %1").arg(QFileInfo(out).fileName()));
         });
     }
     for (auto& t : linkers) t.join();
     if (cancel && cancel->load()) return {false, QStringLiteral("Cancelled.")};
     if (!linkFailure.isEmpty()) return {false, linkFailure};
-    if (linked != modules.size()) return {false, QStringLiteral("linking was interrupted")};
+    if (linked != modules.size()) return {false, QCoreApplication::translate("Messages", "linking was interrupted")};
     return {true, {}};
 }

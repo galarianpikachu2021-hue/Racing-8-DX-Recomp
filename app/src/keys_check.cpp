@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "keys_check.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QSet>
 
@@ -51,11 +52,11 @@ QString MissingKeyName(const QString& path) {
 QString KeyProblemText(KeyProblem p, const QString& name) {
     switch (p) {
     case KeyProblem::None: return {};
-    case KeyProblem::NoFile: return QStringLiteral("prod.keys could not be read.");
-    case KeyProblem::MissingHeaderKey: return QStringLiteral("This prod.keys has no header_key; dump it again from your own console.");
-    case KeyProblem::MissingMasterKey: return QStringLiteral("This prod.keys has no master_key_XX entries; dump it again from your own console.");
+    case KeyProblem::NoFile: return QCoreApplication::translate("Messages", "prod.keys could not be read.");
+    case KeyProblem::MissingHeaderKey: return QCoreApplication::translate("Messages", "This prod.keys has no header_key; dump it again from your own console.");
+    case KeyProblem::MissingMasterKey: return QCoreApplication::translate("Messages", "This prod.keys has no master_key_XX entries; dump it again from your own console.");
     case KeyProblem::MissingDerivationKey:
-        return QStringLiteral("This prod.keys is missing the entry %1; dump it again from your own console.").arg(name.isEmpty() ? QStringLiteral("(a key-derivation source)") : name);
+        return QCoreApplication::translate("Messages", "This prod.keys is missing the entry %1; dump it again from your own console.").arg(name.isEmpty() ? QCoreApplication::translate("Messages", "(a key-derivation source)") : name);
     }
     return {};
 }

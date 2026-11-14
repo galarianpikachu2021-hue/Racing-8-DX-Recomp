@@ -3,6 +3,7 @@
 #include "text_merge.h"
 #include "menu_merge.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 
@@ -58,7 +59,7 @@ QStringList ReadDisabled(const QString& root) {
 bool WriteDisabled(const QString& root, const QStringList& names, QString* error) {
     IniFile ini;
     if (!ini.load(ConfigPath(root))) {
-        if (error) *error = QStringLiteral("Start the game once so it creates its config, then try again.");
+        if (error) *error = QCoreApplication::translate("Messages", "Start the game once so it creates its config, then try again.");
         return false;
     }
     // The whole section is written back in order (entry by entry, each entry's keys together): keys appended at the end made the
@@ -91,7 +92,7 @@ bool WriteDisabled(const QString& root, const QStringList& names, QString* error
         }
     }
     if (!ini.save()) {
-        if (error) *error = QStringLiteral("Could not write the game's config.");
+        if (error) *error = QCoreApplication::translate("Messages", "Could not write the game's config.");
         return false;
     }
     return true;
@@ -134,7 +135,7 @@ PackInfo AnalyzeCtgpPack(const QString& zip_path) {
         }
     }
     if (info.romfs_files == 0 && info.exefs_files == 0) {
-        info.error = QStringLiteral("This zip has no content for Mario Kart 8 Deluxe (expected atmosphere/contents/%1/...).").arg(info.title_id);
+        info.error = QCoreApplication::translate("Messages", "This zip has no content for Mario Kart 8 Deluxe (expected atmosphere/contents/%1/...).").arg(info.title_id);
         return info;
     }
     if (npdm && npdm->size >= 16 && npdm->size < 65536) {
@@ -170,7 +171,7 @@ bool SetCtgpEnabled(const QString& root, bool enabled, QString* error) {
 bool RemoveCtgp(const QString& root, QString* error) {
     const bool ok = QDir(EnabledDir(root)).removeRecursively();
     SetDisabled(root, kCtgpName, false, nullptr);
-    if (!ok && error) *error = QStringLiteral("Could not remove every file");
+    if (!ok && error) *error = QCoreApplication::translate("Messages", "Could not remove every file");
     return ok;
 }
 
@@ -253,12 +254,12 @@ bool ImportModFolder(const QString& source, const QString& root, QString* error,
         if (!rel.isEmpty()) jobs.append({file, rel});
     }
     if (jobs.isEmpty()) {
-        if (error) *error = QStringLiteral("No romfs or exefs folder found in %1.").arg(source);
+        if (error) *error = QCoreApplication::translate("Messages", "No romfs or exefs folder found in %1.").arg(source);
         return false;
     }
     const bool has_data = std::any_of(jobs.begin(), jobs.end(), [](const Job& j) { return j.rel.startsWith(QLatin1String("romfs/")); });
     if (!has_data) {
-        if (error) *error = QStringLiteral("Skipped %1: it only holds code patches, which this recompiled build cannot apply.").arg(QFileInfo(source).fileName());
+        if (error) *error = QCoreApplication::translate("Messages", "Skipped %1: it only holds code patches, which this recompiled build cannot apply.").arg(QFileInfo(source).fileName());
         return false;
     }
     QDir().mkpath(TitleModsDir(root));
@@ -275,7 +276,7 @@ bool ImportModFolder(const QString& source, const QString& root, QString* error,
         QDir().mkpath(QFileInfo(to).absolutePath());
         if (!QFile::copy(job.from, to)) {
             QDir(target).removeRecursively();
-            if (error) *error = QStringLiteral("Could not copy %1").arg(job.from);
+            if (error) *error = QCoreApplication::translate("Messages", "Could not copy %1").arg(job.from);
             return false;
         }
         ++done;
@@ -294,11 +295,11 @@ bool ImportModZip(const QString& zip_path, const QString& root, QString* error, 
         if (!rel.isEmpty()) jobs.append({&e, rel});
     }
     if (jobs.isEmpty()) {
-        if (error) *error = QStringLiteral("The zip has no romfs or exefs folder.");
+        if (error) *error = QCoreApplication::translate("Messages", "The zip has no romfs or exefs folder.");
         return false;
     }
     if (std::none_of(jobs.begin(), jobs.end(), [](const Job& j) { return j.rel.startsWith(QLatin1String("romfs/")); })) {
-        if (error) *error = QStringLiteral("Skipped: the zip only holds code patches, which this recompiled build cannot apply.");
+        if (error) *error = QCoreApplication::translate("Messages", "Skipped: the zip only holds code patches, which this recompiled build cannot apply.");
         return false;
     }
     QDir().mkpath(TitleModsDir(root));
@@ -439,7 +440,7 @@ bool UpdateMenuMerge(const QString& root, const QString& vanilla_ui_dir, const Q
     QDir(out).removeRecursively();
     MenuMerge::Baseline base;
     if (!base.load(baseline)) {
-        if (error) *error = QStringLiteral("The menu merge data (%1) is missing.").arg(baseline);
+        if (error) *error = QCoreApplication::translate("Messages", "The menu merge data (%1) is missing.").arg(baseline);
         return false;
     }
     if (MenuMerge::Merge(EnabledModDirs(root), QDir(vanilla_ui_dir).filePath(QStringLiteral("UI/cmn")), base, out, error, report) < 0) {
@@ -458,7 +459,7 @@ bool SetModEnabled(const QString& root, const QString& name, bool enabled, QStri
 bool RemoveMod(const QString& root, const QString& name, QString* error) {
     const bool ok = QDir(QDir(TitleModsDir(root)).filePath(name)).removeRecursively();
     SetDisabled(root, name, false, nullptr);
-    if (!ok && error) *error = QStringLiteral("Could not remove every file");
+    if (!ok && error) *error = QCoreApplication::translate("Messages", "Could not remove every file");
     return ok;
 }
 

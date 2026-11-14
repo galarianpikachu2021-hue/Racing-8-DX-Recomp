@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QTimer>
 
+#include "launcher_language.h"
 #include "main_window.h"
 #include "mii_render.h"
 
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
         return renderer.Render(mii, w, h, a.contains(QStringLiteral("body=1"))).save(a[3]) ? 0 : 4;
     }
 
+    LauncherLanguage::Install();
     MainWindow window;
     // --nolauncher (or --play): start the built game straight away with the saved settings, without showing the launcher, and
     // quit when the game exits. For playing from a TV or Steam (issue #17); the in-game menu (F10, L3+R3) has the settings.

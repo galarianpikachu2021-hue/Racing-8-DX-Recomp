@@ -105,7 +105,8 @@ QWidget* scrolled(QWidget* page) {
 
 QComboBox* makeCombo(const QStringList& items) {
     auto* combo = new QComboBox;
-    combo->addItems(items);
+    // The lists are plain English in the source; their translations sit in the MainWindow context (app/i18n).
+    for (const QString& item : items) combo->addItem(QCoreApplication::translate("MainWindow", item.toUtf8().constData()));
     return combo;
 }
 

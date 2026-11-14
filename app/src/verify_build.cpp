@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "verify_build.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -74,7 +75,7 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     layout.addContentEnv(env);
     p.setProcessEnvironment(env);
     p.start(engine, QStringList{"--module-dir", layout.moduleDir()} + layout.contentArgs());
-    if (!p.waitForStarted(10000)) return {false, QStringLiteral("Cannot start the game engine (%1).").arg(engine)};
+    if (!p.waitForStarted(10000)) return {false, QCoreApplication::translate("Messages", "Cannot start the game engine (%1).").arg(engine)};
     const auto stop = [&p] {
         p.kill();
         p.waitForFinished(5000);
@@ -89,16 +90,16 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
             // (engines before v0.2.3; newer engines stop with exit code 6 and say so themselves).
             const bool fw_crash = err.contains(QLatin1String("0xc0000094"), Qt::CaseInsensitive) || err.contains(QLatin1String("SIGFPE")) ||
                                   (p.exitStatus() == QProcess::CrashExit && p.exitCode() == 8) || p.exitCode() == 136;
-            const QString hint = fw_crash ? QStringLiteral("\n\nThis crash comes from keys older than the firmware: use prod.keys from the same firmware version or newer (or an older firmware that matches your keys) and build again.")
+            const QString hint = fw_crash ? QCoreApplication::translate("Messages", "\n\nThis crash comes from keys older than the firmware: use prod.keys from the same firmware version or newer (or an older firmware that matches your keys) and build again.")
                                           : QString();
-            return {false, QStringLiteral("The game stopped during its test boot: %1%2").arg(err.isEmpty() ? QStringLiteral("no message (exit %1)").arg(p.exitCode()) : err, hint)};
+            return {false, QCoreApplication::translate("Messages", "The game stopped during its test boot: %1%2").arg(err.isEmpty() ? QCoreApplication::translate("Messages", "no message (exit %1)").arg(p.exitCode()) : err, hint)};
         }
         const Coverage c = ReadCoverage(coveragePath);
         if (!c.present) continue;
         if (c.jit > 0 || c.killed) {
             stop();
-            return {false, c.killed ? QStringLiteral("The game's test boot lost a thread: some code was not recompiled.")
-                                    : QStringLiteral("The build is not fully static (%1 transitions to a JIT, which this project never allows).").arg(c.jit)};
+            return {false, c.killed ? QCoreApplication::translate("Messages", "The game's test boot lost a thread: some code was not recompiled.")
+                                    : QCoreApplication::translate("Messages", "The build is not fully static (%1 transitions to a JIT, which this project never allows).").arg(c.jit)};
         }
         if (c.blocks >= kMainLoopBlocks && PresentingSeconds(layout.dataRoot + "/log/suyu_log.txt") >= kFrameSeconds) {
             stop();
@@ -108,6 +109,6 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     const Coverage last = ReadCoverage(coveragePath);
     stop();
     if (last.present && last.blocks >= kMainLoopBlocks)
-        return {false, QStringLiteral("The game ran but never presented frames in %1 s of the test boot: it is probably stuck (check the firmware and keys).").arg(timeoutSec)};
-    return {false, QStringLiteral("The game did not reach its main loop within %1 s of the test boot.").arg(timeoutSec)};
+        return {false, QCoreApplication::translate("Messages", "The game ran but never presented frames in %1 s of the test boot: it is probably stuck (check the firmware and keys).").arg(timeoutSec)};
+    return {false, QCoreApplication::translate("Messages", "The game did not reach its main loop within %1 s of the test boot.").arg(timeoutSec)};
 }

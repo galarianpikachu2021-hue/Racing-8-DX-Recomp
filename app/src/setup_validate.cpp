@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "setup_validate.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -12,21 +13,21 @@ QString Hex(quint64 id) { return QStringLiteral("%1").arg(id, 16, 16, QLatin1Cha
 } // namespace
 
 QString ValidateBase(const NspInfo& info) {
-    if (!info.error.isEmpty()) return QStringLiteral("Cannot read this file: %1.").arg(info.error);
+    if (!info.error.isEmpty()) return QCoreApplication::translate("Messages", "Cannot read this file: %1.").arg(info.error);
     if (info.titleId != kBaseTitleId)
-        return QStringLiteral("This is not the Mario Kart 8 Deluxe base game (title id %1, expected %2).").arg(Hex(info.titleId), Hex(kBaseTitleId));
+        return QCoreApplication::translate("Messages", "This is not the Mario Kart 8 Deluxe base game (title id %1, expected %2).").arg(Hex(info.titleId), Hex(kBaseTitleId));
     return {};
 }
 
 QString ValidateUpdate(const NspInfo& info) {
-    if (!info.error.isEmpty()) return QStringLiteral("Cannot read this file: %1.").arg(info.error);
+    if (!info.error.isEmpty()) return QCoreApplication::translate("Messages", "Cannot read this file: %1.").arg(info.error);
     if (info.titleId != kUpdateTitleId)
-        return QStringLiteral("This is not the Mario Kart 8 Deluxe update (title id %1, expected %2).").arg(Hex(info.titleId), Hex(kUpdateTitleId));
+        return QCoreApplication::translate("Messages", "This is not the Mario Kart 8 Deluxe update (title id %1, expected %2).").arg(Hex(info.titleId), Hex(kUpdateTitleId));
     if (!info.aarch64)
         return QStringLiteral("This update is a 32-bit build (3.0.3 or older; files named \"v4.0.0\" are often this one). Only updates 3.0.4 "
                               "and 4.0.1 can be recompiled.");
     if (UpdateName(info.version).isEmpty())
-        return QStringLiteral("This is update version %1; only updates 3.0.4 (version %2) and 4.0.1 (version %3) are supported.")
+        return QCoreApplication::translate("Messages", "This is update version %1; only updates 3.0.4 (version %2) and 4.0.1 (version %3) are supported.")
             .arg(info.version).arg(kSupportedUpdates[0].version).arg(kSupportedUpdates[1].version);
     return {};
 }
@@ -45,16 +46,16 @@ QString HotListFor(const QString& list304, const QString& updateName) {
 
 QString ValidateFirmware(const QString& path) {
     const QFileInfo fi(path);
-    if (!fi.exists()) return QStringLiteral("The firmware was not found.");
-    if (fi.isFile()) return path.endsWith(".zip", Qt::CaseInsensitive) ? QString() : QStringLiteral("The firmware must be a folder of .nca files or a .zip.");
-    if (QDir(path).entryList({"*.nca", "*.cnmt.nca"}, QDir::Files).isEmpty()) return QStringLiteral("This folder holds no firmware (.nca files).");
+    if (!fi.exists()) return QCoreApplication::translate("Messages", "The firmware was not found.");
+    if (fi.isFile()) return path.endsWith(".zip", Qt::CaseInsensitive) ? QString() : QCoreApplication::translate("Messages", "The firmware must be a folder of .nca files or a .zip.");
+    if (QDir(path).entryList({"*.nca", "*.cnmt.nca"}, QDir::Files).isEmpty()) return QCoreApplication::translate("Messages", "This folder holds no firmware (.nca files).");
     return {};
 }
 
 QString ValidateDlc(const QStringList& files) {
     for (const QString& f : files) {
         if (!f.endsWith(".nsp", Qt::CaseInsensitive) || !QFileInfo(f).isFile())
-            return QStringLiteral("%1 is not an .nsp file.").arg(QFileInfo(f).fileName());
+            return QCoreApplication::translate("Messages", "%1 is not an .nsp file.").arg(QFileInfo(f).fileName());
     }
     return {};
 }
@@ -78,22 +79,22 @@ QString DecryptedUpdateName(const QString& exefsDir) {
 }
 
 QString ValidateExefs(const QString& dir) {
-    if (!QFileInfo(dir).isDir()) return QStringLiteral("The game code folder was not found.");
+    if (!QFileInfo(dir).isDir()) return QCoreApplication::translate("Messages", "The game code folder was not found.");
     for (const char* name : {"main", "main.npdm", "rtld", "sdk"})
         if (!QFileInfo(QDir(dir).filePath(name)).isFile())
-            return QStringLiteral("This folder has no file named %1: pick the ExeFS folder (main, main.npdm, rtld, sdk, subsdk0).").arg(name);
+            return QCoreApplication::translate("Messages", "This folder has no file named %1: pick the ExeFS folder (main, main.npdm, rtld, sdk, subsdk0).").arg(name);
     const QString id = MainBuildId(dir);
-    if (id.isEmpty()) return QStringLiteral("The file main is not decrypted game code (it does not start with NSO0).");
+    if (id.isEmpty()) return QCoreApplication::translate("Messages", "The file main is not decrypted game code (it does not start with NSO0).");
     if (DecryptedUpdateName(dir).isEmpty())
-        return QStringLiteral("This is not the code of update 3.0.4 or 4.0.1 (build id %1). Dump the game with the update applied.").arg(id);
+        return QCoreApplication::translate("Messages", "This is not the code of update 3.0.4 or 4.0.1 (build id %1). Dump the game with the update applied.").arg(id);
     return {};
 }
 
 QString ValidateRomfs(const QString& path) {
     const QFileInfo fi(path);
-    if (!fi.exists()) return QStringLiteral("The game data was not found.");
-    if (fi.isFile()) return fi.size() > (1LL << 30) ? QString() : QStringLiteral("This file is too small to be the game's RomFS image.");
-    if (QDir(path).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty()) return QStringLiteral("This folder is empty.");
+    if (!fi.exists()) return QCoreApplication::translate("Messages", "The game data was not found.");
+    if (fi.isFile()) return fi.size() > (1LL << 30) ? QString() : QCoreApplication::translate("Messages", "This file is too small to be the game's RomFS image.");
+    if (QDir(path).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty()) return QCoreApplication::translate("Messages", "This folder is empty.");
     return {};
 }
 
@@ -102,7 +103,7 @@ QString ValidateInputs(const SetupInputs& in, const std::function<NspInfo(const 
         if (const QString why = ValidateExefs(in.exefs); !why.isEmpty()) return why;
         if (const QString why = ValidateRomfs(in.romfs); !why.isEmpty()) return why;
         // Keys and firmware are optional here, and only useful together (the firmware files are encrypted).
-        if (in.keys.isEmpty() != in.firmware.isEmpty()) return QStringLiteral("Give both keys and firmware, or neither.");
+        if (in.keys.isEmpty() != in.firmware.isEmpty()) return QCoreApplication::translate("Messages", "Give both keys and firmware, or neither.");
         if (in.keys.isEmpty()) return {};
         if (const auto p = CheckKeys(in.keys); p != KeyProblem::None) return KeyProblemText(p, MissingKeyName(in.keys));
         return ValidateFirmware(in.firmware);

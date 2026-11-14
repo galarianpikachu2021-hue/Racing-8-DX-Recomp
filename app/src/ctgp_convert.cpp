@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctgp_convert.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -302,7 +303,7 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
     for (auto it = names.constBegin(); it != names.constEnd(); ++it) {
         if (track_re.match(it.key()).hasMatch()) wanted << it.key();
     }
-    if (wanted.isEmpty()) return fail(QStringLiteral("This zip has no CTGP DX tracks (Course/CT_xx)"));
+    if (wanted.isEmpty()) return fail(QCoreApplication::translate("Messages", "This zip has no CTGP DX tracks (Course/CT_xx)"));
     wanted.sort();
     int done = 0;
     const int total = static_cast<int>(wanted.size()) + 15;
@@ -335,7 +336,7 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
     };
     Sarc pack_en;
     Msbt en;
-    if (!read_member(QStringLiteral("UI/USen/message.sarc"), pack_en) || !en.read(pack_en.files.value(QStringLiteral("CTGPText.msbt")))) return fail(QStringLiteral("The pack's English message file is unreadable"));
+    if (!read_member(QStringLiteral("UI/USen/message.sarc"), pack_en) || !en.read(pack_en.files.value(QStringLiteral("CTGPText.msbt")))) return fail(QCoreApplication::translate("Messages", "The pack's English message file is unreadable"));
     QHash<QString, QString> en_by_name; // normalised English name -> label 5001xx
     {
         QList<int> labs;
@@ -354,7 +355,7 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
     Msbt van_en;
     {
         QFile f(QDir(vanilla_ui_dir).filePath(QStringLiteral("UI/USen/message.sarc")));
-        if (!f.open(QIODevice::ReadOnly) || !van_en_sarc.read(f.readAll()) || !van_en.read(van_en_sarc.files.value(QStringLiteral("Common.msbt")))) return fail(QStringLiteral("Cannot read the game's English message file"));
+        if (!f.open(QIODevice::ReadOnly) || !van_en_sarc.read(f.readAll()) || !van_en.read(van_en_sarc.files.value(QStringLiteral("Common.msbt")))) return fail(QCoreApplication::translate("Messages", "Cannot read the game's English message file"));
     }
     QHash<QString, QString> game_by_name; // the few tracks that keep the game's own names
     for (int n = 1401; n <= 1496; ++n) {
@@ -372,12 +373,12 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
             continue;
         }
         Sarc van;
-        if (!van.read(van_file.readAll())) return fail(QStringLiteral("Cannot read the game's message file for %1").arg(lang));
+        if (!van.read(van_file.readAll())) return fail(QCoreApplication::translate("Messages", "Cannot read the game's message file for %1").arg(lang));
         Sarc pack;
         if (!read_member(names.contains(QStringLiteral("UI/%1/message.sarc").arg(lang)) ? QStringLiteral("UI/%1/message.sarc").arg(lang) : QStringLiteral("UI/USen/message.sarc"), pack) ||
-            !pack.files.contains(QStringLiteral("CTGPText.msbt"))) return fail(QStringLiteral("The pack's message file for %1 is unreadable").arg(lang));
+            !pack.files.contains(QStringLiteral("CTGPText.msbt"))) return fail(QCoreApplication::translate("Messages", "The pack's message file for %1 is unreadable").arg(lang));
         Msbt common, ctext;
-        if (!common.read(van.files.value(QStringLiteral("Common.msbt"))) || !ctext.read(pack.files.value(QStringLiteral("CTGPText.msbt")))) return fail(QStringLiteral("Cannot read message tables for %1").arg(lang));
+        if (!common.read(van.files.value(QStringLiteral("Common.msbt"))) || !ctext.read(pack.files.value(QStringLiteral("CTGPText.msbt")))) return fail(QCoreApplication::translate("Messages", "Cannot read message tables for %1").arg(lang));
         for (int j = 0; j < 64; ++j) {
             const QString key = NormName(QString::fromLatin1(kLayout[j]));
             QString text, tagged;
@@ -401,13 +402,13 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
         const QString target = QDir(out_dir).filePath(QStringLiteral("romfs/UI/%1/message.sarc").arg(lang));
         QDir().mkpath(QFileInfo(target).absolutePath());
         QFile out(target);
-        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(van.write()) < 0) return fail(QStringLiteral("Cannot write the message files"));
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(van.write()) < 0) return fail(QCoreApplication::translate("Messages", "Cannot write the message files"));
         if (!step(lang)) return fail(QStringLiteral("Cancelled"));
     }
     // 3. The cup list for the in-game "Extra cup" menu: CTGP DX's 16 cups of four tracks (cup k = tracks 4k..4k+3; names from label 700000+k).
     if (!options.cups_list_path.isEmpty()) {
         QFile list(options.cups_list_path);
-        if (!list.open(QIODevice::WriteOnly | QIODevice::Truncate)) return fail(QStringLiteral("Cannot write the cup list"));
+        if (!list.open(QIODevice::WriteOnly | QIODevice::Truncate)) return fail(QCoreApplication::translate("Messages", "Cannot write the cup list"));
         for (int k = 0; k < 16; ++k) {
             QString name = text_of(en, QString::number(700000 + k));
             if (name.isEmpty()) name = QStringLiteral("Cup %1").arg(k + 1);
