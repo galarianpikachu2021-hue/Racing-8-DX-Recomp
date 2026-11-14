@@ -665,3 +665,5 @@ Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host t
   update work), `nvdrv` (the driver module), `pl:u` (the font loader). A registry lookup must not run inside another lookup's
   factory (the registry holds its lock while calling one: that deadlocked at boot).
 - Checked: 1P 4.0.1 and 3.0.4, 4P split-screen (59.7 fps), keyless boot, clean exits; 149 -> 86 host threads.
+- Waiting for a thread to end is native too (`ThreadEndEvent`, signalled from `KThread::FinishTermination`): a race makes
+  15,427 waits, all answered by the runtime, none by the emulated kernel.

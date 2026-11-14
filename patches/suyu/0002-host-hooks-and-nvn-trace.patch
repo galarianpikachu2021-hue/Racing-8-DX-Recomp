@@ -4502,7 +4502,7 @@ index c1b0dcd033..06e7f29e62 100644
      ASSERT(CanSchedule(kernel));
      ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
-index b0f33b44c7..d21d483cda 100644
+index b0f33b44c7..e907761889 100644
 --- a/src/core/hle/kernel/k_thread.cpp
 +++ b/src/core/hle/kernel/k_thread.cpp
 @@ -33,6 +33,9 @@
@@ -4542,7 +4542,15 @@ index b0f33b44c7..d21d483cda 100644
  
              // Run the guest function.
              func_();
-@@ -1285,6 +1299,9 @@ namespace Kernel {
+@@ -444,6 +458,7 @@ namespace Kernel {
+             m_signaled = true;
+             KSynchronizationObject::NotifyAvailable(kernel);
+         }
++        NativeServices::OnThreadEnded(this); // kart-recomp: runtime waits for this thread's end
+ 
+         // Close the thread outside the scheduler lock. If this drops the last reference,
+         // Finalize() runs here and unmaps the TLS page under the page table's KLightLock. A
+@@ -1285,6 +1300,9 @@ namespace Kernel {
              if (this->GetState() == ThreadState::Waiting) {
                  m_wait_queue->CancelWait(kernel, this, ResultTerminationRequested, true);
              }
@@ -4552,7 +4560,7 @@ index b0f33b44c7..d21d483cda 100644
          }
  
          return this->GetState();
-@@ -1318,7 +1335,7 @@ namespace Kernel {
+@@ -1318,7 +1336,7 @@ namespace Kernel {
  
      void KThread::RequestDummyThreadWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -4561,7 +4569,7 @@ index b0f33b44c7..d21d483cda 100644
  
          // We will block when the scheduler lock is released.
          std::scoped_lock lock{m_dummy_thread_mutex};
-@@ -1326,6 +1343,26 @@ namespace Kernel {
+@@ -1326,6 +1344,26 @@ namespace Kernel {
      }
  
      void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -4588,7 +4596,7 @@ index b0f33b44c7..d21d483cda 100644
          if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
              // Occurs in single core mode.
              return;
-@@ -1338,7 +1375,7 @@ namespace Kernel {
+@@ -1338,7 +1376,7 @@ namespace Kernel {
  
      void KThread::DummyThreadEndWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -5611,10 +5619,10 @@ index 0000000000..cf40baaec8
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..fe1023aee7
+index 0000000000..bd95253390
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,390 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5908,49 +5916,72 @@ index 0000000000..fe1023aee7
 +    return ResultSuccess;
 +}
 +
++namespace {
++// "This thread has ended" as a runtime event, made when the game first waits for the thread (the game waits for its worker
++// threads to end with WaitSynchronization on their handles).
++std::mutex g_thread_end_lock;
++std::unordered_map<KThread*, std::shared_ptr<KartRuntime::Event>> g_thread_end;
++
++std::shared_ptr<KartRuntime::Event> ThreadEndEvent(KernelCore& kernel, KThread* thread) {
++    std::scoped_lock lk{g_thread_end_lock};
++    auto& e = g_thread_end[thread];
++    if (!e) e = std::make_shared<KartRuntime::Event>(Runtime(kernel), "thread end");
++    if (thread->IsSignaled(kernel)) e->Signal(); // ended already (OnThreadEnded may have run before the event existed)
++    return e;
++}
++} // namespace
++
++void OnThreadEnded(KThread* thread) {
++    std::shared_ptr<KartRuntime::Event> e;
++    {
++        std::scoped_lock lk{g_thread_end_lock};
++        const auto it = g_thread_end.find(thread);
++        if (it == g_thread_end.end()) return;
++        e = std::move(it->second);
++        g_thread_end.erase(it); // thread objects are reused
++    }
++    e->Signal();
++}
++
 +Result WaitSynchronization(KernelCore& kernel, s32* out_index, const Svc::Handle* handles, s32 count, s64 timeout_ns, bool* handled) {
 +    *handled = false;
-+    bool any = false, all = count > 0;
-+    for (s32 i = 0; i < count; ++i) {
-+        const bool n = IsNative(handles[i]);
-+        any |= n;
-+        all &= n;
-+    }
-+    if (!any) {
-+        g_emulated_waits.fetch_add(1, std::memory_order_relaxed);
-+        return ResultSuccess;
++    // Every handle becomes a runtime waitable: a runtime object, or an emulated thread's "ended" event. A wait that names any
++    // other emulated object is left to the emulated kernel (none in the game: it is logged there).
++    std::vector<std::shared_ptr<KartRuntime::Waitable>> objs;
++    {
++        auto& runtime = Runtime(kernel);
++        auto& table = GetCurrentProcess(kernel).GetHandleTable();
++        for (s32 i = 0; i < count; ++i) {
++            if (IsNative(handles[i])) {
++                auto w = runtime.GetAs<KartRuntime::Waitable>(handles[i]);
++                if (!w) {
++                    *handled = true;
++                    return ResultInvalidHandle;
++                }
++                objs.push_back(std::move(w));
++                continue;
++            }
++            KScopedAutoObject thread = table.GetObject<KThread>(kernel, handles[i]);
++            if (thread.IsNull()) {
++                g_emulated_waits.fetch_add(1, std::memory_order_relaxed);
++                return ResultSuccess;
++            }
++            objs.push_back(ThreadEndEvent(kernel, thread.GetPointerUnsafe()));
++        }
 +    }
 +    *handled = true;
 +    g_native_waits.fetch_add(1, std::memory_order_relaxed);
-+    auto& runtime = Runtime(kernel);
-+    if (!all) {
-+        // Native and emulated objects in one wait: not used by the game so far (every object it waits on together comes from
-+        // one side). Say so once, and wait on the native ones only.
-+        static std::atomic<bool> warned{false};
-+        if (!warned.exchange(true)) LOG_ERROR(Kernel, "native services: a wait mixes runtime and emulated handles; waiting on the runtime ones");
++    // A CancelSynchronization that came while the thread was not waiting is kept by the thread (as the kernel does): it ends
++    // this wait at once.
++    KThread* self = GetCurrentThreadPointer(kernel);
++    if (self->IsWaitCancelled()) {
++        self->ClearWaitCancelled();
++        return ResultCancelled;
 +    }
 +    s32 index = -1;
-+    u32 r = 0;
-+    {
-+        std::vector<std::shared_ptr<KartRuntime::Waitable>> objs;
-+        std::vector<s32> index_of;
-+        for (s32 i = 0; i < count; ++i) {
-+            if (!IsNative(handles[i])) continue;
-+            auto w = runtime.GetAs<KartRuntime::Waitable>(handles[i]);
-+            if (!w) return ResultInvalidHandle;
-+            objs.push_back(std::move(w));
-+            index_of.push_back(i);
-+        }
-+        // A CancelSynchronization that came while the thread was not waiting is kept by the thread (as the kernel does): it
-+        // ends this wait at once, whichever side the objects are on.
-+        KThread* self = GetCurrentThreadPointer(kernel);
-+        if (self->IsWaitCancelled()) {
-+            self->ClearWaitCancelled();
-+            return ResultCancelled;
-+        }
-+        r = runtime.WaitAny(self->GetId(), objs, timeout_ns, &index);
-+        if (r == KartRuntime::KernelResult::Success) *out_index = index_of[index];
-+    }
++    const u32 r = Runtime(kernel).WaitAny(self->GetId(), objs, timeout_ns, &index);
++    objs.clear();
++    if (r == KartRuntime::KernelResult::Success) *out_index = index;
 +    if (r == KartRuntime::KernelResult::Cancelled) {
 +        // A thread being terminated never returns to the game (on the console it stops in the kernel): exit here, as the
 +        // emulated kernel's run loop would before the next instruction. Otherwise it was CancelSynchronization.
@@ -5984,10 +6015,10 @@ index 0000000000..fe1023aee7
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..99b108ad22
+index 0000000000..dbcef7046d
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,59 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -6041,6 +6072,8 @@ index 0000000000..99b108ad22
 +/// A runtime handle that mirrors an emulated kernel event signalled by the engine's library parts (audio_core, hid_core, the
 +/// driver module): the game waits on it and resets it natively; the emulated event's signal and reset reach the mirror.
 +u32 MirrorKernelEvent(KernelCore& kernel, KReadableEvent* event);
++/// From KThread::FinishTermination: the thread has ended.
++void OnThreadEnded(KThread* thread);
 +/// From KReadableEvent::Signal / Reset.
 +void OnKernelEvent(KReadableEvent* event, bool signaled);
 +
