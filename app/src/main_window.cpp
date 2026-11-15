@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "main_window.h"
+#include "multiplayer_page.h"
 #include "controller_mapper.h"
 #include "mii_editor.h"
 
@@ -128,6 +129,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(buildMiiTab(), tr("Miis (experimental)"));
     tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
     tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
+    tabs->addTab(scrolled(multiplayer_page = new MultiplayerPage), tr("Multiplayer"));
     setCentralWidget(tabs);
 
     QSettings prefs;
@@ -633,6 +635,7 @@ QProcessEnvironment MainWindow::launchEnvironment() const {
         }
     }
 #endif
+    if (multiplayer_page) multiplayer_page->apply(env);
     if (nvn_capture_check->isChecked()) {
         env.insert(QStringLiteral("KARTRECOMP_NVN_TRACE"), QStringLiteral("1"));
         env.insert(QStringLiteral("KARTRECOMP_NVN_CAPTURE"), QStringLiteral("every=1800,frames=2"));
@@ -674,6 +677,10 @@ void MainWindow::launch() {
     const QString problems = package.problems();
     if (!problems.isEmpty()) {
         QMessageBox::warning(this, tr("Cannot start"), problems);
+        return;
+    }
+    if (multiplayer_page && !multiplayer_page->problem().isEmpty()) {
+        QMessageBox::warning(this, tr("Multiplayer"), multiplayer_page->problem());
         return;
     }
     // Settings are re-read first so edits made by the game since the last load survive.

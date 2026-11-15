@@ -674,3 +674,42 @@ Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host t
   code: the profile manager, apm controller, Mii manager/database, file-system controllers, font loader, language tables,
   `set:sys`, the driver module, the registry, and the controller library's resource manager (held directly:
   `Service::GetHidResourceManager`). Checked: 1P 4.0.1 and 3.0.4, 4P, keyless, clean exits.
+
+## Multiplayer rooms (local wireless over the internet)
+
+suyu's multiplayer rooms are in the native engine. A room is suyu's relay server (`network/room`, ENet). Every member's
+local-wireless (LDN) packets go through it, so games that are not on the same network see each other in **Wireless Play**,
+as if they were nearby consoles. The room protocol is unchanged, so suyu/yuzu-family room servers (the dedicated room program,
+rooms hosted by those emulators) work as long as the network version matches.
+
+- **Engine:** `suyu_cmd/kart_multiplayer.h`.
+  - The room network now always starts. The old `-m` flag could never have worked: suyu-cmd never called `Network::Init`, so the
+    room client was null.
+  - Join a room: `--multiplayer=nick[:password]@address[:port]` or `KARTRECOMP_ROOM`.
+  - Host one on this machine and join it: `--host-room=[port][:password]` or `KARTRECOMP_ROOM_HOST`, with `KARTRECOMP_ROOM_NICK`,
+    `KARTRECOMP_ROOM_NAME` and `KARTRECOMP_ROOM_MAX` (default 8). The default port is 24872 (UDP).
+  - Room errors are logged; they no longer quit the program.
+- **Services** (the native shells around suyu's library code):
+  - `ldn:u` (`core/hle/kernel/native_ldn.cpp`): suyu's `LANDiscovery`, fed by the room client.
+    - Calls are not serialized: LANDiscovery locks its own state. A scan waits one second for replies, and it is a wait of the
+      scanning thread (`NativeKernel::Blocking`). The first version held the service lock during the scan, and menus ran at 6 fps.
+    - Without a room joined, the game sees what a console in airplane mode reports.
+  - `bsd:u`/`bsd:s` (`native_bsd.cpp`): suyu's socket code, split out of `bsd.cpp` into a library,
+    `core/hle/service/sockets/bsd_sockets.{h,cpp}`, which the emulated service also uses now.
+    - While in a room, new sockets are proxy sockets that travel through the room.
+    - Blocking calls (receive, poll, accept, connect, send) are waits.
+    - **This also fixed a crash without multiplayer:** Wireless Play opens `bsd:u`, and the engine had none, so the game stopped
+      with 2021-0007.
+  - `csrng` (`kart_runtime/services/system.h`, random bytes) is needed by Create Room.
+  - The friend commands 10700–10702 (play history) are needed too; otherwise the game shows "A communication error has occurred".
+- **Launcher:** the Multiplayer tab (`app/src/multiplayer_page.*`, test `tests/test_multiplayer_page.cpp`). Choices: Off / Join a
+  room / Host a room, plus nickname, address, port, password and player count; settings go to the engine as the variables above.
+- **Diagnostics:** `Service::on_error` logs the first three failing results per service/command. `bsd:u` logs non-`AGAIN` errno
+  values (the first 50).
+- **Tests:**
+  - `tools/make-menu-tas.py <script> --wireless[=N] [--frames=F]` opens Wireless Play and presses A N more times.
+  - Verified with a hosted room (4.0.1, no mods): the room opens and the engine joins; Wireless Play initialises `ldn:u` in the
+    room and scans at 60 fps; Create Room makes the session (OpenAccessPoint, SetAdvertiseData, CreateNetwork, sockets) and reaches
+    character select; a 1P race with a room open runs at 60 fps; exits are clean.
+  - **Not yet tested: two games in one room** (a second machine, or a second instance, is needed to see the other session in
+    the lobby and race).

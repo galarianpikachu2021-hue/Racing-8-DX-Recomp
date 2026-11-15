@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..355b93f0a2 100644
+index 408daa6839..8e01c564cd 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -860,7 +860,7 @@ index 408daa6839..355b93f0a2 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,19 @@ add_library(core STATIC
+@@ -339,6 +359,23 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
@@ -868,7 +868,11 @@ index 408daa6839..355b93f0a2 100644
 +    hle/kernel/native_sync.h
 +    hle/kernel/native_audio_service.cpp
 +    hle/kernel/native_fs_backend.cpp
++    hle/kernel/native_game.cpp
++    hle/kernel/native_game.h
 +    hle/kernel/native_hid_service.cpp
++    hle/kernel/native_bsd.cpp
++    hle/kernel/native_ldn.cpp
 +    hle/kernel/native_mii.cpp
 +    hle/kernel/native_nvdrv_service.cpp
 +    hle/kernel/native_services.cpp
@@ -880,7 +884,7 @@ index 408daa6839..355b93f0a2 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1084,8 @@ add_library(core STATIC
+@@ -1051,6 +1088,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -889,7 +893,16 @@ index 408daa6839..355b93f0a2 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1187,6 +1222,7 @@ add_library(core STATIC
+@@ -1082,6 +1121,8 @@ add_library(core STATIC
+     hle/service/sm/sm_controller.cpp
+     hle/service/sm/sm_controller.h
+     hle/service/sockets/bsd.cpp
++    hle/service/sockets/bsd_sockets.cpp
++    hle/service/sockets/bsd_sockets.h
+     hle/service/sockets/bsd.h
+     hle/service/sockets/nsd.cpp
+     hle/service/sockets/nsd.h
+@@ -1187,6 +1228,7 @@ add_library(core STATIC
      tools/renderdoc.cpp
      tools/renderdoc.h)
  
@@ -897,7 +910,7 @@ index 408daa6839..355b93f0a2 100644
  if (ENABLE_WIFI_SCAN)
      target_sources(core PRIVATE internal_network/wifi_scanner.cpp)
      if (PLATFORM_LINUX)
-@@ -1226,7 +1262,7 @@ else()
+@@ -1226,7 +1268,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -906,7 +919,7 @@ index 408daa6839..355b93f0a2 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1371,30 @@ endif()
+@@ -1335,3 +1377,31 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -922,7 +935,8 @@ index 408daa6839..355b93f0a2 100644
 +if (KARTRECOMP_DROP_UNUSED_SERVICES)
 +    get_target_property(KR_CORE_SOURCES core SOURCES)
 +    set(KR_KEEP hle/service/am/applet_manager.cpp hle/service/am/process_creation.cpp hle/service/am/frontend/applets.cpp
-+        hle/service/glue/glue_manager.cpp)
++        hle/service/glue/glue_manager.cpp hle/service/ldn/lan_discovery.cpp
++        hle/service/sockets/bsd_sockets.cpp hle/service/sockets/sockets_translate.cpp)
 +    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(aoc|bcat|bpc|btdrv|btm|erpt|es|eupld|fatal|fgm|friend|gpio|grc|i2c|lbl|ldn|ldr|lm|mig|mm|mnpp|ncm|ngc|nifm|nim|npns|olsc|omm|pcie|pctl|pcv|prepo|ptm|ro|spl|ssl|usb|am|vi|nvnflinger|nfc|nfp|caps|sockets|pm|psc|glue)/")
 +    # Service shells whose work the runtime does (their library parts stay: profile manager, apm controller, Mii manager and
 +    # database, file-system controllers, font loader, language tables, settings servers, the controller server object).
@@ -938,7 +952,7 @@ index 408daa6839..355b93f0a2 100644
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..d78cf6bf0c 100644
+index 67a55424e9..22418c261a 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -957,7 +971,17 @@ index 67a55424e9..d78cf6bf0c 100644
  #include "core/arm/recomp/guest_fp_env.h"
  #include "core/arm/recomp/recomp_gap_session.h"
  #include "core/arm/recomp/recomp_diagnostic_sampler.h"
-@@ -209,6 +218,8 @@ const int kChainBudgetOverride = [] {
+@@ -38,6 +47,9 @@
+ #include "core/memory.h"
+ 
+ namespace Core {
++namespace {
++thread_local const void* t_native_token = nullptr; ///< kart-recomp: the runtime thread running on this host thread
++}
+ 
+ namespace {
+ // Mirrors the prefix of the GuestContext the recompiler emits. Only the fields
+@@ -209,6 +221,8 @@ const int kChainBudgetOverride = [] {
  }();
  std::atomic<int> g_recomp_chain_budget{32};
  
@@ -966,7 +990,7 @@ index 67a55424e9..d78cf6bf0c 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -775,6 +786,138 @@ bool IsRecompFastmemReady() {
+@@ -775,6 +789,138 @@ bool IsRecompFastmemReady() {
      return g_fastmem_ready.load(std::memory_order_acquire);
  }
  
@@ -1105,7 +1129,7 @@ index 67a55424e9..d78cf6bf0c 100644
  namespace {
  
  const char* PinCauseName(RecompGuardGen::PinCause cause) {
-@@ -1002,6 +1145,7 @@ struct ArmRecomp::Impl {
+@@ -1002,6 +1148,7 @@ struct ArmRecomp::Impl {
          bridge.page_bits = view.page_bits;
          bridge.pointer_mask = view.pointer_mask;
          bridge.address_space_max = view.address_space_max;
@@ -1113,7 +1137,16 @@ index 67a55424e9..d78cf6bf0c 100644
          if (kSlowPathAbove != 0 && kSlowPathAbove < bridge.address_space_max &&
              TotalStaticBlocks() >= kSlowPathAfterBlocks) {
              bridge.address_space_max = kSlowPathAbove;
-@@ -1179,6 +1323,7 @@ struct ArmRecomp::Impl {
+@@ -1168,7 +1315,7 @@ struct ArmRecomp::Impl {
+     u64 ModuleBaseFor(Kernel::KThread* thread, u64 pc) {
+         if (!modules_read) {
+             modules_read = true;
+-            if (auto* process = thread->GetOwnerProcess()) {
++            if (auto* process = thread ? thread->GetOwnerProcess() : owner_process) {
+                 modules = FindModules(process);
+                 g_counters.RecordModules(modules);
+                 // Now that the loader has placed everything, tell each image
+@@ -1179,6 +1326,7 @@ struct ArmRecomp::Impl {
                      for (const auto& [module_base, name] : modules) {
                          setter(index++, name.c_str(), module_base);
                      }
@@ -1121,7 +1154,65 @@ index 67a55424e9..d78cf6bf0c 100644
                  }
              }
          }
-@@ -1910,12 +2055,15 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1585,7 +1733,7 @@ struct ArmRecomp::Impl {
+     }
+ 
+     void SampleDiagnostics(Kernel::KThread* thread) {
+-        if (!diagnostics.Enabled()) return;
++        if (!diagnostics.Enabled() || !thread) return; // kart-recomp: runtime threads have no kernel thread
+         auto* process = thread->GetOwnerProcess();
+         if (!process) return;
+         auto& memory = process->GetMemory();
+@@ -1626,7 +1774,7 @@ struct ArmRecomp::Impl {
+     ExclusiveMonitor* exclusive_monitor{};
+     // Last guest thread run on this core, so a reservation is voided on a real
+     // context switch and left alone on an ordinary return to the host.
+-    Kernel::KThread* last_thread{};
++    const void* last_thread{};
+     std::size_t core_index{};
+     bool uses_wall_clock{};
+ #ifndef SUYU_NO_JIT
+@@ -1789,6 +1937,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
+ #endif
+ }
+ 
++void ArmRecomp::SetNativeThreadToken(const void* token) {
++    t_native_token = token;
++}
++
+ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+     // A context switch voids any outstanding reservation. A thread preempted
+     // between its LDXR and STXR would otherwise have the STXR succeed against a
+@@ -1798,8 +1950,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+     // Only on an actual switch: this backend returns to the host constantly
+     // (chain budget, SVCs), so clearing on every entry would void reservations
+     // the same thread is still in the middle of.
+-    if (impl->last_thread != thread) {
+-        impl->last_thread = thread;
++    // kart-recomp: runtime threads (docs/NATIVE_KERNEL.md) have no kernel thread; they name themselves with a token.
++    const void* const identity = thread ? static_cast<const void*>(thread) : t_native_token;
++    if (impl->last_thread != identity) {
++        impl->last_thread = identity;
+         if (impl->exclusive_monitor) {
+             impl->exclusive_monitor->ClearExclusive(impl->core_index);
+         }
+@@ -1870,7 +2024,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+     // their per-entry check. Module bases are set by now (above, or by the
+     // explicit prepare callback), and no block of this process has run yet.
+     if (RecompGuardGen::Watching()) {
+-        if (auto* process = thread->GetOwnerProcess()) {
++        if (auto* process = thread ? thread->GetOwnerProcess() : impl->owner_process) {
+             const u64 key = process->GetProcessId() | (u64{1} << 63);
+             if (!RecompGuardGen::IsActive(key)) {
+                 impl->ActivateGuardGen(*process, key);
+@@ -1904,18 +2058,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+         impl->in_fallback = false;
+     }
+     if (impl->in_fallback) {
++        if (!thread) return HaltReason::BreakLoop;
+         return RunFallback(thread);
+     }
+ 
      impl->interrupted.store(false, std::memory_order_relaxed);
      impl->ctx.halted = 0;
  
@@ -1142,7 +1233,7 @@ index 67a55424e9..d78cf6bf0c 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +2077,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2087,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -1150,7 +1241,7 @@ index 67a55424e9..d78cf6bf0c 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +2117,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +2127,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -1207,7 +1298,17 @@ index 67a55424e9..d78cf6bf0c 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2258,6 +2449,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2248,7 +2449,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+                              impl->ctx.pc);
+                 return HaltReason::PrefetchAbort;
+             }
+-            return RunFallback(thread);
++            if (!thread) return HaltReason::BreakLoop;
++        return RunFallback(thread);
+         }
+ 
+         // Dump periodically: teardown is not guaranteed to run (the emulated
+@@ -2258,6 +2460,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -1217,7 +1318,35 @@ index 67a55424e9..d78cf6bf0c 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2537,3 +2731,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2306,7 +2511,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+             impl->ctx.pending_svc = kNoPendingSvc;
+             // Forward the guest instruction-cache operation to each CPU interface.
+             for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
+-                if (auto* cpu = thread->GetOwnerProcess()->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
++                if (auto* cpu = (thread ? thread->GetOwnerProcess() : impl->owner_process)->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
+             }
+             impl->ctx.pc += 4;
+             impl->ctx.halted = 0;
+@@ -2350,7 +2555,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+                              unsupported_opcode, impl->ctx.pc);
+                 return HaltReason::PrefetchAbort;
+             }
+-            return RunFallback(thread);
++            if (!thread) return HaltReason::BreakLoop;
++        return RunFallback(thread);
+         }
+ 
+         if (impl->ctx.pending_svc != kNoPendingSvc) {
+@@ -2404,7 +2610,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+         const u64 address = impl->ctx.pending_svc;
+         impl->ctx.pending_svc = kNoPendingSvc;
+         for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
+-            if (auto* cpu = thread->GetOwnerProcess()->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
++            if (auto* cpu = (thread ? thread->GetOwnerProcess() : impl->owner_process)->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
+         }
+         impl->ctx.pc += 4;
+         impl->ctx.halted = 0;
+@@ -2537,3 +2743,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -1244,7 +1373,7 @@ index 67a55424e9..d78cf6bf0c 100644
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
-index a1671ea1e7..7ad45cbf93 100644
+index a1671ea1e7..5000a67cb0 100644
 --- a/src/core/arm/recomp/arm_recomp.h
 +++ b/src/core/arm/recomp/arm_recomp.h
 @@ -74,6 +74,21 @@ RecompFastmemLayout GetRecompFastmemLayout();
@@ -1269,6 +1398,15 @@ index a1671ea1e7..7ad45cbf93 100644
  /// ABI 6 feature GG1 (generation code guard). The loader calls this after
  /// SetRecompLookup, with what each GG1 module's recomp_image_guard_gen_v1
  /// returned, and before the process is created. The guard only engages with
+@@ -190,6 +205,8 @@ public:
+     ~ArmRecomp() override;
+ 
+     HaltReason RunThread(Kernel::KThread* thread) override;
++    /// kart-recomp: a runtime thread (no kernel thread) runs on this host thread; RunThread(nullptr) then runs it.
++    static void SetNativeThreadToken(const void* token);
+     HaltReason StepThread(Kernel::KThread* thread) override;
+ 
+     void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..11a0a8b666
@@ -3618,19 +3756,20 @@ index 0000000000..49a539dcf1
 +
 +} // namespace Core::SdkTrace
 diff --git a/src/core/core.cpp b/src/core/core.cpp
-index b15af176fe..6e87354c69 100644
+index b15af176fe..728eaeef50 100644
 --- a/src/core/core.cpp
 +++ b/src/core/core.cpp
-@@ -15,6 +15,8 @@
+@@ -15,6 +15,9 @@
  #include "common/string_util.h"
  #include "core/arm/exclusive_monitor.h"
  #include "core/core.h"
 +#include "core/nvn_host/nvn_host.h"
 +#include "core/hle/kernel/native_services.h"
++#include "core/hle/kernel/native_game.h"
  #include "core/arm/recomp/arm_recomp.h"
  
  #include "launch_timestamp_cache.h"
-@@ -43,11 +45,21 @@
+@@ -43,11 +46,21 @@
  #include "core/hle/service/apm/apm_controller.h"
  #include "core/hle/service/filesystem/filesystem.h"
  #include "core/hle/service/glue/glue_manager.h"
@@ -3652,7 +3791,7 @@ index b15af176fe..6e87354c69 100644
  #include "core/hle/service/service.h"
  #include "core/hle/service/services.h"
  #include "core/hle/service/set/system_settings_server.h"
-@@ -107,6 +119,16 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
+@@ -107,6 +120,16 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
      return vfs->OpenFile(path, FileSys::OpenMode::Read);
  }
  
@@ -3669,7 +3808,7 @@ index b15af176fe..6e87354c69 100644
  struct System::Impl {
      explicit Impl(System& system)
          : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
-@@ -165,6 +187,7 @@ struct System::Impl {
+@@ -165,6 +188,7 @@ struct System::Impl {
          if (!system.IsPoweredOn()) {
              return;
          }
@@ -3677,7 +3816,7 @@ index b15af176fe..6e87354c69 100644
  
          auto settings_service =
              system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>("set:sys",
-@@ -212,6 +235,7 @@ struct System::Impl {
+@@ -212,6 +236,7 @@ struct System::Impl {
          network_clock->GetSystemClockContext(&context);
          settings_service->SetNetworkSystemClockContext(context);
          network_clock->SetCurrentTime(new_time);
@@ -3685,7 +3824,7 @@ index b15af176fe..6e87354c69 100644
      }
  
      void Run() {
-@@ -273,11 +297,17 @@ struct System::Impl {
+@@ -273,11 +298,17 @@ struct System::Impl {
      SystemResultStatus SetupForApplicationProcess(System& system, Frontend::EmuWindow& emu_window) {
          LOG_INFO(Core, "SetupForApplicationProcess: host1x_core");
          host1x_core.emplace(system);
@@ -3708,7 +3847,7 @@ index b15af176fe..6e87354c69 100644
  
          audio_core.emplace(system);
          LOG_INFO(Core, "SetupForApplicationProcess: audio_core done");
-@@ -402,7 +432,7 @@ struct System::Impl {
+@@ -402,7 +433,7 @@ struct System::Impl {
              LOG_ERROR(Core, "Failed to find program id for ROM");
          }
  
@@ -3717,16 +3856,17 @@ index b15af176fe..6e87354c69 100644
          if (auto room_member = Network::GetRoomMember().lock()) {
              Network::GameInfo game_info;
              game_info.name = name;
-@@ -434,6 +464,8 @@ struct System::Impl {
+@@ -434,6 +465,9 @@ struct System::Impl {
          if (gpu_core) {
              gpu_core->ShutdownThread();
          }
++        Kernel::NativeGame::Shutdown(); // kart-recomp: the game's runtime threads end first
 +        Kernel::NativeServices::Shutdown(kernel); // kart-recomp: the runtime's service objects go first
 +        applet_manager.ReleaseNativeProcess(); // kart-recomp: the game's process, if no window system started it
          kernel.CloseServices();
          kernel.ShutdownCores();
          services.reset();
-@@ -693,6 +725,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
+@@ -693,6 +727,10 @@ const Core::Memory::Memory& System::ApplicationMemory() const {
      return impl->kernel.ApplicationProcess()->GetMemory();
  }
  
@@ -4571,6 +4711,22 @@ index c1b0dcd033..06e7f29e62 100644
      // Validate preconditions.
      ASSERT(CanSchedule(kernel));
      ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
+diff --git a/src/core/hle/kernel/k_shared_memory.h b/src/core/hle/kernel/k_shared_memory.h
+index c64e1668ca..1e8db8872e 100644
+--- a/src/core/hle/kernel/k_shared_memory.h
++++ b/src/core/hle/kernel/k_shared_memory.h
+@@ -56,6 +56,11 @@ public:
+      * @param offset Offset from the start of the shared memory block to get pointer
+      * @return A pointer to the shared memory block from the specified offset
+      */
++    /// kart-recomp: the block's size (the runtime's kernel maps it for the game).
++    std::size_t GetSize() const {
++        return m_size;
++    }
++
+     u8* GetPointer(std::size_t offset = 0) {
+         return m_device_memory->GetPointer<u8>(m_physical_address + offset);
+     }
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
 index b0f33b44c7..e907761889 100644
 --- a/src/core/hle/kernel/k_thread.cpp
@@ -4725,10 +4881,10 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
-index 0000000000..e6b4beb3f7
+index 0000000000..eb20110fe8
 --- /dev/null
 +++ b/src/core/hle/kernel/native_audio_service.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,235 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the audio renderer service ("audren:u") answered by the runtime. The renderer itself - voices, mixes, effects,
 +// sinks, the DSP command lists and the output to the host's audio device - is suyu's audio_core library; this replaces the
@@ -4752,6 +4908,7 @@ index 0000000000..e6b4beb3f7
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/k_transfer_memory.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/audio/errors.h"
@@ -4917,18 +5074,30 @@ index 0000000000..e6b4beb3f7
 +        c.Pop<u64>();
 +        const u64 aruid = c.Pid();
 +        if (c.request.copy_handles.size() < 2) return c.SetResult(0xE401);
-+        auto& table = GetCurrentProcess(kernel).GetHandleTable();
-+        KScopedAutoObject tmem = table.GetObject<KTransferMemory>(kernel, c.request.copy_handles[0]);
-+        KScopedAutoObject process = table.GetObject<KProcess>(kernel, c.request.copy_handles[1]);
-+        if (tmem.IsNull() || process.IsNull()) return c.SetResult(0xE401);
++        // The work buffer and the game's process: from the runtime's kernel, or from the emulated handle table.
++        u64 tmem_address = 0;
++        KProcess* game = nullptr;
++        if (NativeGame::Process()) {
++            const auto t = NativeGame::TransferMemory(c.request.copy_handles[0]);
++            if (!t) return c.SetResult(0xE401);
++            tmem_address = t->first;
++            game = NativeGame::Process();
++        } else {
++            auto& table = GetCurrentProcess(kernel).GetHandleTable();
++            KScopedAutoObject tmem = table.GetObject<KTransferMemory>(kernel, c.request.copy_handles[0]);
++            KScopedAutoObject process = table.GetObject<KProcess>(kernel, c.request.copy_handles[1]);
++            if (tmem.IsNull() || process.IsNull()) return c.SetResult(0xE401);
++            tmem_address = GetInteger(tmem->GetSourceAddress());
++            game = process.GetPointerUnsafe();
++        }
 +        if (manager.GetSessionCount() + 1 > AudioCore::MaxRendererSessions) return c.SetResult(::Service::Audio::ResultOutOfSessions.raw);
 +        const s32 session = manager.GetSessionId();
 +        if (session == -1) return c.SetResult(::Service::Audio::ResultOutOfSessions.raw);
 +        auto r = std::make_shared<RendererSession>(system, manager);
-+        r->process = process.GetPointerUnsafe();
++        r->process = game;
 +        r->process->Open(kernel);
 +        r->kernel = &kernel;
-+        if (const Result res = r->renderer->Initialize(params, tmem.GetPointerUnsafe(), tmem_size, r->process, aruid, session); res.IsError())
++        if (const Result res = r->renderer->Initialize(params, tmem_address, tmem_size, r->process, aruid, session); res.IsError())
 +            return c.SetResult(res.raw);
 +        c.PushInterface(Renderer(kernel, r));
 +    });
@@ -4947,6 +5116,179 @@ index 0000000000..e6b4beb3f7
 +        c.Pop<u64>();
 +        c.PushInterface(Device(kernel, c.Pid(), revision));
 +    });
++    return s;
++}
++
++} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_bsd.cpp b/src/core/hle/kernel/native_bsd.cpp
+new file mode 100644
+index 0000000000..e1eacc7ed6
+--- /dev/null
++++ b/src/core/hle/kernel/native_bsd.cpp
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the socket service ("bsd:u", "bsd:s") answered by the runtime. The sockets are suyu's socket library
++// (core/hle/service/sockets/bsd_sockets: host sockets, or room proxy sockets while the engine is in a multiplayer room, which is
++// how local wireless play reaches the other members); this replaces only the service around it. The game opens it when it enters
++// Wireless Play (without it the game stopped there with 2021-0007).
++#include <atomic>
++#include <memory>
++#include <vector>
++
++#include "common/logging.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/sockets/bsd_sockets.h"
++#include "kart_runtime/native_kernel.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace Service::Sockets;
++using KartRuntime::Context;
++using KartRuntime::Service;
++
++void PushResult(Context& c, s32 ret, Errno err) {
++    static std::atomic<int> logged{0};
++    if (err != Errno::SUCCESS && err != Errno::AGAIN && logged.fetch_add(1) < 50)
++        LOG_INFO(Service, "sockets: command {} -> {} errno {}", c.Command(), ret, static_cast<u32>(err));
++    c.Push<s32>(ret);
++    c.Push<u32>(static_cast<u32>(err));
++}
++/// Calls that answer 0 / -1 and errno.
++void PushErrno(Context& c, Errno err) { PushResult(c, err == Errno::SUCCESS ? 0 : -1, err); }
++
++std::vector<u8> OutBuffer(Context& c, size_t i = 0) { return std::vector<u8>(c.WriteBufferSize(i)); }
++
++} // namespace
++
++std::shared_ptr<Service> MakeSocketService(const char* name) {
++    auto& t = BsdSockets::Shared();
++    auto s = std::make_shared<Service>(name);
++    // Sockets block (receive, poll, accept): calls are not serialized, as on the console, and a blocking call is a wait of the
++    // calling thread.
++    s->serialize = false;
++    s->On(0, [](Context& c) { c.Push<s32>(0); }); // RegisterClient(config, pid, transfer memory) -> errno
++    s->Ok(1);                                      // StartMonitoring
++    s->On(2, [&t](Context& c) {                    // Socket(domain, type, protocol)
++        const u32 domain = c.Pop<u32>(), type = c.Pop<u32>(), protocol = c.Pop<u32>();
++        const auto [fd, err] = t.SocketImpl(static_cast<Domain>(domain), static_cast<Type>(type), static_cast<Protocol>(protocol));
++        PushResult(c, fd, err);
++    });
++    s->On(5, [](Context& c) { PushResult(c, 0, Errno::SUCCESS); }); // Select (as suyu: nothing ready)
++    s->On(6, [&t](Context& c) { // Poll(nfds, timeout ms; fds in, fds out)
++        const s32 nfds = c.Pop<s32>(), timeout = c.Pop<s32>();
++        const auto in = c.ReadBuffer(0);
++        auto out = OutBuffer(c);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.PollImpl(out, in, nfds, timeout); });
++        if (!out.empty()) c.WriteBuffer(out.data(), out.size(), 0);
++        PushResult(c, ret, err);
++    });
++    s->On(8, [&t](Context& c) { // Recv(fd, flags)
++        const s32 fd = c.Pop<s32>();
++        const u32 flags = c.Pop<u32>();
++        auto message = OutBuffer(c);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.RecvImpl(fd, flags, message); });
++        if (ret > 0) c.WriteBuffer(message.data(), static_cast<size_t>(ret), 0);
++        PushResult(c, ret, err);
++    });
++    s->On(9, [&t](Context& c) { // RecvFrom(fd, flags) -> message (0), address (1)
++        const s32 fd = c.Pop<s32>();
++        const u32 flags = c.Pop<u32>();
++        auto message = OutBuffer(c, 0);
++        auto addr = OutBuffer(c, 1);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.RecvFromImpl(fd, flags, message, addr); });
++        if (ret > 0) c.WriteBuffer(message.data(), static_cast<size_t>(ret), 0);
++        if (!addr.empty()) c.WriteBuffer(addr.data(), addr.size(), 1);
++        PushResult(c, ret, err);
++        c.Push<u32>(static_cast<u32>(addr.size()));
++    });
++    const auto send = [&t](Context& c, bool with_flags) { // Send(fd, flags) / Write(fd)
++        const s32 fd = c.Pop<s32>();
++        const u32 flags = with_flags ? c.Pop<u32>() : 0;
++        const auto message = c.ReadBuffer(0);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.SendImpl(fd, flags, message); });
++        PushResult(c, ret, err);
++    };
++    s->On(10, [send](Context& c) { send(c, true); });
++    s->On(24, [send](Context& c) { send(c, false); });
++    s->On(11, [&t](Context& c) { // SendTo(fd, flags; message 0, address 1)
++        const s32 fd = c.Pop<s32>();
++        const u32 flags = c.Pop<u32>();
++        const auto message = c.ReadBuffer(0);
++        const auto addr = c.ReadBuffer(1);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.SendToImpl(fd, flags, message, addr); });
++        PushResult(c, ret, err);
++    });
++    s->On(12, [&t](Context& c) { // Accept(fd) -> new fd, address
++        const s32 fd = c.Pop<s32>();
++        auto addr = OutBuffer(c);
++        const auto [ret, err] = c.kernel.Blocking([&] { return t.AcceptImpl(fd, addr); });
++        if (!addr.empty()) c.WriteBuffer(addr.data(), addr.size(), 0);
++        PushResult(c, ret, err);
++        c.Push<u32>(static_cast<u32>(addr.size()));
++    });
++    s->On(13, [&t](Context& c) { // Bind(fd; address)
++        const s32 fd = c.Pop<s32>();
++        const auto addr = c.ReadBuffer(0);
++        if (addr.size() < 16) return PushErrno(c, Errno::INVAL);
++        PushErrno(c, t.BindImpl(fd, addr));
++    });
++    s->On(14, [&t](Context& c) { // Connect(fd; address)
++        const s32 fd = c.Pop<s32>();
++        const auto addr = c.ReadBuffer(0);
++        if (addr.size() < 16) return PushErrno(c, Errno::INVAL);
++        PushErrno(c, c.kernel.Blocking([&] { return t.ConnectImpl(fd, addr); }));
++    });
++    const auto name_of = [&t](Context& c, bool peer) { // GetPeerName / GetSockName(fd) -> address
++        const s32 fd = c.Pop<s32>();
++        auto addr = OutBuffer(c);
++        if (addr.size() < sizeof(SockAddrIn)) return PushErrno(c, Errno::INVAL), c.Push<u32>(0);
++        const Errno err = peer ? t.GetPeerNameImpl(fd, addr) : t.GetSockNameImpl(fd, addr);
++        c.WriteBuffer(addr.data(), addr.size(), 0);
++        PushErrno(c, err);
++        c.Push<u32>(static_cast<u32>(addr.size()));
++    };
++    s->On(15, [name_of](Context& c) { name_of(c, true); });
++    s->On(16, [name_of](Context& c) { name_of(c, false); });
++    s->On(17, [&t](Context& c) { // GetSockOpt(fd, level, name) -> value
++        const s32 fd = c.Pop<s32>();
++        const u32 level = c.Pop<u32>();
++        const auto name = static_cast<OptName>(c.Pop<u32>());
++        auto value = OutBuffer(c);
++        const Errno err = t.GetSockOptImpl(fd, level, name, value);
++        if (!value.empty()) c.WriteBuffer(value.data(), value.size(), 0);
++        PushErrno(c, err);
++        c.Push<u32>(static_cast<u32>(value.size()));
++    });
++    s->On(18, [&t](Context& c) { // Listen(fd, backlog)
++        const s32 fd = c.Pop<s32>(), backlog = c.Pop<s32>();
++        PushErrno(c, t.ListenImpl(fd, backlog));
++    });
++    s->On(20, [&t](Context& c) { // Fcntl(fd, cmd, arg)
++        const s32 fd = c.Pop<s32>(), cmd = c.Pop<s32>(), arg = c.Pop<s32>();
++        const auto [ret, err] = t.FcntlImpl(fd, static_cast<FcntlCmd>(cmd), arg);
++        PushResult(c, ret, err);
++    });
++    s->On(21, [&t](Context& c) { // SetSockOpt(fd, level, name; value)
++        const s32 fd = c.Pop<s32>();
++        const u32 level = c.Pop<u32>();
++        const auto name = static_cast<OptName>(c.Pop<u32>());
++        const auto value = c.ReadBuffer(0);
++        if (value.size() < sizeof(u32) && level == static_cast<u32>(SocketLevel::SOCKET)) return PushErrno(c, Errno::INVAL);
++        PushErrno(c, t.SetSockOptImpl(fd, level, name, value));
++    });
++    s->On(22, [&t](Context& c) { // Shutdown(fd, how)
++        const s32 fd = c.Pop<s32>(), how = c.Pop<s32>();
++        PushErrno(c, t.ShutdownImpl(fd, how));
++    });
++    s->On(25, [](Context& c) { PushResult(c, 0, Errno::SUCCESS); }); // Read (as suyu: stub)
++    s->On(26, [&t](Context& c) { PushErrno(c, t.CloseImpl(c.Pop<s32>())); });
++    s->On(27, [&t](Context& c) { // DuplicateSocket(fd, reserved)
++        const auto r = t.DuplicateSocketImpl(c.Pop<s32>());
++        if (const auto* fd = std::get_if<s32>(&r)) PushResult(c, *fd, Errno::SUCCESS);
++        else PushResult(c, 0, std::get<Errno>(r));
++    });
++    s->On(31, [](Context& c) { PushErrno(c, Errno::SUCCESS); }); // EventFd (as suyu: stub)
 +    return s;
 +}
 +
@@ -5154,10 +5496,10 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_hid_service.cpp b/src/core/hle/kernel/native_hid_service.cpp
 new file mode 100644
-index 0000000000..214b43149c
+index 0000000000..87681b42c2
 --- /dev/null
 +++ b/src/core/hle/kernel/native_hid_service.cpp
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,281 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the controller service ("hid") answered by the runtime. The controller state - which pads and styles the game
 +// supports, Joy-Con assignment, motion, rumble, and the shared memory the SDK reads - is hid_core's resource manager (the input
@@ -5173,6 +5515,7 @@ index 0000000000..214b43149c
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/k_shared_memory.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/services.h"
@@ -5197,7 +5540,8 @@ index 0000000000..214b43149c
 +using Core::HID::NpadIdType;
 +
 +/// An emulated kernel object (shared memory, an event of the input library) handed to the game as a copy handle.
-+void PushKernelObject(KernelCore& kernel, Context& c, KAutoObject* object) {
++void PushKernelObject(KernelCore& kernel, Context& c, KSharedMemory* object) {
++    if (object && NativeGame::Process()) return c.PushCopyHandle(NativeGame::AddSharedMemory(*object));
 +    Handle h{};
 +    if (!object || GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, object).IsError()) return c.SetResult(0xD201);
 +    c.PushCopyHandle(h);
@@ -5437,6 +5781,199 @@ index 0000000000..214b43149c
 +}
 +
 +} // namespace Kernel::NativeServices
+diff --git a/src/core/hle/kernel/native_ldn.cpp b/src/core/hle/kernel/native_ldn.cpp
+new file mode 100644
+index 0000000000..4458fe3833
+--- /dev/null
++++ b/src/core/hle/kernel/native_ldn.cpp
+@@ -0,0 +1,187 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: local wireless ("ldn:u") answered by the runtime, carried over a multiplayer room. The network logic (access
++// point / station state, node lists, advertise data, the LDN packets) is suyu's LANDiscovery library, and the transport is
++// suyu's room client (network/room_member, ENet); this replaces only the service around them (docs/NATIVE_ENGINE.md,
++// "Multiplayer rooms"). Without a joined room the game sees what a console in airplane mode reports.
++#include <algorithm>
++#include <cstring>
++#include <memory>
++#include <span>
++#include <vector>
++
++#include "common/logging.h"
++#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/ldn/lan_discovery.h"
++#include "core/hle/service/ldn/ldn_results.h"
++#include "core/hle/service/ldn/ldn_types.h"
++#include "core/internal_network/network.h"
++#include "core/internal_network/network_interface.h"
++#include "kart_runtime/native_kernel.h"
++#include "network/network.h"
++#include "network/room_member.h"
++
++namespace Kernel::NativeServices {
++namespace {
++
++using namespace Service::LDN;
++using KartRuntime::Context;
++using KartRuntime::Event;
++using KartRuntime::NativeKernel;
++using KartRuntime::Service;
++
++/// One IUserLocalCommunicationService: its LANDiscovery, the room callback feeding it and the state-change event.
++struct LocalCommunication {
++    explicit LocalCommunication(NativeKernel& k) : state_change{std::make_shared<Event>(k, "ldn state change")} {}
++    ~LocalCommunication() { Unbind(); }
++
++    void Unbind() {
++        if (!bound) return;
++        if (auto member = Network::GetRoomMember().lock()) member->Unbind(packet_handle);
++        bound = false;
++    }
++
++    uint32_t Initialize() {
++        if (!Network::GetSelectedNetworkInterface()) return ResultAirplaneModeEnabled.raw;
++        auto member = Network::GetRoomMember().lock();
++        if (!member) {
++            LOG_WARNING(Service_LDN, "local wireless: no room client (the room network was not started)");
++            return ResultAirplaneModeEnabled.raw;
++        }
++        Unbind();
++        packet_handle = member->BindOnLdnPacketReceived([this](const Network::LDNPacket& p) { discovery.ReceivePacket(p); });
++        bound = true;
++        const auto event = state_change;
++        discovery.Initialize([event] { event->Signal(); });
++        initialized = true;
++        LOG_INFO(Service_LDN, "local wireless initialised ({})", member->IsConnected() ? "in a room" : "no room joined");
++        return 0;
++    }
++
++    uint32_t Finalize() {
++        Unbind();
++        initialized = false;
++        return discovery.Finalize().raw;
++    }
++
++    LANDiscovery discovery;
++    std::shared_ptr<Event> state_change;
++    Network::RoomMember::CallbackHandle<Network::LDNPacket> packet_handle;
++    bool bound = false, initialized = false;
++};
++
++std::shared_ptr<Service> UserLocalCommunication(NativeKernel& kernel) {
++    auto l = std::make_shared<LocalCommunication>(kernel);
++    auto s = std::make_shared<Service>("IUserLocalCommunicationService");
++    // A scan waits a second for replies from the room; LANDiscovery locks its own state, so the game's other calls (state polls
++    // from its main thread) are not held up behind a scan, and the scan is a wait of the scanning thread.
++    s->serialize = false;
++    // The service object owns the state: the handlers keep `l` alive as long as the session.
++    s->On(0, [l](Context& c) { c.Push<u32>(static_cast<u32>(l->initialized ? l->discovery.GetState() : State::Error)); });
++    s->On(1, [l](Context& c) { // GetNetworkInfo -> pointer buffer
++        NetworkInfo info{};
++        const Result r = l->discovery.GetNetworkInfo(info);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.WriteBuffer(&info, sizeof(info), 0);
++    });
++    s->On(2, [](Context& c) { // GetIpv4Address: the room's fake address while in a room
++        const auto iface = Network::GetSelectedNetworkInterface();
++        if (!iface) return c.SetResult(ResultNoIpAddress.raw);
++        Ipv4Address address = Network::TranslateIPv4(iface->ip_address);
++        Ipv4Address mask = Network::TranslateIPv4(iface->subnet_mask);
++        if (auto member = Network::GetRoomMember().lock(); member && member->IsConnected()) address = member->GetFakeIpAddress();
++        std::reverse(address.begin(), address.end());
++        std::reverse(mask.begin(), mask.end());
++        c.Push(address);
++        c.Push(mask);
++    });
++    s->On(3, [l](Context& c) { c.Push<s16>(static_cast<s16>(l->discovery.GetDisconnectReason())); });
++    s->On(4, [l](Context& c) { // GetSecurityParameter
++        NetworkInfo info{};
++        const Result r = l->discovery.GetNetworkInfo(info);
++        if (r.IsError()) return c.SetResult(r.raw);
++        SecurityParameter out{};
++        out.session_id = info.network_id.session_id;
++        std::memcpy(out.data.data(), info.ldn.security_parameter.data(), sizeof(out.data));
++        c.Push(out);
++    });
++    s->On(5, [l](Context& c) { // GetNetworkConfig
++        NetworkInfo info{};
++        const Result r = l->discovery.GetNetworkInfo(info);
++        if (r.IsError()) return c.SetResult(r.raw);
++        NetworkConfig out{};
++        out.intent_id = info.network_id.intent_id;
++        out.channel = info.common.channel;
++        out.node_count_max = info.ldn.node_count_max;
++        out.local_communication_version = info.ldn.nodes[0].local_communication_version;
++        c.Push(out);
++    });
++    s->On(100, [l](Context& c) { c.PushCopyObject(l->state_change); }); // AttachStateChangeEvent
++    s->On(101, [l](Context& c) { // GetNetworkInfoLatestUpdate -> info (pointer 0), node updates (pointer 1)
++        const size_t count = c.WriteBufferSize(1) / sizeof(NodeLatestUpdate);
++        if (count == 0) return c.SetResult(ResultBadInput.raw);
++        NetworkInfo info{};
++        std::vector<NodeLatestUpdate> updates(count);
++        const Result r = l->discovery.GetNetworkInfo(info, updates);
++        if (r.IsError()) return c.SetResult(r.raw);
++        c.WriteBuffer(&info, sizeof(info), 0);
++        c.WriteBuffer(updates.data(), updates.size() * sizeof(NodeLatestUpdate), 1);
++    });
++    const auto scan = [l](Context& c) { // Scan / ScanPrivate(channel, filter) -> count, networks
++        c.Pop<s16>(); // channel
++        const auto filter = c.Pop<ScanFilter>();
++        const size_t room = c.WriteBufferSize(0) / sizeof(NetworkInfo);
++        if (room == 0) return c.SetResult(ResultBadInput.raw);
++        std::vector<NetworkInfo> found(room);
++        s16 count = 0;
++        const Result r = c.kernel.Blocking([&] { return l->discovery.Scan(found, count, filter); });
++        if (r.IsError()) return c.SetResult(r.raw);
++        if (count > 0) c.WriteBuffer(found.data(), static_cast<size_t>(count) * sizeof(NetworkInfo), 0);
++        c.Push<s16>(count);
++    };
++    s->On(102, scan);
++    s->On(103, scan);
++    s->Ok(104); // SetWirelessControllerRestriction
++    s->Ok(106); // SetProtocol
++    s->On(200, [l](Context& c) { c.SetResult(l->discovery.OpenAccessPoint().raw); });
++    s->On(201, [l](Context& c) { c.SetResult(l->discovery.CloseAccessPoint().raw); });
++    s->On(202, [l](Context& c) { // CreateNetwork
++        const auto cfg = c.Pop<CreateNetworkConfig>();
++        c.SetResult(l->discovery.CreateNetwork(cfg.security_config, cfg.user_config, cfg.network_config).raw);
++    });
++    s->On(203, [l](Context& c) { // CreateNetworkPrivate (the address list is not used over a room)
++        const auto cfg = c.Pop<CreateNetworkConfigPrivate>();
++        c.SetResult(l->discovery.CreateNetwork(cfg.security_config, cfg.user_config, cfg.network_config).raw);
++    });
++    s->On(204, [l](Context& c) { c.SetResult(l->discovery.DestroyNetwork().raw); });
++    s->On(206, [l](Context& c) { // SetAdvertiseData
++        const auto data = c.ReadBuffer(0);
++        c.SetResult(l->discovery.SetAdvertiseData(std::span<const u8>{data}).raw);
++    });
++    s->Ok(207); // SetStationAcceptPolicy
++    s->Ok(208); // AddAcceptFilterEntry
++    s->On(300, [l](Context& c) { c.SetResult(l->discovery.OpenStation().raw); });
++    s->On(301, [l](Context& c) { c.SetResult(l->discovery.CloseStation().raw); });
++    s->On(302, [l](Context& c) { // Connect(data, network info in a pointer buffer)
++        const auto data = c.Pop<ConnectNetworkData>();
++        const auto raw = c.ReadBuffer(0);
++        if (raw.size() < sizeof(NetworkInfo)) return c.SetResult(ResultBadInput.raw);
++        NetworkInfo info{};
++        std::memcpy(&info, raw.data(), sizeof(info));
++        c.SetResult(l->discovery.Connect(info, data.user_config, static_cast<u16>(data.local_communication_version)).raw);
++    });
++    s->On(304, [l](Context& c) { c.SetResult(l->discovery.Disconnect().raw); });
++    s->On(400, [l](Context& c) { c.SetResult(l->Initialize()); });  // Initialize(pid)
++    s->On(401, [l](Context& c) { c.SetResult(l->Finalize()); });    // Finalize
++    s->On(402, [l](Context& c) { c.SetResult(l->Initialize()); });  // Initialize2(version, pid)
++    return s;
++}
++
++} // namespace
++
++std::shared_ptr<Service> MakeLocalCommunicationService(NativeKernel& runtime, const char* name) {
++    auto s = std::make_shared<Service>(name);
++    s->On(0, [&runtime](Context& c) { c.PushInterface(UserLocalCommunication(runtime)); }); // CreateUserLocalCommunicationService
++    return s;
++}
++
++} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_mii.cpp b/src/core/hle/kernel/native_mii.cpp
 new file mode 100644
 index 0000000000..4a85402ceb
@@ -5564,10 +6101,10 @@ index 0000000000..4a85402ceb
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_nvdrv_service.cpp b/src/core/hle/kernel/native_nvdrv_service.cpp
 new file mode 100644
-index 0000000000..cf40baaec8
+index 0000000000..a903b68ecc
 --- /dev/null
 +++ b/src/core/hle/kernel/native_nvdrv_service.cpp
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,124 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the GPU driver service ("nvdrv") answered by the runtime. The driver devices themselves - graphics memory handles
 +// (nvmap), GPU address spaces, syncpoints and their events, the GPU channel, the video decoder - are suyu's driver code (the
@@ -5583,6 +6120,7 @@ index 0000000000..cf40baaec8
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_readable_event.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/nvdrv/core/container.h"
@@ -5655,9 +6193,13 @@ index 0000000000..cf40baaec8
 +    s->On(3, [&kernel, nv, st, result](Context& c) { // Initialize(transfer memory size; process, transfer memory)
 +        if (!st->initialized) {
 +            if (c.request.copy_handles.empty()) return result(c, NvResult::BadParameter);
-+            KScopedAutoObject process = GetCurrentProcess(kernel).GetHandleTable().GetObject<KProcess>(kernel, c.request.copy_handles[0]);
-+            if (process.IsNull()) return result(c, NvResult::BadParameter);
-+            st->session = nv->GetContainer().OpenSession(process.GetPointerUnsafe());
++            if (KProcess* game = NativeGame::Process()) {
++                st->session = nv->GetContainer().OpenSession(game);
++            } else {
++                KScopedAutoObject process = GetCurrentProcess(kernel).GetHandleTable().GetObject<KProcess>(kernel, c.request.copy_handles[0]);
++                if (process.IsNull()) return result(c, NvResult::BadParameter);
++                st->session = nv->GetContainer().OpenSession(process.GetPointerUnsafe());
++            }
 +            st->initialized = true;
 +        }
 +        result(c, NvResult::Success);
@@ -5689,10 +6231,10 @@ index 0000000000..cf40baaec8
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..bd95253390
+index 0000000000..c9586bbdc0
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,415 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -5702,6 +6244,7 @@ index 0000000000..bd95253390
 +#include <cstring>
 +#include <functional>
 +#include <map>
++#include <tuple>
 +#include <mutex>
 +#include <array>
 +#include <set>
@@ -5719,7 +6262,9 @@ index 0000000000..bd95253390
 +#include "core/hle/service/sm/sm.h"
 +#include "core/core.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_threads.h"
++#include "kart_runtime/game_kernel.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/kernel/svc_results.h"
 +#include "core/memory.h"
@@ -5764,7 +6309,7 @@ index 0000000000..bd95253390
 +        [](u64 addr, void* out, size_t n) {
 +            KernelCore* k = g_kernel.load(std::memory_order_acquire);
 +            if (!k) return false;
-+            auto& mem = GetCurrentMemory(*k);
++            auto& mem = NativeGame::Process() ? NativeGame::Process()->GetMemory() : GetCurrentMemory(*k);
 +            if (!mem.IsValidVirtualAddressRange(addr, n)) return false;
 +            mem.ReadBlock(addr, out, n);
 +            return true;
@@ -5772,17 +6317,22 @@ index 0000000000..bd95253390
 +        [](u64 addr, const void* in, size_t n) {
 +            KernelCore* k = g_kernel.load(std::memory_order_acquire);
 +            if (!k) return false;
-+            auto& mem = GetCurrentMemory(*k);
++            auto& mem = NativeGame::Process() ? NativeGame::Process()->GetMemory() : GetCurrentMemory(*k);
 +            if (!mem.IsValidVirtualAddressRange(addr, n)) return false;
 +            mem.WriteBlock(addr, in, n);
 +            return true;
 +        },
-+        [] { t_host_wait = NativeThreads::BeginHostWait(); },
 +        [] {
++            if (NativeGame::OnGameThread()) return NativeGame::Kernel()->BeginWait();
++            t_host_wait = NativeThreads::BeginHostWait();
++        },
++        [] {
++            if (NativeGame::OnGameThread()) return NativeGame::Kernel()->EndWait();
 +            if (t_host_wait) NativeThreads::EndHostWait();
 +            t_host_wait = false;
 +        },
 +        []() -> u64 {
++            if (KProcess* game = NativeGame::Process()) return game->GetProcessId();
 +            KernelCore* k = g_kernel.load(std::memory_order_acquire);
 +            KProcess* p = k ? GetCurrentProcessPointer(*k) : nullptr;
 +            return p ? p->GetProcessId() : 0;
@@ -5800,6 +6350,14 @@ index 0000000000..bd95253390
 +            std::scoped_lock lk{m};
 +            if (seen.emplace(service, cmd).second)
 +                LOG_WARNING(Service, "native services: {} command {} is not implemented (answered 'unknown command')", service, cmd);
++        };
++        KartRuntime::Service::on_error = [](const std::string& service, u32 cmd, u32 result) {
++            static std::mutex m;
++            static std::map<std::tuple<std::string, u32, u32>, u32> seen;
++            std::scoped_lock lk{m};
++            if (seen[{service, cmd, result}]++ < 3)
++                LOG_INFO(Service, "native services: {} command {} answered {:#x} ({:04}-{:04})", service, cmd, result,
++                         2000 + (result & 0x1ff), (result >> 9) & 0x1fff);
 +        };
 +        if (std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")) {
 +            KartRuntime::Service::on_call = [](const std::string& service, u32 cmd) {
@@ -5973,6 +6531,15 @@ index 0000000000..bd95253390
 +    }
 +}
 +
++void OnRuntimeReset(KernelCore& kernel, KartRuntime::Event& event) {
++    if (event.name == "kernel event") (void)static_cast<KernelEventMirror&>(event).source->Reset(kernel);
++}
++
++KProcess& GameProcess(KernelCore& kernel) {
++    if (KProcess* game = NativeGame::Process()) return *game;
++    return GetCurrentProcess(kernel);
++}
++
 +Result ResetSignal(KernelCore& kernel, Svc::Handle handle) {
 +    auto event = Runtime(kernel).GetAs<KartRuntime::Event>(handle);
 +    if (!event) return ResultInvalidHandle;
@@ -6085,10 +6652,10 @@ index 0000000000..bd95253390
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.h b/src/core/hle/kernel/native_services.h
 new file mode 100644
-index 0000000000..dbcef7046d
+index 0000000000..8d80a43dd2
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,65 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native services (docs/NATIVE_ENGINE.md, "native services") - the suyu-side adapter of kart_runtime/native_kernel.h.
 +// Services named in KARTRECOMP_NATIVE_SERVICES (default on Linux: every service the runtime has) are answered by the runtime: the
@@ -6105,12 +6672,14 @@ index 0000000000..dbcef7046d
 +
 +namespace KartRuntime {
 +class NativeKernel;
++class Event;
 +}
 +
 +namespace Kernel {
 +class KernelCore;
 +class KThread;
 +class KReadableEvent;
++class KProcess;
 +}
 +
 +namespace Kernel::NativeServices {
@@ -6142,6 +6711,10 @@ index 0000000000..dbcef7046d
 +/// A runtime handle that mirrors an emulated kernel event signalled by the engine's library parts (audio_core, hid_core, the
 +/// driver module): the game waits on it and resets it natively; the emulated event's signal and reset reach the mirror.
 +u32 MirrorKernelEvent(KernelCore& kernel, KReadableEvent* event);
++/// After the runtime's ResetSignal on a mirror: the emulated event is reset too.
++void OnRuntimeReset(KernelCore& kernel, KartRuntime::Event& event);
++/// The game's process: the runtime kernel's when the game runs on it, else the calling thread's.
++KProcess& GameProcess(KernelCore& kernel);
 +/// From KThread::FinishTermination: the thread has ended.
 +void OnThreadEnded(KThread* thread);
 +/// From KReadableEvent::Signal / Reset.
@@ -6150,10 +6723,10 @@ index 0000000000..dbcef7046d
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..90a2cf1dad
+index 0000000000..605442e694
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,394 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -6171,6 +6744,7 @@ index 0000000000..90a2cf1dad
 +#include "core/file_sys/patch_manager.h"
 +#include "core/file_sys/registered_cache.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_services.h"
 +#include "core/hle/service/acc/profile_manager.h"
 +#include "common/fs/fs.h"
@@ -6396,7 +6970,7 @@ index 0000000000..90a2cf1dad
 +std::shared_ptr<KartRuntime::Service> MakeApplets(KartRuntime::NativeKernel& runtime, KernelCore& kernel) {
 +    Core::System& system = kernel.System();
 +    AppletHooks h;
-+    h.aruid = GetCurrentProcess(kernel).GetProcessId();
++    h.aruid = GameProcess(kernel).GetProcessId();
 +    {
 +        struct {
 +            u32 magic = 0xC79497CA;
@@ -6461,6 +7035,7 @@ index 0000000000..90a2cf1dad
 +    s->On(2, [pl](KartRuntime::Context& c) { c.Push<u32>(pl->FontOffsetAndSize(c.Pop<u32>()).second); }); // GetSize
 +    s->On(3, [pl](KartRuntime::Context& c) { c.Push<u32>(pl->FontOffsetAndSize(c.Pop<u32>()).first); });  // GetSharedMemoryAddressOffset
 +    s->On(4, [pl, &kernel](KartRuntime::Context& c) { // GetSharedMemoryNativeHandle
++        if (NativeGame::Process()) return c.PushCopyHandle(NativeGame::AddSharedMemory(pl->FontSharedMemory()));
 +        Handle h{};
 +        if (GetCurrentProcess(kernel).GetHandleTable().Add(kernel, &h, &pl->FontSharedMemory()).IsError()) return c.SetResult(0xD201); // out of handles
 +        c.PushCopyHandle(h);
@@ -6518,6 +7093,7 @@ index 0000000000..90a2cf1dad
 +        {"friend:u", [] { return MakeFriends("friend:u"); }},
 +        {"friend:a", [] { return MakeFriends("friend:a"); }},
 +        {"lm", [] { return MakeLog(); }},
++        {"csrng", [] { return MakeRandom(); }},
 +        {"mm:u", [] { return MakeMultimedia(); }},
 +        {"acc:u0", [&] { return MakeAccount("acc:u0", MakeAccountConfig(system)); }},
 +        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
@@ -6536,6 +7112,9 @@ index 0000000000..90a2cf1dad
 +        {"vi:m", [&] { return NativeDisplay(runtime).Root("vi:m", 2); }},
 +        {"vi:u", [&] { return NativeDisplay(runtime).Root("vi:u", 0); }},
 +        {"vi:s", [&] { return NativeDisplay(runtime).Root("vi:s", 1); }},
++        {"ldn:u", [&] { return MakeLocalCommunicationService(runtime, "ldn:u"); }},
++        {"bsd:u", [] { return MakeSocketService("bsd:u"); }},
++        {"bsd:s", [] { return MakeSocketService("bsd:s"); }},
 +    };
 +    const auto it = factories.find(name);
 +    return it == factories.end() ? nullptr : it->second();
@@ -6544,10 +7123,10 @@ index 0000000000..90a2cf1dad
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..05bff5db47
+index 0000000000..1f633e6eef
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,60 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -6592,6 +7171,12 @@ index 0000000000..05bff5db47
 +/// The GPU driver service around suyu's driver module (native_nvdrv_service.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeNvdrvService(KernelCore& kernel, const char* name);
 +
++/// Local wireless ("ldn:u") over a multiplayer room, around suyu's LANDiscovery and room client (native_ldn.cpp).
++std::shared_ptr<KartRuntime::Service> MakeLocalCommunicationService(KartRuntime::NativeKernel& runtime, const char* name);
++
++/// Sockets ("bsd:u", "bsd:s") around suyu's socket library; room proxy sockets while in a room (native_bsd.cpp).
++std::shared_ptr<KartRuntime::Service> MakeSocketService(const char* name);
++
 +/// How the web applet opens a page in the system browser (set by the frontend).
 +void SetOpenUrlHandler(std::function<bool(const std::string&)> f);
 +/// The engine asks the game to quit (the applet manager's exit message).
@@ -6604,10 +7189,10 @@ index 0000000000..05bff5db47
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_sync.cpp b/src/core/hle/kernel/native_sync.cpp
 new file mode 100644
-index 0000000000..d79575cf6e
+index 0000000000..c4a2542d3f
 --- /dev/null
 +++ b/src/core/hle/kernel/native_sync.cpp
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,170 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_sync.h"
 +
@@ -6619,7 +7204,9 @@ index 0000000000..d79575cf6e
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_thread.h"
 +#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_threads.h"
++#include "kart_runtime/game_kernel.h"
 +#include "core/hle/kernel/svc_results.h"
 +#include "core/memory.h"
 +#include "kart_runtime/sync_arbiter.h"
@@ -6637,10 +7224,18 @@ index 0000000000..d79575cf6e
 +    static SyncArbiter arbiter{{
 +        [](u64 address) -> u32* {
 +            KernelCore* k = g_kernel.load(std::memory_order_acquire);
++            if (KProcess* game = NativeGame::Process()) return reinterpret_cast<u32*>(game->GetMemory().GetPointerSilent(address));
 +            return k ? reinterpret_cast<u32*>(GetCurrentMemory(*k).GetPointerSilent(address)) : nullptr;
 +        },
-+        [] { NativeThreads::BeginHostWait(); },
-+        [] { NativeThreads::EndHostWait(); },
++        [] {
++            // A game thread of the runtime's kernel gives its virtual core up; a kernel thread its emulated one.
++            if (NativeGame::OnGameThread()) NativeGame::Kernel()->BeginWait();
++            else NativeThreads::BeginHostWait();
++        },
++        [] {
++            if (NativeGame::OnGameThread()) NativeGame::Kernel()->EndWait();
++            else NativeThreads::EndHostWait();
++        },
 +    }};
 +    if (!g_used.exchange(true, std::memory_order_acq_rel)) {
 +        g_kernel.store(&kernel, std::memory_order_release);
@@ -6661,6 +7256,14 @@ index 0000000000..d79575cf6e
 +    }
 +    return arbiter;
 +}
++
++} // namespace
++
++KartRuntime::SyncArbiter& Instance(KernelCore& kernel) {
++    return Arbiter(kernel, false);
++}
++
++namespace {
 +
 +Result ToResult(SyncArbiter::Result r) {
 +    switch (r) {
@@ -6762,10 +7365,10 @@ index 0000000000..d79575cf6e
 +} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_sync.h b/src/core/hle/kernel/native_sync.h
 new file mode 100644
-index 0000000000..e8715b3d75
+index 0000000000..cbf23ef782
 --- /dev/null
 +++ b/src/core/hle/kernel/native_sync.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,42 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: native synchronisation (docs/NATIVE_ENGINE.md, "native kernel" step 4) - the suyu-side adapter of
 +// kart_runtime/sync_arbiter.h. With native threads, the lock, condition-variable and address-wait system calls
@@ -6779,6 +7382,10 @@ index 0000000000..e8715b3d75
 +#include "core/hle/kernel/svc_types.h"
 +#include "core/hle/result.h"
 +
++namespace KartRuntime {
++class SyncArbiter;
++}
++
 +namespace Kernel {
 +class KernelCore;
 +class KThread;
@@ -6787,6 +7394,9 @@ index 0000000000..e8715b3d75
 +namespace Kernel::NativeSync {
 +
 +bool Enabled();
++
++/// The arbiter instance (the runtime's game kernel uses the same one).
++KartRuntime::SyncArbiter& Instance(KernelCore& kernel);
 +
 +/// `thread` is being terminated: ends its native wait, if any, and makes later ones return at once (as the kernel does).
 +void OnTerminateRequested(KernelCore& kernel, KThread* thread);
@@ -7713,6 +8323,27 @@ index 11538cf9a8..8f5b01c3cd 100644
 +#endif
 +
  } // namespace Service::AM::Frontend
+diff --git a/src/core/hle/service/audio/audio_renderer.cpp b/src/core/hle/service/audio/audio_renderer.cpp
+index 238589d246..451d6398b9 100644
+--- a/src/core/hle/service/audio/audio_renderer.cpp
++++ b/src/core/hle/service/audio/audio_renderer.cpp
+@@ -5,6 +5,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "core/hle/service/audio/audio_renderer.h"
++#include "core/hle/kernel/k_transfer_memory.h"
+ #include "core/hle/service/cmif_serialization.h"
+ 
+ namespace Service::Audio {
+@@ -40,7 +41,7 @@ IAudioRenderer::IAudioRenderer(Core::System& system_, Manager& manager_,
+     RegisterHandlers(functions);
+ 
+     process_handle->Open(system_.Kernel());
+-    impl->Initialize(params, transfer_memory, transfer_memory_size, process_handle,
++    impl->Initialize(params, GetInteger(transfer_memory->GetSourceAddress()), transfer_memory_size, process_handle,
+                      applet_resource_user_id, session_id);
+ }
+ 
 diff --git a/src/core/hle/service/caps/caps_su.cpp b/src/core/hle/service/caps/caps_su.cpp
 index 9b86072f2f..509722eaae 100644
 --- a/src/core/hle/service/caps/caps_su.cpp
@@ -8071,6 +8702,45 @@ index b82c385a6c..c140cc9801 100644
  private:
      Result RequestLoad(SharedFontType type);
      Result GetLoadState(Out<LoadState> out_load_state, SharedFontType type);
+diff --git a/src/core/hle/service/nvdrv/core/container.cpp b/src/core/hle/service/nvdrv/core/container.cpp
+index 9edce03f64..fee1eb3239 100644
+--- a/src/core/hle/service/nvdrv/core/container.cpp
++++ b/src/core/hle/service/nvdrv/core/container.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/service/nvdrv/core/container.h"
++#include "core/hle/kernel/native_game.h"
++#include "kart_runtime/address_space.h"
+ #include "core/hle/service/nvdrv/core/heap_mapper.h"
+ #include "core/hle/service/nvdrv/core/nvmap.h"
+ #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
+@@ -77,11 +79,20 @@ SessionId Container::OpenSession(Kernel::KProcess* process) {
+         size_t region_size = 0;
+         VAddr region_start = 0;
+         while (true) {
+-            Kernel::KMemoryInfo mem_info{};
+-            Kernel::Svc::PageInfo page_info{};
+-            R_ASSERT(page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info),
+-                                          cur_addr));
+-            auto svc_mem_info = mem_info.GetSvcMemoryInfo();
++            Kernel::Svc::MemoryInfo svc_mem_info{};
++            if (auto* native = Kernel::NativeGame::Memory()) {
++                // kart-recomp: the game's memory is the runtime's address space (docs/NATIVE_KERNEL.md).
++                const auto info = native->Query(GetInteger(cur_addr));
++                svc_mem_info.base_address = info.base_address;
++                svc_mem_info.size = info.size;
++                svc_mem_info.state = static_cast<Kernel::Svc::MemoryState>(info.state);
++            } else {
++                Kernel::KMemoryInfo mem_info{};
++                Kernel::Svc::PageInfo page_info{};
++                R_ASSERT(page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info),
++                                              cur_addr));
++                svc_mem_info = mem_info.GetSvcMemoryInfo();
++            }
+ 
+             // Check if this memory block is heap.
+             if (svc_mem_info.state == Kernel::Svc::MemoryState::Normal) {
 diff --git a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp b/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
 index 885cc4b424..5a5f993a36 100644
 --- a/src/core/hle/service/nvdrv/devices/nvdisp_disp0.cpp
@@ -8179,6 +8849,58 @@ index 5df73ef38c..ac93d61bab 100644
      }
  
      const auto bind_id = channel_state->bind_id;
+diff --git a/src/core/hle/service/nvdrv/devices/nvmap.cpp b/src/core/hle/service/nvdrv/devices/nvmap.cpp
+index de5b31114b..69ad30fa71 100644
+--- a/src/core/hle/service/nvdrv/devices/nvmap.cpp
++++ b/src/core/hle/service/nvdrv/devices/nvmap.cpp
+@@ -18,6 +18,7 @@
+ #include "core/hle/service/nvdrv/core/nvmap.h"
+ #include "core/hle/service/nvdrv/devices/ioctl_serialization.h"
+ #include "core/hle/service/nvdrv/devices/nvmap.h"
++#include "core/hle/kernel/native_game.h"
+ #include "core/memory.h"
+ 
+ using Core::Memory::YUZU_PAGESIZE;
+@@ -134,11 +135,17 @@ NvResult nvmap::IocAlloc(IocAllocParams& params, DeviceFD fd) {
+     }
+     bool is_out_io{};
+     auto process = container.GetSession(sessions[fd])->process;
+-    ASSERT(process->GetPageTable()
+-               .LockForMapDeviceAddressSpace(&is_out_io, handle_description->address,
+-                                             handle_description->size,
+-                                             Kernel::KMemoryPermission::None, true, false)
+-               .IsSuccess());
++    if (Kernel::NativeGame::Memory()) {
++        // kart-recomp: the game's memory is the runtime's address space.
++        if (!Kernel::NativeGame::LockDevice(handle_description->address, handle_description->size))
++            LOG_ERROR(Service_NVDRV, "native kernel: device lock of {:#x}+{:#x} refused", handle_description->address, handle_description->size);
++    } else {
++        ASSERT(process->GetPageTable()
++                   .LockForMapDeviceAddressSpace(&is_out_io, handle_description->address,
++                                                 handle_description->size,
++                                                 Kernel::KMemoryPermission::None, true, false)
++                   .IsSuccess());
++    }
+     return result;
+ }
+ 
+@@ -245,9 +252,13 @@ NvResult nvmap::IocFree(IocFreeParams& params, DeviceFD fd) {
+     if (auto freeInfo{file.FreeHandle(params.handle, false)}) {
+         auto process = container.GetSession(sessions[fd])->process;
+         if (freeInfo->can_unlock) {
+-            ASSERT(process->GetPageTable()
+-                       .UnlockForDeviceAddressSpace(freeInfo->address, freeInfo->size)
+-                       .IsSuccess());
++            if (Kernel::NativeGame::Memory()) {
++                Kernel::NativeGame::UnlockDevice(freeInfo->address, freeInfo->size);
++            } else {
++                ASSERT(process->GetPageTable()
++                           .UnlockForDeviceAddressSpace(freeInfo->address, freeInfo->size)
++                           .IsSuccess());
++            }
+         }
+         params.address = freeInfo->address;
+         params.size = static_cast<u32>(freeInfo->size);
 diff --git a/src/core/hle/service/nvdrv/nvdrv.cpp b/src/core/hle/service/nvdrv/nvdrv.cpp
 index 8c618ca258..9f574779c1 100644
 --- a/src/core/hle/service/nvdrv/nvdrv.cpp
@@ -8370,6 +9092,29 @@ index 8cb5a04b12..79f69b9401 100644
      // If any new buffers were acquired, we can present.
      if (has_acquired_buffer && !composition_stack.empty()) {
          // Sort back-to-front: lower z first, higher z last so top-most draws last (on top).
+diff --git a/src/core/hle/service/os/process.cpp b/src/core/hle/service/os/process.cpp
+index d201247466..74eb776a52 100644
+--- a/src/core/hle/service/os/process.cpp
++++ b/src/core/hle/service/os/process.cpp
+@@ -9,6 +9,7 @@
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/svc_types.h"
+ #include "core/hle/service/os/process.h"
++#include "core/hle/kernel/native_game.h"
+ #include "core/loader/loader.h"
+ 
+ namespace Service {
+@@ -79,7 +80,9 @@ bool Process::Run() {
+ 
+     // Start.
+     if (m_process) {
+-        m_process->Run(m_system.Kernel(), m_main_thread_priority, m_main_thread_stack_size);
++        // kart-recomp: with KARTRECOMP_NATIVE_KERNEL=1 the game's threads and system calls are the runtime's.
++        if (!Kernel::NativeGame::Start(m_system, *m_process, m_main_thread_priority, m_main_thread_stack_size))
++            m_process->Run(m_system.Kernel(), m_main_thread_priority, m_main_thread_stack_size);
+     }
+ 
+     // Mark as started.
 diff --git a/src/core/hle/service/server_manager.cpp b/src/core/hle/service/server_manager.cpp
 index 00937db8ab..47bb8444fd 100644
 --- a/src/core/hle/service/server_manager.cpp
@@ -8747,6 +9492,1582 @@ index ac2e821e11..eef44770a1 100644
      Kernel::KClientSession* client_session{};
      auto result = GetServiceImpl(&client_session, ctx);
      if (ctx.GetIsDeferred()) {
+diff --git a/src/core/hle/service/sockets/bsd.cpp b/src/core/hle/service/sockets/bsd.cpp
+index 6e5de1ade6..36b7aceaef 100644
+--- a/src/core/hle/service/sockets/bsd.cpp
++++ b/src/core/hle/service/sockets/bsd.cpp
+@@ -17,6 +17,7 @@
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/hle/service/ipc_helpers.h"
+ #include "core/hle/service/sockets/bsd.h"
++#include "core/hle/service/sockets/bsd_sockets.h"
+ #include "core/hle/service/sockets/sockets_translate.h"
+ #include "core/internal_network/network.h"
+ #include "core/internal_network/socket_proxy.h"
+@@ -26,36 +27,10 @@
+ 
+ namespace Service::Sockets {
+ 
+-namespace {
+-
+-bool IsConnectionBased(Type type) {
+-    switch (type) {
+-    case Type::STREAM:
+-        return true;
+-    case Type::DGRAM:
+-        return false;
+-    default:
+-        UNIMPLEMENTED_MSG("Unimplemented type={}", type);
+-        return false;
+-    }
+-}
+-
+-template <typename T>
+-T GetValue(std::span<const u8> buffer) {
+-    T t{};
+-    std::memcpy(&t, buffer.data(), (std::min)(sizeof(T), buffer.size()));
+-    return t;
+-}
+-
+-template <typename T>
+-void PutValue(std::span<u8> buffer, const T& t) {
+-    std::memcpy(buffer.data(), &t, (std::min)(sizeof(T), buffer.size()));
+-}
+ 
+-} // Anonymous namespace
+ 
+ void BSD::PollWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->PollImpl(write_buffer, read_buffer, nfds, timeout);
++    std::tie(ret, bsd_errno) = bsd->sockets.PollImpl(write_buffer, read_buffer, nfds, timeout);
+ }
+ 
+ void BSD::PollWork::Response(HLERequestContext& ctx) {
+@@ -70,7 +45,7 @@ void BSD::PollWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::AcceptWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->AcceptImpl(fd, write_buffer);
++    std::tie(ret, bsd_errno) = bsd->sockets.AcceptImpl(fd, write_buffer);
+ }
+ 
+ void BSD::AcceptWork::Response(HLERequestContext& ctx) {
+@@ -86,7 +61,7 @@ void BSD::AcceptWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::ConnectWork::Execute(BSD* bsd) {
+-    bsd_errno = bsd->ConnectImpl(fd, addr);
++    bsd_errno = bsd->sockets.ConnectImpl(fd, addr);
+ }
+ 
+ void BSD::ConnectWork::Response(HLERequestContext& ctx) {
+@@ -97,7 +72,7 @@ void BSD::ConnectWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::RecvWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->RecvImpl(fd, flags, message);
++    std::tie(ret, bsd_errno) = bsd->sockets.RecvImpl(fd, flags, message);
+ }
+ 
+ void BSD::RecvWork::Response(HLERequestContext& ctx) {
+@@ -110,7 +85,7 @@ void BSD::RecvWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::RecvFromWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->RecvFromImpl(fd, flags, message, addr);
++    std::tie(ret, bsd_errno) = bsd->sockets.RecvFromImpl(fd, flags, message, addr);
+ }
+ 
+ void BSD::RecvFromWork::Response(HLERequestContext& ctx) {
+@@ -127,7 +102,7 @@ void BSD::RecvFromWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::SendWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->SendImpl(fd, flags, message);
++    std::tie(ret, bsd_errno) = bsd->sockets.SendImpl(fd, flags, message);
+ }
+ 
+ void BSD::SendWork::Response(HLERequestContext& ctx) {
+@@ -138,7 +113,7 @@ void BSD::SendWork::Response(HLERequestContext& ctx) {
+ }
+ 
+ void BSD::SendToWork::Execute(BSD* bsd) {
+-    std::tie(ret, bsd_errno) = bsd->SendToImpl(fd, flags, message, addr);
++    std::tie(ret, bsd_errno) = bsd->sockets.SendToImpl(fd, flags, message, addr);
+ }
+ 
+ void BSD::SendToWork::Response(HLERequestContext& ctx) {
+@@ -173,7 +148,7 @@ void BSD::Socket(HLERequestContext& ctx) {
+ 
+     LOG_DEBUG(Service, "called. domain={} type={} protocol={}", domain, type, protocol);
+ 
+-    const auto [fd, bsd_errno] = SocketImpl(static_cast<Domain>(domain), static_cast<Type>(type),
++    const auto [fd, bsd_errno] = sockets.SocketImpl(static_cast<Domain>(domain), static_cast<Type>(type),
+                                             static_cast<Protocol>(protocol));
+ 
+     IPC::ResponseBuilder rb{ctx, 4};
+@@ -224,7 +199,7 @@ void BSD::Bind(HLERequestContext& ctx) {
+     const s32 fd = rp.Pop<s32>();
+ 
+     LOG_DEBUG(Service, "called. fd={} addrlen={}", fd, ctx.GetReadBufferSize());
+-    BuildErrnoResponse(ctx, BindImpl(fd, ctx.ReadBuffer()));
++    BuildErrnoResponse(ctx, sockets.BindImpl(fd, ctx.ReadBuffer()));
+ }
+ 
+ void BSD::Connect(HLERequestContext& ctx) {
+@@ -246,7 +221,7 @@ void BSD::GetPeerName(HLERequestContext& ctx) {
+     LOG_DEBUG(Service, "called. fd={}", fd);
+ 
+     std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
+-    const Errno bsd_errno = GetPeerNameImpl(fd, write_buffer);
++    const Errno bsd_errno = sockets.GetPeerNameImpl(fd, write_buffer);
+ 
+     ctx.WriteBuffer(write_buffer);
+ 
+@@ -264,7 +239,7 @@ void BSD::GetSockName(HLERequestContext& ctx) {
+     LOG_DEBUG(Service, "called. fd={}", fd);
+ 
+     std::vector<u8> write_buffer(ctx.GetWriteBufferSize());
+-    const Errno bsd_errno = GetSockNameImpl(fd, write_buffer);
++    const Errno bsd_errno = sockets.GetSockNameImpl(fd, write_buffer);
+ 
+     ctx.WriteBuffer(write_buffer);
+ 
+@@ -286,7 +261,7 @@ void BSD::GetSockOpt(HLERequestContext& ctx) {
+     LOG_DEBUG(Service, "called. fd={} level={} optname=0x{:x} len=0x{:x}", fd, level, optname,
+               optval.size());
+ 
+-    const Errno err = GetSockOptImpl(fd, level, optname, optval);
++    const Errno err = sockets.GetSockOptImpl(fd, level, optname, optval);
+ 
+     ctx.WriteBuffer(optval);
+ 
+@@ -304,7 +279,7 @@ void BSD::Listen(HLERequestContext& ctx) {
+ 
+     LOG_DEBUG(Service, "called. fd={} backlog={}", fd, backlog);
+ 
+-    BuildErrnoResponse(ctx, ListenImpl(fd, backlog));
++    BuildErrnoResponse(ctx, sockets.ListenImpl(fd, backlog));
+ }
+ 
+ void BSD::Fcntl(HLERequestContext& ctx) {
+@@ -315,7 +290,7 @@ void BSD::Fcntl(HLERequestContext& ctx) {
+ 
+     LOG_DEBUG(Service, "called. fd={} cmd={} arg={}", fd, cmd, arg);
+ 
+-    const auto [ret, bsd_errno] = FcntlImpl(fd, static_cast<FcntlCmd>(cmd), arg);
++    const auto [ret, bsd_errno] = sockets.FcntlImpl(fd, static_cast<FcntlCmd>(cmd), arg);
+ 
+     IPC::ResponseBuilder rb{ctx, 4};
+     rb.Push(ResultSuccess);
+@@ -334,7 +309,7 @@ void BSD::SetSockOpt(HLERequestContext& ctx) {
+     LOG_DEBUG(Service, "called. fd={} level={} optname=0x{:x} optlen={}", fd, level,
+               static_cast<u32>(optname), optval.size());
+ 
+-    BuildErrnoResponse(ctx, SetSockOptImpl(fd, level, optname, optval));
++    BuildErrnoResponse(ctx, sockets.SetSockOptImpl(fd, level, optname, optval));
+ }
+ 
+ void BSD::Shutdown(HLERequestContext& ctx) {
+@@ -345,7 +320,7 @@ void BSD::Shutdown(HLERequestContext& ctx) {
+ 
+     LOG_DEBUG(Service, "called. fd={} how={}", fd, how);
+ 
+-    BuildErrnoResponse(ctx, ShutdownImpl(fd, how));
++    BuildErrnoResponse(ctx, sockets.ShutdownImpl(fd, how));
+ }
+ 
+ void BSD::Recv(HLERequestContext& ctx) {
+@@ -442,7 +417,7 @@ void BSD::Close(HLERequestContext& ctx) {
+ 
+     LOG_DEBUG(Service, "called. fd={}", fd);
+ 
+-    BuildErrnoResponse(ctx, CloseImpl(fd));
++    BuildErrnoResponse(ctx, sockets.CloseImpl(fd));
+ }
+ 
+ void BSD::DuplicateSocket(HLERequestContext& ctx) {
+@@ -464,7 +439,7 @@ void BSD::DuplicateSocket(HLERequestContext& ctx) {
+     IPC::ResponseBuilder rb{ctx, 4};
+     rb.Push(ResultSuccess);
+ 
+-    auto const res_v = DuplicateSocketImpl(input.fd);
++    auto const res_v = sockets.DuplicateSocketImpl(input.fd);
+     if (auto* res = std::get_if<s32>(&res_v)) {
+         rb.PushRaw(OutputParameters{
+             .ret = *res,
+@@ -495,545 +470,6 @@ void BSD::ExecuteWork(HLERequestContext& ctx, Work work) {
+     work.Response(ctx);
+ }
+ 
+-std::pair<s32, Errno> BSD::SocketImpl(Domain domain, Type type, Protocol protocol) {
+-
+-    if (type == Type::SEQPACKET) {
+-        UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
+-    } else if (type == Type::RAW && (domain != Domain::INET || protocol != Protocol::ICMP)) {
+-        UNIMPLEMENTED_MSG("SOCK_RAW errno management");
+-    }
+-
+-    [[maybe_unused]] const bool unk_flag = (static_cast<u32>(type) & 0x20000000) != 0;
+-    UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
+-    type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
+-
+-    const s32 fd = FindFreeFileDescriptorHandle();
+-    if (fd < 0) {
+-        LOG_ERROR(Service, "No more file descriptors available");
+-        return {-1, Errno::MFILE};
+-    }
+-
+-    file_descriptors[fd] = FileDescriptor{};
+-    FileDescriptor& descriptor = *file_descriptors[fd];
+-    // ENONMEM might be thrown here
+-
+-    LOG_INFO(Service, "New socket fd={}", fd);
+-
+-    auto room_member = Network::GetRoomMember().lock();
+-    if (room_member && room_member->IsConnected()) {
+-        descriptor.socket = std::make_shared<Network::ProxySocket>();
+-    } else {
+-        descriptor.socket = std::make_shared<Network::Socket>();
+-    }
+-
+-    descriptor.socket->Initialize(Translate(domain), Translate(type), Translate(protocol));
+-    descriptor.is_connection_based = IsConnectionBased(type);
+-
+-    if (Settings::values.airplane_mode.GetValue() && descriptor.is_connection_based) {
+-        LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
+-        return {-1, Errno::NOTCONN};
+-    }
+-
+-    return {fd, Errno::SUCCESS};
+-}
+-
+-std::pair<s32, Errno> BSD::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
+-                                    s32 nfds, s32 timeout) {
+-    if (nfds <= 0) {
+-        // When no entries are provided, -1 is returned with errno zero
+-        return {-1, Errno::SUCCESS};
+-    }
+-    if (read_buffer.size() < nfds * sizeof(PollFD)) {
+-        return {-1, Errno::INVAL};
+-    }
+-    if (write_buffer.size() < nfds * sizeof(PollFD)) {
+-        return {-1, Errno::INVAL};
+-    }
+-
+-    std::vector<PollFD> fds(nfds);
+-    std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
+-
+-    if (timeout >= 0) {
+-        const s64 seconds = timeout / 1000;
+-        const u64 nanoseconds = 1'000'000 * (static_cast<u64>(timeout) % 1000);
+-
+-        if (seconds < 0) {
+-            return {-1, Errno::INVAL};
+-        }
+-        if (nanoseconds > 999'999'999) {
+-            return {-1, Errno::INVAL};
+-        }
+-    } else if (timeout != -1) {
+-        return {-1, Errno::INVAL};
+-    }
+-
+-    for (PollFD& pollfd : fds) {
+-        ASSERT(False(pollfd.revents));
+-
+-        if (pollfd.fd > static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
+-            LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
+-            pollfd.revents = PollEvents{};
+-            return {0, Errno::SUCCESS};
+-        }
+-
+-        const std::optional<FileDescriptor>& descriptor = file_descriptors[pollfd.fd];
+-        if (!descriptor) {
+-            LOG_TRACE(Service, "File descriptor handle={} is not allocated", pollfd.fd);
+-            pollfd.revents = PollEvents::Nval;
+-            return {0, Errno::SUCCESS};
+-        }
+-    }
+-
+-    std::vector<Network::PollFD> host_pollfds(fds.size());
+-    std::transform(fds.begin(), fds.end(), host_pollfds.begin(), [](PollFD pollfd) {
+-        Network::PollFD result;
+-        result.socket = file_descriptors[pollfd.fd]->socket.get();
+-        result.events = Translate(pollfd.events);
+-        result.revents = Network::PollEvents{};
+-        return result;
+-    });
+-
+-    const auto result = Network::Poll(host_pollfds, timeout);
+-
+-    const size_t num = host_pollfds.size();
+-    for (size_t i = 0; i < num; ++i) {
+-        fds[i].revents = Translate(host_pollfds[i].revents);
+-    }
+-    std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
+-
+-    return Translate(result);
+-}
+-
+-std::pair<s32, Errno> BSD::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-
+-    const s32 new_fd = FindFreeFileDescriptorHandle();
+-    if (new_fd < 0) {
+-        LOG_ERROR(Service, "No more file descriptors available");
+-        return {-1, Errno::MFILE};
+-    }
+-
+-    FileDescriptor& descriptor = *file_descriptors[fd];
+-    auto [result, bsd_errno] = descriptor.socket->Accept();
+-    if (bsd_errno != Network::Errno::SUCCESS) {
+-        return {-1, Translate(bsd_errno)};
+-    }
+-
+-    file_descriptors[new_fd] = FileDescriptor{};
+-    FileDescriptor& new_descriptor = *file_descriptors[new_fd];
+-    new_descriptor.socket = std::move(result.socket);
+-    new_descriptor.is_connection_based = descriptor.is_connection_based;
+-
+-    const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
+-    PutValue(write_buffer, guest_addr_in);
+-
+-    return {new_fd, Errno::SUCCESS};
+-}
+-
+-Errno BSD::BindImpl(s32 fd, std::span<const u8> addr) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    ASSERT(addr.size() >= 16);
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    auto addr_in = GetValue<SockAddrIn>(addr);
+-
+-    return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
+-}
+-
+-Errno BSD::ConnectImpl(s32 fd, std::span<const u8> addr) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-
+-    ASSERT(addr.size() >= 16);
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    auto addr_in = GetValue<SockAddrIn>(addr);
+-
+-    const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
+-
+-    if (result == Errno::ISCONN) {
+-        LOG_DEBUG(Service, "returned ISCONN - socket already connected");
+-        return Errno::SUCCESS;
+-    }
+-
+-    return result;
+-}
+-
+-Errno BSD::GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    const auto [addr_in, bsd_errno] = file_descriptors[fd]->socket->GetPeerName();
+-    if (bsd_errno != Network::Errno::SUCCESS) {
+-        return Translate(bsd_errno);
+-    }
+-    const SockAddrIn guest_addrin = Translate(addr_in);
+-
+-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
+-    write_buffer.resize(sizeof(guest_addrin));
+-    PutValue(write_buffer, guest_addrin);
+-    return Translate(bsd_errno);
+-}
+-
+-Errno BSD::GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    const auto [addr_in, bsd_errno] = file_descriptors[fd]->socket->GetSockName();
+-    if (bsd_errno != Network::Errno::SUCCESS) {
+-        return Translate(bsd_errno);
+-    }
+-    const SockAddrIn guest_addrin = Translate(addr_in);
+-
+-    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
+-    write_buffer.resize(sizeof(guest_addrin));
+-    PutValue(write_buffer, guest_addrin);
+-    return Translate(bsd_errno);
+-}
+-
+-Errno BSD::ListenImpl(s32 fd, s32 backlog) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-    return Translate(file_descriptors[fd]->socket->Listen(backlog));
+-}
+-
+-std::pair<s32, Errno> BSD::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return {-1, Errno::BADF};
+-    }
+-
+-    FileDescriptor& descriptor = *file_descriptors[fd];
+-
+-    switch (cmd) {
+-    case FcntlCmd::GETFL:
+-        ASSERT(arg == 0);
+-        return {descriptor.flags, Errno::SUCCESS};
+-    case FcntlCmd::SETFL: {
+-        const bool enable = (arg & Network::FLAG_O_NONBLOCK) != 0;
+-        const Errno bsd_errno = Translate(descriptor.socket->SetNonBlock(enable));
+-        if (bsd_errno != Errno::SUCCESS) {
+-            return {-1, bsd_errno};
+-        }
+-        descriptor.flags = arg;
+-        return {0, Errno::SUCCESS};
+-    }
+-    default:
+-        UNIMPLEMENTED_MSG("Unimplemented cmd={}", cmd);
+-        return {-1, Errno::SUCCESS};
+-    }
+-}
+-
+-Errno BSD::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    if (level != static_cast<u32>(SocketLevel::SOCKET)) {
+-        UNIMPLEMENTED_MSG("Unknown getsockopt level");
+-        return Errno::SUCCESS;
+-    }
+-
+-    Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
+-
+-    switch (optname) {
+-    case OptName::ERROR_: {
+-        auto [pending_err, getsockopt_err] = socket->GetPendingError();
+-        if (getsockopt_err == Network::Errno::SUCCESS) {
+-            Errno translated_pending_err = Translate(pending_err);
+-            ASSERT_OR_EXECUTE_MSG(
+-                optval.size() == sizeof(Errno), { return Errno::INVAL; },
+-                "Incorrect getsockopt option size");
+-            optval.resize(sizeof(Errno));
+-            PutValue(optval, translated_pending_err);
+-        }
+-        return Translate(getsockopt_err);
+-    }
+-    default:
+-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
+-        return Errno::SUCCESS;
+-    }
+-}
+-
+-Errno BSD::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    if (level != static_cast<u32>(SocketLevel::SOCKET)) {
+-        LOG_WARNING(Service, "(STUBBED) setsockopt with level={}, optname={}", level, optname);
+-        return Errno::SUCCESS;
+-    }
+-
+-    Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
+-
+-    if (optname == OptName::LINGER) {
+-        ASSERT(optval.size() == sizeof(Linger));
+-        auto linger = GetValue<Linger>(optval);
+-        ASSERT(linger.onoff == 0 || linger.onoff == 1);
+-
+-        return Translate(socket->SetLinger(linger.onoff != 0, linger.linger));
+-    }
+-
+-    ASSERT(optval.size() == sizeof(u32));
+-    auto value = GetValue<u32>(optval);
+-
+-    switch (optname) {
+-    case OptName::REUSEADDR:
+-        ASSERT(value == 0 || value == 1);
+-        return Translate(socket->SetReuseAddr(value != 0));
+-    case OptName::KEEPALIVE:
+-        ASSERT(value == 0 || value == 1);
+-        return Translate(socket->SetKeepAlive(value != 0));
+-    case OptName::BROADCAST:
+-        ASSERT(value == 0 || value == 1);
+-        return Translate(socket->SetBroadcast(value != 0));
+-    case OptName::SNDBUF:
+-        return Translate(socket->SetSndBuf(value));
+-    case OptName::RCVBUF:
+-        return Translate(socket->SetRcvBuf(value));
+-    case OptName::SNDTIMEO:
+-        return Translate(socket->SetSndTimeo(value));
+-    case OptName::RCVTIMEO:
+-        return Translate(socket->SetRcvTimeo(value));
+-    case OptName::NOSIGPIPE:
+-        LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
+-        return Errno::SUCCESS;
+-    default:
+-        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
+-        return Errno::SUCCESS;
+-    }
+-}
+-
+-Errno BSD::ShutdownImpl(s32 fd, s32 how) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-    const Network::ShutdownHow host_how = Translate(static_cast<ShutdownHow>(how));
+-    return Translate(file_descriptors[fd]->socket->Shutdown(host_how));
+-}
+-
+-std::pair<s32, Errno> BSD::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-
+-    FileDescriptor& descriptor = *file_descriptors[fd];
+-
+-    // Apply flags
+-    using Network::FLAG_MSG_DONTWAIT;
+-    using Network::FLAG_O_NONBLOCK;
+-    if ((flags & FLAG_MSG_DONTWAIT) != 0) {
+-        flags &= ~FLAG_MSG_DONTWAIT;
+-        if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
+-            descriptor.socket->SetNonBlock(true);
+-        }
+-    }
+-
+-    const auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
+-
+-    // Restore original state
+-    if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
+-        descriptor.socket->SetNonBlock(false);
+-    }
+-
+-    return {ret, bsd_errno};
+-}
+-
+-std::pair<s32, Errno> BSD::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message,
+-                                        std::vector<u8>& addr) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-
+-    FileDescriptor& descriptor = *file_descriptors[fd];
+-
+-    Network::SockAddrIn addr_in{};
+-    Network::SockAddrIn* p_addr_in = nullptr;
+-    if (descriptor.is_connection_based) {
+-        // Connection based file descriptors (e.g. TCP) zero addr
+-        addr.clear();
+-    } else {
+-        p_addr_in = &addr_in;
+-    }
+-
+-    // Apply flags
+-    using Network::FLAG_MSG_DONTWAIT;
+-    using Network::FLAG_O_NONBLOCK;
+-    if ((flags & FLAG_MSG_DONTWAIT) != 0) {
+-        flags &= ~FLAG_MSG_DONTWAIT;
+-        if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
+-            descriptor.socket->SetNonBlock(true);
+-        }
+-    }
+-
+-    const auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
+-
+-    // Restore original state
+-    if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
+-        descriptor.socket->SetNonBlock(false);
+-    }
+-
+-    if (p_addr_in) {
+-        if (ret < 0) {
+-            addr.clear();
+-        } else {
+-            ASSERT(addr.size() >= 16);
+-            const SockAddrIn result = Translate(addr_in);
+-            PutValue(addr, result);
+-        }
+-    }
+-
+-    return {ret, bsd_errno};
+-}
+-
+-std::pair<s32, Errno> BSD::SendImpl(s32 fd, u32 flags, std::span<const u8> message) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return {-1, Errno::BADF};
+-    }
+-    return Translate(file_descriptors[fd]->socket->Send(message, flags));
+-}
+-
+-std::pair<s32, Errno> BSD::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
+-                                      std::span<const u8> addr) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return {-1, Errno::BADF};
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return {-1, Errno::BADF};
+-    }
+-
+-    Network::SockAddrIn addr_in;
+-    Network::SockAddrIn* p_addr_in = nullptr;
+-    if (!addr.empty()) {
+-        ASSERT(addr.size() >= 16);
+-        auto guest_addr_in = GetValue<SockAddrIn>(addr);
+-        addr_in = Translate(guest_addr_in);
+-        p_addr_in = &addr_in;
+-    }
+-
+-    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
+-}
+-
+-Errno BSD::CloseImpl(s32 fd) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return Errno::BADF;
+-    }
+-
+-    const Errno bsd_errno = Translate(file_descriptors[fd]->socket->Close());
+-    if (bsd_errno != Errno::SUCCESS) {
+-        return bsd_errno;
+-    }
+-
+-    LOG_INFO(Service, "Close socket fd={}", fd);
+-
+-    file_descriptors[fd].reset();
+-    return bsd_errno;
+-}
+-
+-std::variant<s32, Errno> BSD::DuplicateSocketImpl(s32 fd) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return Errno::BADF;
+-    }
+-
+-    const s32 new_fd = FindFreeFileDescriptorHandle();
+-    if (new_fd < 0) {
+-        LOG_ERROR(Service, "No more file descriptors available");
+-        return Errno::MFILE;
+-    }
+-
+-    file_descriptors[new_fd] = FileDescriptor{
+-        .socket = file_descriptors[fd]->socket,
+-        .flags = file_descriptors[fd]->flags,
+-        .is_connection_based = file_descriptors[fd]->is_connection_based,
+-    };
+-    return new_fd;
+-}
+-
+-std::optional<std::shared_ptr<Network::SocketBase>> BSD::GetSocket(s32 fd) {
+-    if (!IsFileDescriptorValid(fd)) {
+-        return std::nullopt;
+-    }
+-    if (!file_descriptors[fd]->socket) {
+-        LOG_WARNING(Service, "Uninitialized socket");
+-        return std::nullopt;
+-    }
+-    return file_descriptors[fd]->socket;
+-}
+-
+-s32 BSD::FindFreeFileDescriptorHandle() noexcept {
+-    for (s32 fd = 0; fd < static_cast<s32>(file_descriptors.size()); ++fd) {
+-        if (!file_descriptors[fd]) {
+-            return fd;
+-        }
+-    }
+-    return -1;
+-}
+-
+-bool BSD::IsFileDescriptorValid(s32 fd) const noexcept {
+-    if (fd > static_cast<s32>(MAX_FD) || fd < 0) {
+-        LOG_ERROR(Service, "Invalid file descriptor handle={}", fd);
+-        return false;
+-    }
+-    if (!file_descriptors[fd]) {
+-        LOG_ERROR(Service, "File descriptor handle={} is not allocated", fd);
+-        return false;
+-    }
+-    return true;
+-}
+-
+ void BSD::BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept {
+     IPC::ResponseBuilder rb{ctx, 4};
+ 
+@@ -1042,16 +478,6 @@ void BSD::BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noex
+     rb.PushEnum(bsd_errno);
+ }
+ 
+-void BSD::OnProxyPacketReceived(const Network::ProxyPacket& packet) {
+-    for (auto& optional_descriptor : file_descriptors) {
+-        if (!optional_descriptor.has_value()) {
+-            continue;
+-        }
+-        FileDescriptor& descriptor = *optional_descriptor;
+-        descriptor.socket.get()->HandleProxyPacket(packet);
+-    }
+-}
+-
+ BSD::BSD(Core::System& system_, const char* name)
+     : ServiceFramework{system_, name} {
+     // clang-format off
+@@ -1107,19 +533,9 @@ BSD::BSD(Core::System& system_, const char* name)
+ 
+     RegisterHandlers(functions);
+ 
+-    if (auto room_member = Network::GetRoomMember().lock()) {
+-        proxy_packet_received = room_member->BindOnProxyPacketReceived(
+-            [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
+-    } else {
+-        LOG_ERROR(Service, "Network isn't initialized");
+-    }
+ }
+ 
+-BSD::~BSD() {
+-    if (auto room_member = Network::GetRoomMember().lock()) {
+-        room_member->Unbind(proxy_packet_received);
+-    }
+-}
++BSD::~BSD() = default;
+ 
+ std::unique_lock<std::mutex> BSD::LockService() noexcept {
+     return {};
+diff --git a/src/core/hle/service/sockets/bsd.h b/src/core/hle/service/sockets/bsd.h
+index 4eb27b97f6..35e6e8500a 100644
+--- a/src/core/hle/service/sockets/bsd.h
++++ b/src/core/hle/service/sockets/bsd.h
+@@ -13,6 +13,7 @@
+ #include "common/common_types.h"
+ #include "common/socket_types.h"
+ #include "core/hle/service/service.h"
++#include "core/hle/service/sockets/bsd_sockets.h"
+ #include "core/hle/service/sockets/sockets.h"
+ #include "network/network.h"
+ 
+@@ -32,23 +33,12 @@ public:
+     explicit BSD(Core::System& system_, const char* name);
+     ~BSD() override;
+ 
+-    // These methods are called from SSL; the first two are also called from
+-    // this class for the corresponding IPC methods.
+-    // On the real device, the SSL service makes IPC calls to this service.
+-    std::variant<s32, Errno> DuplicateSocketImpl(s32 fd);
+-    Errno CloseImpl(s32 fd);
+-    std::optional<std::shared_ptr<Network::SocketBase>> GetSocket(s32 fd);
++    // Called from SSL (on the console the SSL service makes IPC calls to this service).
++    std::variant<s32, Errno> DuplicateSocketImpl(s32 fd) { return sockets.DuplicateSocketImpl(fd); }
++    Errno CloseImpl(s32 fd) { return sockets.CloseImpl(fd); }
++    std::optional<std::shared_ptr<Network::SocketBase>> GetSocket(s32 fd) { return sockets.GetSocket(fd); }
+ 
+ private:
+-    /// Maximum number of file descriptors
+-    static constexpr size_t MAX_FD = 128;
+-
+-    struct FileDescriptor {
+-        std::shared_ptr<Network::SocketBase> socket;
+-        s32 flags = 0;
+-        bool is_connection_based = false;
+-    };
+-
+     struct PollWork {
+         void Execute(BSD* bsd);
+         void Response(HLERequestContext& ctx);
+@@ -154,38 +144,9 @@ private:
+     template <typename Work>
+     void ExecuteWork(HLERequestContext& ctx, Work work);
+ 
+-    std::pair<s32, Errno> SocketImpl(Domain domain, Type type, Protocol protocol);
+-    std::pair<s32, Errno> PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
+-                                   s32 nfds, s32 timeout);
+-    std::pair<s32, Errno> AcceptImpl(s32 fd, std::vector<u8>& write_buffer);
+-    Errno BindImpl(s32 fd, std::span<const u8> addr);
+-    Errno ConnectImpl(s32 fd, std::span<const u8> addr);
+-    Errno GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer);
+-    Errno GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer);
+-    Errno ListenImpl(s32 fd, s32 backlog);
+-    std::pair<s32, Errno> FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg);
+-    Errno GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval);
+-    Errno SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval);
+-    Errno ShutdownImpl(s32 fd, s32 how);
+-    std::pair<s32, Errno> RecvImpl(s32 fd, u32 flags, std::vector<u8>& message);
+-    std::pair<s32, Errno> RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message,
+-                                       std::vector<u8>& addr);
+-    std::pair<s32, Errno> SendImpl(s32 fd, u32 flags, std::span<const u8> message);
+-    std::pair<s32, Errno> SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
+-                                     std::span<const u8> addr);
+-
+-    s32 FindFreeFileDescriptorHandle() noexcept;
+-    bool IsFileDescriptorValid(s32 fd) const noexcept;
+-
+     void BuildErrnoResponse(HLERequestContext& ctx, Errno bsd_errno) const noexcept;
+ 
+-    static inline std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+-
+-    /// Callback to parse and handle a received wifi packet.
+-    void OnProxyPacketReceived(const Network::ProxyPacket& packet);
+-
+-    // Callback identifier for the OnProxyPacketReceived event.
+-    Network::RoomMember::CallbackHandle<Network::ProxyPacket> proxy_packet_received;
++    BsdSockets& sockets = BsdSockets::Shared();
+ 
+ protected:
+     std::unique_lock<std::mutex> LockService() noexcept override;
+diff --git a/src/core/hle/service/sockets/bsd_sockets.cpp b/src/core/hle/service/sockets/bsd_sockets.cpp
+new file mode 100644
+index 0000000000..d431204b35
+--- /dev/null
++++ b/src/core/hle/service/sockets/bsd_sockets.cpp
+@@ -0,0 +1,620 @@
++// SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++// kart-recomp: the socket table and calls of the "bsd:u" service as a library (split out of bsd.cpp), shared by the emulated
++// service and the runtime's (core/hle/kernel/native_bsd.cpp).
++
++#include <algorithm>
++#include <cstring>
++
++#include "common/assert.h"
++#include "common/logging.h"
++#include "common/settings.h"
++#include "core/hle/service/sockets/bsd_sockets.h"
++#include "core/hle/service/sockets/sockets_translate.h"
++#include "core/internal_network/network.h"
++#include "core/internal_network/socket_proxy.h"
++#include "core/internal_network/sockets.h"
++#include "network/network.h"
++
++namespace Service::Sockets {
++
++namespace {
++
++bool IsConnectionBased(Type type) {
++    switch (type) {
++    case Type::STREAM:
++        return true;
++    case Type::DGRAM:
++        return false;
++    default:
++        UNIMPLEMENTED_MSG("Unimplemented type={}", type);
++        return false;
++    }
++}
++
++template <typename T>
++T GetValue(std::span<const u8> buffer) {
++    T t{};
++    std::memcpy(&t, buffer.data(), (std::min)(sizeof(T), buffer.size()));
++    return t;
++}
++
++template <typename T>
++void PutValue(std::span<u8> buffer, const T& t) {
++    std::memcpy(buffer.data(), &t, (std::min)(sizeof(T), buffer.size()));
++}
++
++} // Anonymous namespace
++
++BsdSockets& BsdSockets::Shared() {
++    static BsdSockets table;
++    return table;
++}
++
++BsdSockets::BsdSockets() {
++    if (auto room_member = Network::GetRoomMember().lock()) {
++        proxy_packet_received = room_member->BindOnProxyPacketReceived(
++            [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
++    } else {
++        LOG_ERROR(Service, "Network isn't initialized");
++    }
++}
++
++BsdSockets::~BsdSockets() {
++    if (auto room_member = Network::GetRoomMember().lock()) {
++        room_member->Unbind(proxy_packet_received);
++    }
++}
++
++std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol protocol) {
++
++    if (type == Type::SEQPACKET) {
++        UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
++    } else if (type == Type::RAW && (domain != Domain::INET || protocol != Protocol::ICMP)) {
++        UNIMPLEMENTED_MSG("SOCK_RAW errno management");
++    }
++
++    [[maybe_unused]] const bool unk_flag = (static_cast<u32>(type) & 0x20000000) != 0;
++    UNIMPLEMENTED_IF_MSG(unk_flag, "Unknown flag in type");
++    type = static_cast<Type>(static_cast<u32>(type) & ~0x20000000);
++
++    const s32 fd = FindFreeFileDescriptorHandle();
++    if (fd < 0) {
++        LOG_ERROR(Service, "No more file descriptors available");
++        return {-1, Errno::MFILE};
++    }
++
++    file_descriptors[fd] = FileDescriptor{};
++    FileDescriptor& descriptor = *file_descriptors[fd];
++    // ENONMEM might be thrown here
++
++    LOG_INFO(Service, "New socket fd={}", fd);
++
++    auto room_member = Network::GetRoomMember().lock();
++    if (room_member && room_member->IsConnected()) {
++        descriptor.socket = std::make_shared<Network::ProxySocket>();
++    } else {
++        descriptor.socket = std::make_shared<Network::Socket>();
++    }
++
++    descriptor.socket->Initialize(Translate(domain), Translate(type), Translate(protocol));
++    descriptor.is_connection_based = IsConnectionBased(type);
++
++    if (Settings::values.airplane_mode.GetValue() && descriptor.is_connection_based) {
++        LOG_ERROR(Service, "Airplane mode is enabled, cannot create socket");
++        return {-1, Errno::NOTCONN};
++    }
++
++    return {fd, Errno::SUCCESS};
++}
++
++std::pair<s32, Errno> BsdSockets::PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer,
++                                    s32 nfds, s32 timeout) {
++    if (nfds <= 0) {
++        // When no entries are provided, -1 is returned with errno zero
++        return {-1, Errno::SUCCESS};
++    }
++    if (read_buffer.size() < nfds * sizeof(PollFD)) {
++        return {-1, Errno::INVAL};
++    }
++    if (write_buffer.size() < nfds * sizeof(PollFD)) {
++        return {-1, Errno::INVAL};
++    }
++
++    std::vector<PollFD> fds(nfds);
++    std::memcpy(fds.data(), read_buffer.data(), nfds * sizeof(PollFD));
++
++    if (timeout >= 0) {
++        const s64 seconds = timeout / 1000;
++        const u64 nanoseconds = 1'000'000 * (static_cast<u64>(timeout) % 1000);
++
++        if (seconds < 0) {
++            return {-1, Errno::INVAL};
++        }
++        if (nanoseconds > 999'999'999) {
++            return {-1, Errno::INVAL};
++        }
++    } else if (timeout != -1) {
++        return {-1, Errno::INVAL};
++    }
++
++    for (PollFD& pollfd : fds) {
++        ASSERT(False(pollfd.revents));
++
++        if (pollfd.fd > static_cast<s32>(MAX_FD) || pollfd.fd < 0) {
++            LOG_ERROR(Service, "File descriptor handle={} is invalid", pollfd.fd);
++            pollfd.revents = PollEvents{};
++            return {0, Errno::SUCCESS};
++        }
++
++        const std::optional<FileDescriptor>& descriptor = file_descriptors[pollfd.fd];
++        if (!descriptor) {
++            LOG_TRACE(Service, "File descriptor handle={} is not allocated", pollfd.fd);
++            pollfd.revents = PollEvents::Nval;
++            return {0, Errno::SUCCESS};
++        }
++    }
++
++    std::vector<Network::PollFD> host_pollfds(fds.size());
++    std::transform(fds.begin(), fds.end(), host_pollfds.begin(), [this](PollFD pollfd) {
++        Network::PollFD result;
++        result.socket = file_descriptors[pollfd.fd]->socket.get();
++        result.events = Translate(pollfd.events);
++        result.revents = Network::PollEvents{};
++        return result;
++    });
++
++    const auto result = Network::Poll(host_pollfds, timeout);
++
++    const size_t num = host_pollfds.size();
++    for (size_t i = 0; i < num; ++i) {
++        fds[i].revents = Translate(host_pollfds[i].revents);
++    }
++    std::memcpy(write_buffer.data(), fds.data(), nfds * sizeof(PollFD));
++
++    return Translate(result);
++}
++
++std::pair<s32, Errno> BsdSockets::AcceptImpl(s32 fd, std::vector<u8>& write_buffer) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++
++    const s32 new_fd = FindFreeFileDescriptorHandle();
++    if (new_fd < 0) {
++        LOG_ERROR(Service, "No more file descriptors available");
++        return {-1, Errno::MFILE};
++    }
++
++    FileDescriptor& descriptor = *file_descriptors[fd];
++    auto [result, bsd_errno] = descriptor.socket->Accept();
++    if (bsd_errno != Network::Errno::SUCCESS) {
++        return {-1, Translate(bsd_errno)};
++    }
++
++    file_descriptors[new_fd] = FileDescriptor{};
++    FileDescriptor& new_descriptor = *file_descriptors[new_fd];
++    new_descriptor.socket = std::move(result.socket);
++    new_descriptor.is_connection_based = descriptor.is_connection_based;
++
++    const SockAddrIn guest_addr_in = Translate(result.sockaddr_in);
++    PutValue(write_buffer, guest_addr_in);
++
++    return {new_fd, Errno::SUCCESS};
++}
++
++Errno BsdSockets::BindImpl(s32 fd, std::span<const u8> addr) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    ASSERT(addr.size() >= 16);
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    auto addr_in = GetValue<SockAddrIn>(addr);
++
++    return Translate(file_descriptors[fd]->socket->Bind(Translate(addr_in)));
++}
++
++Errno BsdSockets::ConnectImpl(s32 fd, std::span<const u8> addr) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++
++    ASSERT(addr.size() >= 16);
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    auto addr_in = GetValue<SockAddrIn>(addr);
++
++    const Errno result = Translate(file_descriptors[fd]->socket->Connect(Translate(addr_in)));
++
++    if (result == Errno::ISCONN) {
++        LOG_DEBUG(Service, "returned ISCONN - socket already connected");
++        return Errno::SUCCESS;
++    }
++
++    return result;
++}
++
++Errno BsdSockets::GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    const auto [addr_in, bsd_errno] = file_descriptors[fd]->socket->GetPeerName();
++    if (bsd_errno != Network::Errno::SUCCESS) {
++        return Translate(bsd_errno);
++    }
++    const SockAddrIn guest_addrin = Translate(addr_in);
++
++    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
++    write_buffer.resize(sizeof(guest_addrin));
++    PutValue(write_buffer, guest_addrin);
++    return Translate(bsd_errno);
++}
++
++Errno BsdSockets::GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    const auto [addr_in, bsd_errno] = file_descriptors[fd]->socket->GetSockName();
++    if (bsd_errno != Network::Errno::SUCCESS) {
++        return Translate(bsd_errno);
++    }
++    const SockAddrIn guest_addrin = Translate(addr_in);
++
++    ASSERT(write_buffer.size() >= sizeof(guest_addrin));
++    write_buffer.resize(sizeof(guest_addrin));
++    PutValue(write_buffer, guest_addrin);
++    return Translate(bsd_errno);
++}
++
++Errno BsdSockets::ListenImpl(s32 fd, s32 backlog) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++    return Translate(file_descriptors[fd]->socket->Listen(backlog));
++}
++
++std::pair<s32, Errno> BsdSockets::FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return {-1, Errno::BADF};
++    }
++
++    FileDescriptor& descriptor = *file_descriptors[fd];
++
++    switch (cmd) {
++    case FcntlCmd::GETFL:
++        ASSERT(arg == 0);
++        return {descriptor.flags, Errno::SUCCESS};
++    case FcntlCmd::SETFL: {
++        const bool enable = (arg & Network::FLAG_O_NONBLOCK) != 0;
++        const Errno bsd_errno = Translate(descriptor.socket->SetNonBlock(enable));
++        if (bsd_errno != Errno::SUCCESS) {
++            return {-1, bsd_errno};
++        }
++        descriptor.flags = arg;
++        return {0, Errno::SUCCESS};
++    }
++    default:
++        UNIMPLEMENTED_MSG("Unimplemented cmd={}", cmd);
++        return {-1, Errno::SUCCESS};
++    }
++}
++
++Errno BsdSockets::GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    if (level != static_cast<u32>(SocketLevel::SOCKET)) {
++        UNIMPLEMENTED_MSG("Unknown getsockopt level");
++        return Errno::SUCCESS;
++    }
++
++    Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
++
++    switch (optname) {
++    case OptName::ERROR_: {
++        auto [pending_err, getsockopt_err] = socket->GetPendingError();
++        if (getsockopt_err == Network::Errno::SUCCESS) {
++            Errno translated_pending_err = Translate(pending_err);
++            ASSERT_OR_EXECUTE_MSG(
++                optval.size() == sizeof(Errno), { return Errno::INVAL; },
++                "Incorrect getsockopt option size");
++            optval.resize(sizeof(Errno));
++            PutValue(optval, translated_pending_err);
++        }
++        return Translate(getsockopt_err);
++    }
++    default:
++        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
++        return Errno::SUCCESS;
++    }
++}
++
++Errno BsdSockets::SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    if (level != static_cast<u32>(SocketLevel::SOCKET)) {
++        LOG_WARNING(Service, "(STUBBED) setsockopt with level={}, optname={}", level, optname);
++        return Errno::SUCCESS;
++    }
++
++    Network::SocketBase* const socket = file_descriptors[fd]->socket.get();
++
++    if (optname == OptName::LINGER) {
++        ASSERT(optval.size() == sizeof(Linger));
++        auto linger = GetValue<Linger>(optval);
++        ASSERT(linger.onoff == 0 || linger.onoff == 1);
++
++        return Translate(socket->SetLinger(linger.onoff != 0, linger.linger));
++    }
++
++    ASSERT(optval.size() == sizeof(u32));
++    auto value = GetValue<u32>(optval);
++
++    switch (optname) {
++    case OptName::REUSEADDR:
++        ASSERT(value == 0 || value == 1);
++        return Translate(socket->SetReuseAddr(value != 0));
++    case OptName::KEEPALIVE:
++        ASSERT(value == 0 || value == 1);
++        return Translate(socket->SetKeepAlive(value != 0));
++    case OptName::BROADCAST:
++        ASSERT(value == 0 || value == 1);
++        return Translate(socket->SetBroadcast(value != 0));
++    case OptName::SNDBUF:
++        return Translate(socket->SetSndBuf(value));
++    case OptName::RCVBUF:
++        return Translate(socket->SetRcvBuf(value));
++    case OptName::SNDTIMEO:
++        return Translate(socket->SetSndTimeo(value));
++    case OptName::RCVTIMEO:
++        return Translate(socket->SetRcvTimeo(value));
++    case OptName::NOSIGPIPE:
++        LOG_WARNING(Service, "(STUBBED) setting NOSIGPIPE to {}", value);
++        return Errno::SUCCESS;
++    default:
++        UNIMPLEMENTED_MSG("Unimplemented optname={}", optname);
++        return Errno::SUCCESS;
++    }
++}
++
++Errno BsdSockets::ShutdownImpl(s32 fd, s32 how) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++    const Network::ShutdownHow host_how = Translate(static_cast<ShutdownHow>(how));
++    return Translate(file_descriptors[fd]->socket->Shutdown(host_how));
++}
++
++std::pair<s32, Errno> BsdSockets::RecvImpl(s32 fd, u32 flags, std::vector<u8>& message) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++
++    FileDescriptor& descriptor = *file_descriptors[fd];
++
++    // Apply flags
++    using Network::FLAG_MSG_DONTWAIT;
++    using Network::FLAG_O_NONBLOCK;
++    if ((flags & FLAG_MSG_DONTWAIT) != 0) {
++        flags &= ~FLAG_MSG_DONTWAIT;
++        if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
++            descriptor.socket->SetNonBlock(true);
++        }
++    }
++
++    const auto [ret, bsd_errno] = Translate(descriptor.socket->Recv(flags, message));
++
++    // Restore original state
++    if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
++        descriptor.socket->SetNonBlock(false);
++    }
++
++    return {ret, bsd_errno};
++}
++
++std::pair<s32, Errno> BsdSockets::RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message,
++                                        std::vector<u8>& addr) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++
++    FileDescriptor& descriptor = *file_descriptors[fd];
++
++    Network::SockAddrIn addr_in{};
++    Network::SockAddrIn* p_addr_in = nullptr;
++    if (descriptor.is_connection_based) {
++        // Connection based file descriptors (e.g. TCP) zero addr
++        addr.clear();
++    } else {
++        p_addr_in = &addr_in;
++    }
++
++    // Apply flags
++    using Network::FLAG_MSG_DONTWAIT;
++    using Network::FLAG_O_NONBLOCK;
++    if ((flags & FLAG_MSG_DONTWAIT) != 0) {
++        flags &= ~FLAG_MSG_DONTWAIT;
++        if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
++            descriptor.socket->SetNonBlock(true);
++        }
++    }
++
++    const auto [ret, bsd_errno] = Translate(descriptor.socket->RecvFrom(flags, message, p_addr_in));
++
++    // Restore original state
++    if ((descriptor.flags & FLAG_O_NONBLOCK) == 0) {
++        descriptor.socket->SetNonBlock(false);
++    }
++
++    if (p_addr_in) {
++        if (ret < 0) {
++            addr.clear();
++        } else {
++            ASSERT(addr.size() >= 16);
++            const SockAddrIn result = Translate(addr_in);
++            PutValue(addr, result);
++        }
++    }
++
++    return {ret, bsd_errno};
++}
++
++std::pair<s32, Errno> BsdSockets::SendImpl(s32 fd, u32 flags, std::span<const u8> message) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return {-1, Errno::BADF};
++    }
++    return Translate(file_descriptors[fd]->socket->Send(message, flags));
++}
++
++std::pair<s32, Errno> BsdSockets::SendToImpl(s32 fd, u32 flags, std::span<const u8> message,
++                                      std::span<const u8> addr) {
++    if (!IsFileDescriptorValid(fd)) {
++        return {-1, Errno::BADF};
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return {-1, Errno::BADF};
++    }
++
++    Network::SockAddrIn addr_in;
++    Network::SockAddrIn* p_addr_in = nullptr;
++    if (!addr.empty()) {
++        ASSERT(addr.size() >= 16);
++        auto guest_addr_in = GetValue<SockAddrIn>(addr);
++        addr_in = Translate(guest_addr_in);
++        p_addr_in = &addr_in;
++    }
++
++    return Translate(file_descriptors[fd]->socket->SendTo(flags, message, p_addr_in));
++}
++
++Errno BsdSockets::CloseImpl(s32 fd) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return Errno::BADF;
++    }
++
++    const Errno bsd_errno = Translate(file_descriptors[fd]->socket->Close());
++    if (bsd_errno != Errno::SUCCESS) {
++        return bsd_errno;
++    }
++
++    LOG_INFO(Service, "Close socket fd={}", fd);
++
++    file_descriptors[fd].reset();
++    return bsd_errno;
++}
++
++std::variant<s32, Errno> BsdSockets::DuplicateSocketImpl(s32 fd) {
++    if (!IsFileDescriptorValid(fd)) {
++        return Errno::BADF;
++    }
++
++    const s32 new_fd = FindFreeFileDescriptorHandle();
++    if (new_fd < 0) {
++        LOG_ERROR(Service, "No more file descriptors available");
++        return Errno::MFILE;
++    }
++
++    file_descriptors[new_fd] = FileDescriptor{
++        .socket = file_descriptors[fd]->socket,
++        .flags = file_descriptors[fd]->flags,
++        .is_connection_based = file_descriptors[fd]->is_connection_based,
++    };
++    return new_fd;
++}
++
++std::optional<std::shared_ptr<Network::SocketBase>> BsdSockets::GetSocket(s32 fd) {
++    if (!IsFileDescriptorValid(fd)) {
++        return std::nullopt;
++    }
++    if (!file_descriptors[fd]->socket) {
++        LOG_WARNING(Service, "Uninitialized socket");
++        return std::nullopt;
++    }
++    return file_descriptors[fd]->socket;
++}
++
++s32 BsdSockets::FindFreeFileDescriptorHandle() noexcept {
++    for (s32 fd = 0; fd < static_cast<s32>(file_descriptors.size()); ++fd) {
++        if (!file_descriptors[fd]) {
++            return fd;
++        }
++    }
++    return -1;
++}
++
++bool BsdSockets::IsFileDescriptorValid(s32 fd) const noexcept {
++    if (fd > static_cast<s32>(MAX_FD) || fd < 0) {
++        LOG_ERROR(Service, "Invalid file descriptor handle={}", fd);
++        return false;
++    }
++    if (!file_descriptors[fd]) {
++        LOG_ERROR(Service, "File descriptor handle={} is not allocated", fd);
++        return false;
++    }
++    return true;
++}
++
++void BsdSockets::OnProxyPacketReceived(const Network::ProxyPacket& packet) {
++    for (auto& optional_descriptor : file_descriptors) {
++        if (!optional_descriptor.has_value()) {
++            continue;
++        }
++        FileDescriptor& descriptor = *optional_descriptor;
++        descriptor.socket.get()->HandleProxyPacket(packet);
++    }
++}
++
++} // namespace Service::Sockets
+diff --git a/src/core/hle/service/sockets/bsd_sockets.h b/src/core/hle/service/sockets/bsd_sockets.h
+new file mode 100644
+index 0000000000..86692669b3
+--- /dev/null
++++ b/src/core/hle/service/sockets/bsd_sockets.h
+@@ -0,0 +1,77 @@
++// SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++// SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++// kart-recomp: the socket table and calls behind "bsd:u" as a library (no service framework): the emulated service (bsd.cpp)
++// and the runtime's (core/hle/kernel/native_bsd.cpp) both drive it. While the engine is in a multiplayer room, new sockets are
++// proxy sockets: their packets travel through the room (network/room_member) to the other members' fake addresses.
++#pragma once
++
++#include <array>
++#include <memory>
++#include <optional>
++#include <span>
++#include <utility>
++#include <variant>
++#include <vector>
++
++#include "common/common_types.h"
++#include "core/hle/service/sockets/sockets.h"
++#include "network/network.h"
++#include "network/room_member.h"
++
++namespace Network {
++class SocketBase;
++}
++
++namespace Service::Sockets {
++
++class BsdSockets {
++public:
++    /// The one table of the process (the console's sockets are per process; bsd:u and bsd:s share it).
++    static BsdSockets& Shared();
++
++    BsdSockets();
++    ~BsdSockets();
++    BsdSockets(const BsdSockets&) = delete;
++    BsdSockets& operator=(const BsdSockets&) = delete;
++
++    static constexpr size_t MAX_FD = 128;
++
++    std::pair<s32, Errno> SocketImpl(Domain domain, Type type, Protocol protocol);
++    std::pair<s32, Errno> PollImpl(std::vector<u8>& write_buffer, std::span<const u8> read_buffer, s32 nfds, s32 timeout);
++    std::pair<s32, Errno> AcceptImpl(s32 fd, std::vector<u8>& write_buffer);
++    Errno BindImpl(s32 fd, std::span<const u8> addr);
++    Errno ConnectImpl(s32 fd, std::span<const u8> addr);
++    Errno GetPeerNameImpl(s32 fd, std::vector<u8>& write_buffer);
++    Errno GetSockNameImpl(s32 fd, std::vector<u8>& write_buffer);
++    Errno ListenImpl(s32 fd, s32 backlog);
++    std::pair<s32, Errno> FcntlImpl(s32 fd, FcntlCmd cmd, s32 arg);
++    Errno GetSockOptImpl(s32 fd, u32 level, OptName optname, std::vector<u8>& optval);
++    Errno SetSockOptImpl(s32 fd, u32 level, OptName optname, std::span<const u8> optval);
++    Errno ShutdownImpl(s32 fd, s32 how);
++    std::pair<s32, Errno> RecvImpl(s32 fd, u32 flags, std::vector<u8>& message);
++    std::pair<s32, Errno> RecvFromImpl(s32 fd, u32 flags, std::vector<u8>& message, std::vector<u8>& addr);
++    std::pair<s32, Errno> SendImpl(s32 fd, u32 flags, std::span<const u8> message);
++    std::pair<s32, Errno> SendToImpl(s32 fd, u32 flags, std::span<const u8> message, std::span<const u8> addr);
++    Errno CloseImpl(s32 fd);
++    std::variant<s32, Errno> DuplicateSocketImpl(s32 fd);
++    std::optional<std::shared_ptr<Network::SocketBase>> GetSocket(s32 fd);
++
++private:
++    struct FileDescriptor {
++        std::shared_ptr<Network::SocketBase> socket;
++        s32 flags = 0;
++        bool is_connection_based = false;
++    };
++
++    s32 FindFreeFileDescriptorHandle() noexcept;
++    bool IsFileDescriptorValid(s32 fd) const noexcept;
++    /// A packet from the room for one of the proxy sockets.
++    void OnProxyPacketReceived(const Network::ProxyPacket& packet);
++
++    std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
++    Network::RoomMember::CallbackHandle<Network::ProxyPacket> proxy_packet_received;
++};
++
++} // namespace Service::Sockets
 diff --git a/src/core/hle/service/vi/conductor.cpp b/src/core/hle/service/vi/conductor.cpp
 index 622b67a83c..131af6f100 100644
 --- a/src/core/hle/service/vi/conductor.cpp
@@ -11904,10 +14225,10 @@ index 0000000000..9e51c01115
 +| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
 diff --git a/src/kart_runtime/address_space.h b/src/kart_runtime/address_space.h
 new file mode 100644
-index 0000000000..85d8f20985
+index 0000000000..630a68a3d9
 --- /dev/null
 +++ b/src/kart_runtime/address_space.h
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,513 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the game process's address space (docs/NATIVE_KERNEL.md, stage 1).
 +//
@@ -11988,7 +14309,15 @@ index 0000000000..85d8f20985
 +/// A range of physical memory (offsets in the backing).
 +class PhysicalAllocator {
 +public:
++    PhysicalAllocator() = default;
 +    PhysicalAllocator(uint64_t base, uint64_t size) { free[base] = size; }
++    /// Adds a run of physical memory (the pool can come in several pieces).
++    void AddRange(uint64_t base, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        free[base] = size;
++        total += size;
++    }
++    uint64_t Total() const { return total; }
 +    /// A contiguous run, page aligned; nullopt when no run is large enough.
 +    std::optional<uint64_t> Allocate(uint64_t size) {
 +        std::scoped_lock lk{mutex};
@@ -12001,6 +14330,27 @@ index 0000000000..85d8f20985
 +            return at;
 +        }
 +        return std::nullopt;
++    }
++    /// `size` bytes in as few runs as possible (largest first); empty when the pool has less.
++    std::vector<std::pair<uint64_t, uint64_t>> AllocateRuns(uint64_t size) {
++        std::scoped_lock lk{mutex};
++        uint64_t avail = 0;
++        for (const auto& [at, sz] : free) avail += sz;
++        if (avail < size) return {};
++        std::vector<std::pair<uint64_t, uint64_t>> out;
++        while (size) {
++            auto best = free.begin();
++            for (auto it = free.begin(); it != free.end(); ++it)
++                if (it->second >= size ? (best->second < size || it->second < best->second) : (best->second < size && it->second > best->second))
++                    best = it;
++            const uint64_t take = std::min(size, best->second), at = best->first, left = best->second - take;
++            free.erase(best);
++            if (left) free[at + take] = left;
++            out.emplace_back(at, take);
++            used += take;
++            size -= take;
++        }
++        return out;
 +    }
 +    void Free(uint64_t at, uint64_t size) {
 +        std::scoped_lock lk{mutex};
@@ -12023,7 +14373,7 @@ index 0000000000..85d8f20985
 +private:
 +    std::mutex mutex;
 +    std::map<uint64_t, uint64_t> free; ///< offset -> size
-+    uint64_t used = 0;
++    uint64_t used = 0, total = 0;
 +};
 +
 +class AddressSpace {
@@ -12089,11 +14439,7 @@ index 0000000000..85d8f20985
 +        std::scoped_lock lk{mutex};
 +        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
 +        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
-+        const auto phys = physical.Allocate(size);
-+        if (!phys) return MemResult::OutOfMemory;
-+        backend.Map(addr, size, *phys, perm);
-+        Set(addr, size, Block{size, state, perm, 0, 0, 0, *phys, true});
-+        return MemResult::Success;
++        return MapRunsLocked(addr, size, state, perm);
 +    }
 +    /// Pages owned by someone else (shared memory), at `phys`.
 +    uint32_t MapPhysical(uint64_t addr, uint64_t size, uint64_t phys, uint32_t state, uint32_t perm) {
@@ -12102,6 +14448,14 @@ index 0000000000..85d8f20985
 +        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
 +        backend.Map(addr, size, phys, perm);
 +        Set(addr, size, Block{size, state, perm, 0, 0, 0, phys, false});
++        return MemResult::Success;
++    }
++    /// Pages the process already had before the runtime took over (its loaded code): recorded, mapped again with `perm`.
++    uint32_t Import(uint64_t addr, uint64_t size, uint64_t phys, uint32_t state, uint32_t perm, uint32_t attr) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
++        Set(addr, size, Block{size, state, perm, attr, 0, 0, phys, false});
 +        return MemResult::Success;
 +    }
 +    /// Unmaps [addr, addr+size) when every page is in `state` and has no attribute; owned pages are freed.
@@ -12133,10 +14487,7 @@ index 0000000000..85d8f20985
 +        if (size > heap_size) {
 +            const uint64_t add = size - heap_size, at = layout.heap_start + heap_size;
 +            if (!AllFree(at, add)) return MemResult::OutOfMemory;
-+            const auto phys = physical.Allocate(add);
-+            if (!phys) return MemResult::OutOfMemory;
-+            backend.Map(at, add, *phys, MemPerm::ReadWrite);
-+            Set(at, add, Block{add, MemState::Normal, MemPerm::ReadWrite, 0, 0, 0, *phys, true});
++            if (const uint32_t r = MapRunsLocked(at, add, MemState::Normal, MemPerm::ReadWrite); r) return r;
 +        } else if (size < heap_size) {
 +            const uint64_t at = layout.heap_start + size, cut = heap_size - size;
 +            if (!AllMatch(at, cut, [](const Block& b) { return b.state == MemState::Normal && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
@@ -12342,6 +14693,18 @@ index 0000000000..85d8f20985
 +        b.size = size;
 +        blocks.emplace(addr, b);
 +        Coalesce(addr, size);
++    }
++    /// Fresh pages for [addr, addr+size), in as many physical runs as the pool needs.
++    uint32_t MapRunsLocked(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm) {
++        const auto runs = physical.AllocateRuns(size);
++        if (runs.empty()) return MemResult::OutOfMemory;
++        uint64_t va = addr;
++        for (const auto& [phys, len] : runs) {
++            backend.Map(va, len, phys, perm);
++            Set(va, len, Block{len, state, perm, 0, 0, 0, phys, true});
++            va += len;
++        }
++        return MemResult::Success;
 +    }
 +    void ReleaseLocked(uint64_t addr, uint64_t size) {
 +        for (auto& [va, b] : Pieces(addr, size))
@@ -12816,10 +15179,10 @@ index 0000000000..6b0956610e
 +} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/game_kernel.h b/src/kart_runtime/game_kernel.h
 new file mode 100644
-index 0000000000..d953e29f56
+index 0000000000..404586d450
 --- /dev/null
 +++ b/src/kart_runtime/game_kernel.h
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,568 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel for the game's process (docs/NATIVE_KERNEL.md, stages 3-4).
 +//
@@ -12853,13 +15216,16 @@ index 0000000000..d953e29f56
 +namespace KartRuntime {
 +
 +/// A guest thread's registers (AArch64).
++/// (The console kernel's ThreadContext layout: x0-x28, fp, lr, sp, pc, pstate, 32 x 128-bit vector registers, fpcr, fpsr.)
 +struct ThreadContext {
-+    std::array<uint64_t, 31> x{};
++    std::array<uint64_t, 31> x{}; ///< x0-x30 (x29 = fp, x30 = lr)
 +    uint64_t sp = 0, pc = 0;
-+    uint32_t pstate = 0, fpcr = 0, fpsr = 0;
++    uint32_t pstate = 0, padding = 0;
 +    std::array<uint64_t, 64> v{}; ///< 32 vector registers, 128 bits each
++    uint32_t fpcr = 0, fpsr = 0;
 +    uint64_t tpidr = 0;           ///< TPIDR_EL0 (the game's own)
 +};
++static_assert(sizeof(ThreadContext) == 0x320);
 +
 +class GameKernel;
 +
@@ -12979,6 +15345,20 @@ index 0000000000..d953e29f56
 +    // ---- system calls
 +    /// Answers system call `svc` for `t` (arguments and results in its registers).
 +    void Svc(GuestThread& t, uint32_t svc) {
++        if (on_svc) {
++            const auto before = t.ctx.x;
++            on_svc(t, svc, before, true);
++            SvcImpl(t, svc);
++            on_svc(t, svc, before, false);
++            return;
++        }
++        SvcImpl(t, svc);
++    }
++    /// Diagnostics: called before (`entering`) and after each system call with the registers it was made with.
++    std::function<void(GuestThread&, uint32_t svc, const std::array<uint64_t, 31>& args, bool entering)> on_svc;
++
++private:
++    void SvcImpl(GuestThread& t, uint32_t svc) {
 +        auto& x = t.ctx.x;
 +        auto ret = [&](uint32_t r) { x[0] = r; };
 +        switch (svc) {
@@ -13127,6 +15507,7 @@ index 0000000000..d953e29f56
 +        }
 +    }
 +
++public:
 +    /// Shared memory owned by a service (fonts, controller state): pages at `phys` mapped by the game with MapSharedMemory.
 +    class SharedMemory final : public KernelObject {
 +    public:
@@ -13861,10 +16242,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..afd37f7701
+index 0000000000..b703c348c2
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,544 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -14011,6 +16392,7 @@ index 0000000000..afd37f7701
 +            if (on_call) on_call(name, ctx.Command());
 +            it->second(ctx);
 +            ++calls;
++            if (ctx.reply.result != 0 && on_error) on_error(name, ctx.Command(), ctx.reply.result);
 +        } else {
 +            ctx.SetResult(CmifResult::UnknownCommand);
 +            ++unknown;
@@ -14025,6 +16407,8 @@ index 0000000000..afd37f7701
 +    uint64_t calls = 0, unknown = 0;
 +    bool serialize = true; ///< one request at a time (the console's services are single-threaded per session)
 +    static inline std::function<void(const std::string&, uint32_t)> on_unknown, on_call;
++    /// A command that answered an error result (diagnostics).
++    static inline std::function<void(const std::string&, uint32_t, uint32_t)> on_error;
 +
 +private:
 +    std::mutex mutex;
@@ -14059,6 +16443,18 @@ index 0000000000..afd37f7701
 +        std::function<uint64_t()> process_id;            ///< the calling thread's process id (the kernel sends it, not the game)
 +    };
 +    explicit NativeKernel(Hooks h) : hooks{std::move(h)} {}
++
++    /// Runs `f` (a host call that may block, e.g. a socket receive) as a wait of the calling thread, so the scheduler lets other
++    /// game threads run on its core meanwhile.
++    template <typename F>
++    auto Blocking(F&& f) {
++        if (hooks.before_block) hooks.before_block();
++        struct After {
++            const Hooks& h;
++            ~After() { if (h.after_block) h.after_block(); }
++        } after{hooks};
++        return f();
++    }
 +
 +    static constexpr uint32_t HandleBit = 1u << 30;
 +    static bool IsNative(uint32_t handle) { return (handle & 0xC0000000u) == HandleBit; }
@@ -15637,10 +18033,10 @@ index 0000000000..decd1fcf75
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/system.h b/src/kart_runtime/services/system.h
 new file mode 100644
-index 0000000000..69d3c3c986
+index 0000000000..d75020e2f6
 --- /dev/null
 +++ b/src/kart_runtime/services/system.h
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,209 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the small system services a game opens at boot (docs/NATIVE_ENGINE.md, "native services"): settings
 +// ("set"), performance mode ("apm"), parental controls ("pctl*"), play reports ("prepo:*"), friends ("friend:*"), the system
@@ -15648,11 +18044,13 @@ index 0000000000..69d3c3c986
 +// unrestricted, offline console gives.
 +#pragma once
 +
++#include <algorithm>
 +#include <array>
 +#include <cstring>
 +#include <map>
 +#include <memory>
 +#include <mutex>
++#include <random>
 +#include <string>
 +#include <vector>
 +
@@ -15755,9 +18153,36 @@ index 0000000000..69d3c3c986
 +
 +inline std::shared_ptr<Service> MakeFriends(const char* name) {
 +    auto s = std::make_shared<Service>(name);
-+    s->On(0, [](Context& c) { c.PushInterface(std::make_shared<Service>("IFriendService")); });       // CreateFriendService
++    s->On(0, [](Context& c) { // CreateFriendService
++        auto f = std::make_shared<Service>("IFriendService");
++        // Local wireless play records who the player met: accepted and dropped, as suyu does (the game shows "a communication
++        // error has occurred" when these fail).
++        f->Ok(10700); // GetPlayHistoryRegistrationKey(local play, user) -> key buffer (left as the game passed it)
++        f->Ok(10701); // GetPlayHistoryRegistrationKeyWithNetworkServiceAccountId
++        f->Ok(10702); // AddPlayHistory
++        c.PushInterface(f);
++    });
 +    s->On(1, [](Context& c) { c.PushInterface(std::make_shared<Service>("INotificationService")); }); // CreateNotificationService
 +    s->Ok(2); // CreateDaemonSuspendSessionService
++    return s;
++}
++
++/// The secure random number service ("csrng"): GenerateRandomBytes fills the output buffer from the host's random source.
++inline std::shared_ptr<Service> MakeRandom() {
++    auto s = std::make_shared<Service>("csrng");
++    s->On(0, [](Context& c) {
++        static std::mutex m;
++        static std::random_device device;
++        std::vector<uint8_t> out(c.WriteBufferSize(0));
++        {
++            std::scoped_lock lk{m};
++            for (size_t i = 0; i < out.size(); i += 4) {
++                const uint32_t v = device();
++                std::memcpy(out.data() + i, &v, std::min<size_t>(4, out.size() - i));
++            }
++        }
++        c.WriteBuffer(out.data(), out.size(), 0);
++    });
 +    return s;
 +}
 +
@@ -16362,10 +18787,10 @@ index 0000000000..a6681aba4f
 +done
 diff --git a/src/kart_runtime/tests/test_address_space.cpp b/src/kart_runtime/tests/test_address_space.cpp
 new file mode 100644
-index 0000000000..f19cb6820e
+index 0000000000..bd490d35af
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_address_space.cpp
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,177 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Tests for kart_runtime/address_space.h: the kernel's rules for a process's memory as a game uses them, with a fake host
 +// mapping that keeps a page table over real bytes (so aliases are checked by reading the same data at two addresses).
@@ -16523,6 +18948,23 @@ index 0000000000..f19cb6820e
 +    assert(as.SetAttribute(0x8001'0000, Page, MemAttr::PermissionLocked, 0) == 0);
 +    assert(as.Unmap(0x8001'0000, 0x4000, MemState::CodeData) == 0);
 +    assert(as.BlockCount() == 1 && phys.Used() == 0x40000 && host.pages.empty());
++    // A heap larger than any single free run: built from several runs, read back across the seam.
++    {
++        FakeBackend host2(16 << 20);
++        PhysicalAllocator pool;
++        pool.AddRange(0, 4 << 20);
++        pool.AddRange(8 << 20, 4 << 20);
++        AddressSpace as2(GameLayout(), host2, pool);
++        uint64_t h = 0;
++        assert(as2.SetHeapSize(6 << 20, &h) == 0 && pool.Used() == (6u << 20));
++        assert(host2.Write(h + (4 << 20) - 2, "se", 2) && host2.Write(h + (4 << 20), "am", 2)); // the helper copies within one page
++        char buf[5]{};
++        assert(host2.Read(h + (4 << 20) - 2, buf, 2) && host2.Read(h + (4 << 20), buf + 2, 2) && std::memcmp(buf, "seam", 4) == 0);
++        assert(as2.Query(h).size == (6u << 20)); // one heap to the game
++        assert(as2.SetHeapSize(10 << 20, &h) == MemResult::OutOfMemory);
++        assert(as2.SetHeapSize(0, &h) == 0 && pool.Used() == 0);
++    }
++    std::printf("heap from several physical runs\n");
 +    std::printf("address_space: all tests passed\n");
 +    return 0;
 +}

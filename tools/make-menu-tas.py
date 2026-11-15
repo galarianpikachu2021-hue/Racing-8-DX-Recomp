@@ -22,6 +22,9 @@ while steering 2.5 s, alternating left and right, then release for a mini-turbo.
 item use already in the script, makes the effect-heavy frames (boost flames, sparks) that the plain
 race lacks.
 
+--wireless[=N] opens Wireless Play (local wireless; in the engine it runs over a multiplayer room, docs/NATIVE_ENGINE.md) from the
+main menu and taps A N more times (default 2), then waits there without input - for checking the ldn:u service.
+
 --time-trial picks Time Trials instead of Grand Prix (the rest of the menu taps are the same; see docs/BENCHMARK.md).
 
 --cup=N picks the Nth cup to the right of the Mushroom Cup (the first race then differs).
@@ -50,6 +53,18 @@ def main() -> int:
     # countdown is over (verified on Mario Kart Stadium and Mario Circuit: the pause panel reads OFF until the L press, ON after).
     # Time trials have no antenna. --weave brings back the old sine-wave steering without it.
     weave = "--weave" in sys.argv
+    wireless = next((int(a.split("=", 1)[1]) if "=" in a else 2 for a in sys.argv if a.startswith("--wireless")), None)
+    if wireless is not None:
+        # Main menu (Single Player, Multiplayer, Online, Wireless Play): input from about frame 510; three Downs, then A.
+        lines = [f"{f + k} KEY_A 0;0 0;0" for f in (400, 460) for k in range(4)]
+        for i in range(3):
+            lines += [f"{530 + 15 * i + k} KEY_DDOWN 0;0 0;0" for k in range(4)]
+        lines += [f"{600 + 120 * i + k} KEY_A 0;0 0;0" for i in range(wireless + 1) for k in range(4)]
+        # Then stay on that screen (a TAS run ends with its script): one stick nudge at the end (--frames, default 4000).
+        lines.append(f"{next((int(a.split('=', 1)[1]) for a in sys.argv if a.startswith('--frames=')), 4000)} NONE 0;0 0;0")
+        with open(args[0], "w") as out:
+            out.write("\n".join(lines) + "\n")
+        return 0
     centre_stick = not weave and not time_trial
     lines = []
     # --frames=N: script length (default 12000 = 200 s; a 50cc Grand Prix race of three laps needs about 16000).

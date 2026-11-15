@@ -33,6 +33,8 @@ qt_add_executable(kartrecomp
     src/launcher_language.h
     src/mii_render.h
     src/mii_editor.h
+    src/multiplayer_page.cpp
+    src/multiplayer_page.h
     src/overlay_settings.cpp
     src/overlay_settings.h
     src/zip_archive.h

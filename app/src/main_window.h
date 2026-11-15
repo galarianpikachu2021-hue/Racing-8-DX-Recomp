@@ -97,6 +97,7 @@ private:
     QProgressBar* appimage_progress = nullptr;
     class Updater* updater = nullptr;
     class SetupPage* setup_page = nullptr;
+    class MultiplayerPage* multiplayer_page = nullptr;
     QPlainTextEdit* log_view = nullptr;
     // Display
     QComboBox* resolution_combo = nullptr;
