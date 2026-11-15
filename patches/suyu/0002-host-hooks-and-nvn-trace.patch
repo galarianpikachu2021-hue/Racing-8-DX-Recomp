@@ -4370,6 +4370,26 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/k_process.cpp b/src/core/hle/kernel/k_process.cpp
+index 67412738a7..2154413307 100644
+--- a/src/core/hle/kernel/k_process.cpp
++++ b/src/core/hle/kernel/k_process.cpp
+@@ -1266,6 +1266,15 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
+ 
+     // Assign remaining properties.
+     m_ideal_core_id = metadata.GetMainThreadCore();
++    {
++        // kart-recomp: the layout, for the runtime's own address space (docs/NATIVE_KERNEL.md).
++        auto& pt = m_page_table;
++        LOG_INFO(Kernel, "process layout: space {:#x}+{:#x} code {:#x}+{:#x} alias-code {:#x}+{:#x} heap {:#x}+{:#x} alias {:#x}+{:#x} stack {:#x}+{:#x} kmap {:#x}+{:#x}",
++                 GetInteger(pt.GetAddressSpaceStart()), pt.GetAddressSpaceSize(), GetInteger(pt.GetCodeRegionStart()), pt.GetCodeRegionSize(),
++                 GetInteger(pt.GetAliasCodeRegionStart()), pt.GetAliasCodeRegionSize(), GetInteger(pt.GetHeapRegionStart()), pt.GetHeapRegionSize(),
++                 GetInteger(pt.GetAliasRegionStart()), pt.GetAliasRegionSize(), GetInteger(pt.GetStackRegionStart()), pt.GetStackRegionSize(),
++                 GetInteger(pt.GetKernelMapRegionStart()), pt.GetKernelMapRegionSize());
++    }
+ 
+     // Set up emulation context.
+     this->InitializeInterfaces(kernel);
 diff --git a/src/core/hle/kernel/k_readable_event.cpp b/src/core/hle/kernel/k_readable_event.cpp
 index b3e09f725d..c47d534bf4 100644
 --- a/src/core/hle/kernel/k_readable_event.cpp
@@ -11827,6 +11847,483 @@ index 0000000000..9e51c01115
 +|---|---|
 +| `core_scheduler.h` | Host threads sharing virtual CPU cores the way the console's threads do: one running thread per core, strict priority, FIFO among equals, a preemption request for the running thread. Replaces fibers and emulated-core threads. |
 +| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
+diff --git a/src/kart_runtime/address_space.h b/src/kart_runtime/address_space.h
+new file mode 100644
+index 0000000000..85d8f20985
+--- /dev/null
++++ b/src/kart_runtime/address_space.h
+@@ -0,0 +1,471 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the game process's address space (docs/NATIVE_KERNEL.md, stage 1).
++//
++// What the console kernel keeps for a process's memory, for the calls a game makes: a map of blocks (memory state, permission,
++// attribute, ipc / device reference counts), the region layout (code, heap, alias, stack, kernel map), the heap that
++// SetHeapSize grows and shrinks, aliases (MapMemory: the source is locked and hidden, the destination maps the same pages as
++// Stack), attribute changes (Uncached), transfer-memory locks, device locks, shared memory mapped from given pages, code and
++// TLS pages. Physical pages come from a simple allocator over a backing range; the host mapping (what the recompiled code
++// reads) is done by a `Backend`. QueryMemory answers with merged blocks, as the kernel's block manager does.
++//
++// Standard library only (tests: tests/test_address_space.cpp).
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <functional>
++#include <iterator>
++#include <map>
++#include <mutex>
++#include <optional>
++#include <vector>
++
++namespace KartRuntime {
++
++namespace MemState {
++// Svc::MemoryState values.
++constexpr uint32_t Free = 0x00, Io = 0x01, Static = 0x02, Code = 0x03, CodeData = 0x04, Normal = 0x05, Shared = 0x06,
++                   AliasCode = 0x08, AliasCodeData = 0x09, Ipc = 0x0A, Stack = 0x0B, ThreadLocal = 0x0C, Transferred = 0x0D,
++                   SharedTransferred = 0x0E, SharedCode = 0x0F, Inaccessible = 0x10, Kernel = 0x13, Insecure = 0x17;
++/// The data states: alias, transfer, attribute change, reprotect, device map.
++constexpr bool IsData(uint32_t s) { return s == CodeData || s == Normal || s == AliasCodeData; }
++constexpr bool CanAlias(uint32_t s) { return IsData(s); }
++constexpr bool CanTransfer(uint32_t s) { return IsData(s); }
++constexpr bool CanChangeAttribute(uint32_t s) { return IsData(s) || s == Transferred || s == Insecure; }
++constexpr bool CanDeviceMap(uint32_t s) {
++    return IsData(s) || s == Code || s == AliasCode || s == Io || s == Ipc || s == Stack || s == Transferred ||
++           s == SharedTransferred || s == Insecure;
++}
++} // namespace MemState
++
++namespace MemAttr {
++constexpr uint32_t Locked = 1, IpcLocked = 2, DeviceShared = 4, Uncached = 8, PermissionLocked = 16;
++constexpr uint32_t SetMask = Uncached | PermissionLocked;
++} // namespace MemAttr
++
++namespace MemPerm {
++constexpr uint32_t None = 0, Read = 1, Write = 2, Execute = 4, ReadWrite = 3, ReadExecute = 5;
++}
++
++/// Kernel result codes (module 1).
++namespace MemResult {
++constexpr uint32_t Success = 0;
++constexpr uint32_t InvalidSize = 0xCA01;          // 101
++constexpr uint32_t InvalidAddress = 0xCC01;       // 102
++constexpr uint32_t OutOfResource = 0xCE01;        // 103
++constexpr uint32_t OutOfMemory = 0xD001;          // 104
++constexpr uint32_t InvalidCurrentMemory = 0xD401; // 106
++constexpr uint32_t InvalidNewMemoryPermission = 0xD801; // 108
++constexpr uint32_t InvalidMemoryRegion = 0xDC01;  // 110
++constexpr uint32_t InvalidCombination = 0xE801;   // 116
++constexpr uint32_t InvalidState = 0xFA01;         // 125
++constexpr uint32_t OutOfAddressSpace = 0x10601;   // 259
++} // namespace MemResult
++
++/// MemoryInfo, as QueryMemory writes it.
++struct MemoryInfo {
++    uint64_t base_address;
++    uint64_t size;
++    uint32_t state;
++    uint32_t attribute;
++    uint32_t permission;
++    uint32_t ipc_count;
++    uint32_t device_count;
++    uint32_t padding;
++};
++static_assert(sizeof(MemoryInfo) == 0x28);
++
++/// A range of physical memory (offsets in the backing).
++class PhysicalAllocator {
++public:
++    PhysicalAllocator(uint64_t base, uint64_t size) { free[base] = size; }
++    /// A contiguous run, page aligned; nullopt when no run is large enough.
++    std::optional<uint64_t> Allocate(uint64_t size) {
++        std::scoped_lock lk{mutex};
++        for (auto it = free.begin(); it != free.end(); ++it) {
++            if (it->second < size) continue;
++            const uint64_t at = it->first, left = it->second - size;
++            free.erase(it);
++            if (left) free[at + size] = left;
++            used += size;
++            return at;
++        }
++        return std::nullopt;
++    }
++    void Free(uint64_t at, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        used -= size;
++        auto it = free.emplace(at, size).first;
++        if (auto next = std::next(it); next != free.end() && at + size == next->first) {
++            it->second += next->second;
++            free.erase(next);
++        }
++        if (it != free.begin()) {
++            auto prev = std::prev(it);
++            if (prev->first + prev->second == it->first) {
++                prev->second += it->second;
++                free.erase(it);
++            }
++        }
++    }
++    uint64_t Used() const { return used; }
++
++private:
++    std::mutex mutex;
++    std::map<uint64_t, uint64_t> free; ///< offset -> size
++    uint64_t used = 0;
++};
++
++class AddressSpace {
++public:
++    static constexpr uint64_t PageSize = 0x1000;
++
++    struct Layout {
++        uint64_t space_start = 0, space_size = 0;
++        uint64_t code_start = 0, code_size = 0;
++        uint64_t heap_start = 0, heap_size = 0;
++        uint64_t alias_start = 0, alias_size = 0;
++        uint64_t stack_start = 0, stack_size = 0;
++        uint64_t kmap_start = 0, kmap_size = 0;
++    };
++
++    /// The host side: makes guest pages [va, va+size) show physical memory at `phys` (backing offset) with `perm`.
++    class Backend {
++    public:
++        virtual ~Backend() = default;
++        virtual void Map(uint64_t va, uint64_t size, uint64_t phys, uint32_t perm) = 0;
++        virtual void Unmap(uint64_t va, uint64_t size) = 0;
++        virtual void Protect(uint64_t va, uint64_t size, uint32_t perm) = 0;
++    };
++
++    AddressSpace(Layout l, Backend& b, PhysicalAllocator& p) : layout{l}, backend{b}, physical{p} {
++        blocks[layout.space_start] = Block{layout.space_size, MemState::Free, MemPerm::None, 0, 0, 0, 0, false};
++    }
++
++    const Layout& GetLayout() const { return layout; }
++
++    // ---- queries
++    MemoryInfo Query(uint64_t addr) {
++        std::scoped_lock lk{mutex};
++        if (addr < layout.space_start || addr >= layout.space_start + layout.space_size) {
++            const uint64_t end = layout.space_start + layout.space_size;
++            if (addr >= end) return {end, ~end + 1, MemState::Inaccessible, 0, 0, 0, 0, 0};
++            return {0, layout.space_start, MemState::Inaccessible, 0, 0, 0, 0, 0};
++        }
++        auto it = Find(addr);
++        uint64_t base = it->first, end = it->first + it->second.size;
++        // Merge neighbours that look the same to the game.
++        for (auto prev = it; prev != blocks.begin();) {
++            --prev;
++            if (!SameView(prev->second, it->second)) break;
++            base = prev->first;
++        }
++        for (auto next = std::next(it); next != blocks.end() && SameView(next->second, it->second); ++next)
++            end = next->first + next->second.size;
++        const Block& b = it->second;
++        return {base, end - base, b.state, b.attr, b.perm, b.ipc_count, b.device_count, 0};
++    }
++    /// The state of every page in [addr, addr+size) when it is one state, else nullopt.
++    std::optional<uint32_t> StateOf(uint64_t addr, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        uint32_t state = 0;
++        if (!AllMatch(addr, size, [&](const Block& b) { state = b.state; return true; }, true)) return std::nullopt;
++        return state;
++    }
++
++    // ---- mapping new memory
++    /// Fresh zeroed pages at a chosen address (code, data, TLS pages, stacks).
++    uint32_t MapNew(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
++        const auto phys = physical.Allocate(size);
++        if (!phys) return MemResult::OutOfMemory;
++        backend.Map(addr, size, *phys, perm);
++        Set(addr, size, Block{size, state, perm, 0, 0, 0, *phys, true});
++        return MemResult::Success;
++    }
++    /// Pages owned by someone else (shared memory), at `phys`.
++    uint32_t MapPhysical(uint64_t addr, uint64_t size, uint64_t phys, uint32_t state, uint32_t perm) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
++        backend.Map(addr, size, phys, perm);
++        Set(addr, size, Block{size, state, perm, 0, 0, 0, phys, false});
++        return MemResult::Success;
++    }
++    /// Unmaps [addr, addr+size) when every page is in `state` and has no attribute; owned pages are freed.
++    uint32_t Unmap(uint64_t addr, uint64_t size, uint32_t state) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllMatch(addr, size, [&](const Block& b) { return b.state == state && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
++        ReleaseLocked(addr, size);
++        return MemResult::Success;
++    }
++    /// A free range of `size` in [start, start+region_size), aligned to `align` (TLS pages, mapping addresses).
++    std::optional<uint64_t> FindFree(uint64_t start, uint64_t region_size, uint64_t size, uint64_t align = PageSize) {
++        std::scoped_lock lk{mutex};
++        for (auto it = Find(start); it != blocks.end() && it->first < start + region_size; ++it) {
++            if (it->second.state != MemState::Free) continue;
++            uint64_t a = std::max(it->first, start);
++            a = (a + align - 1) / align * align;
++            const uint64_t end = std::min(it->first + it->second.size, start + region_size);
++            if (a + size <= end) return a;
++        }
++        return std::nullopt;
++    }
++
++    // ---- heap
++    /// SetHeapSize: the heap is [heap_start, heap_start + size), Normal / read-write. Returns the heap's address.
++    uint32_t SetHeapSize(uint64_t size, uint64_t* out_addr) {
++        std::scoped_lock lk{mutex};
++        if (size % 0x200000 || size > layout.heap_size) return MemResult::InvalidSize;
++        if (size > heap_size) {
++            const uint64_t add = size - heap_size, at = layout.heap_start + heap_size;
++            if (!AllFree(at, add)) return MemResult::OutOfMemory;
++            const auto phys = physical.Allocate(add);
++            if (!phys) return MemResult::OutOfMemory;
++            backend.Map(at, add, *phys, MemPerm::ReadWrite);
++            Set(at, add, Block{add, MemState::Normal, MemPerm::ReadWrite, 0, 0, 0, *phys, true});
++        } else if (size < heap_size) {
++            const uint64_t at = layout.heap_start + size, cut = heap_size - size;
++            if (!AllMatch(at, cut, [](const Block& b) { return b.state == MemState::Normal && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
++            ReleaseLocked(at, cut);
++        }
++        heap_size = size;
++        *out_addr = layout.heap_start;
++        return MemResult::Success;
++    }
++    uint64_t HeapSize() const { return heap_size; }
++
++    // ---- alias (MapMemory / UnmapMemory)
++    uint32_t MapAlias(uint64_t dst, uint64_t src, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(dst, size) || !Aligned(src, size) || !InSpace(dst, size) || !InSpace(src, size)) return MemResult::InvalidAddress;
++        if (!InRegion(dst, size, layout.stack_start, layout.stack_size)) return MemResult::InvalidMemoryRegion;
++        if (!AllMatch(src, size, [](const Block& b) { return MemState::CanAlias(b.state) && b.perm == MemPerm::ReadWrite && b.attr == 0; }))
++            return MemResult::InvalidCurrentMemory;
++        if (!AllFree(dst, size)) return MemResult::InvalidCurrentMemory;
++        // The destination shows the source's pages, run by run.
++        for (auto& [va, b] : Pieces(src, size)) {
++            const uint64_t d = dst + (va - src);
++            backend.Map(d, b.size, b.phys, MemPerm::ReadWrite);
++            Set(d, b.size, Block{b.size, MemState::Stack, MemPerm::ReadWrite, 0, 0, 0, b.phys, false});
++        }
++        // The source is locked and not accessible.
++        backend.Protect(src, size, MemPerm::None);
++        Modify(src, size, [](Block& b) {
++            b.attr |= MemAttr::Locked;
++            b.hidden_perm = b.perm;
++            b.perm = MemPerm::None;
++        });
++        return MemResult::Success;
++    }
++    uint32_t UnmapAlias(uint64_t dst, uint64_t src, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(dst, size) || !Aligned(src, size) || !InSpace(dst, size) || !InSpace(src, size)) return MemResult::InvalidAddress;
++        if (!AllMatch(src, size, [](const Block& b) { return MemState::CanAlias(b.state) && b.attr == MemAttr::Locked; }))
++            return MemResult::InvalidCurrentMemory;
++        if (!AllMatch(dst, size, [](const Block& b) { return b.state == MemState::Stack && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
++        backend.Unmap(dst, size);
++        Set(dst, size, Block{size, MemState::Free, MemPerm::None, 0, 0, 0, 0, false});
++        backend.Protect(src, size, MemPerm::ReadWrite);
++        Modify(src, size, [](Block& b) {
++            b.attr &= ~MemAttr::Locked;
++            b.perm = b.hidden_perm;
++        });
++        return MemResult::Success;
++    }
++
++    // ---- attributes, permissions, locks
++    /// SetMemoryAttribute: mask / value among Uncached and PermissionLocked.
++    uint32_t SetAttribute(uint64_t addr, uint64_t size, uint32_t mask, uint32_t value) {
++        std::scoped_lock lk{mutex};
++        if ((mask | MemAttr::SetMask) != MemAttr::SetMask || (value | mask) != mask) return MemResult::InvalidCombination;
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        const uint32_t ignore = MemAttr::SetMask | MemAttr::DeviceShared;
++        if (!AllMatch(addr, size, [&](const Block& b) {
++                return (b.attr & ~ignore) == 0 && ((mask & MemAttr::Uncached) == 0 || MemState::CanChangeAttribute(b.state)) &&
++                       ((mask & MemAttr::PermissionLocked) == 0 || b.state == MemState::CodeData || b.state == MemState::AliasCodeData);
++            }))
++            return MemResult::InvalidCurrentMemory;
++        Modify(addr, size, [&](Block& b) { b.attr = (b.attr & ~mask) | (value & mask); });
++        return MemResult::Success;
++    }
++    /// SetMemoryPermission on heap memory (read / read-write / none).
++    uint32_t SetPermission(uint64_t addr, uint64_t size, uint32_t perm) {
++        std::scoped_lock lk{mutex};
++        if (perm != MemPerm::None && perm != MemPerm::Read && perm != MemPerm::ReadWrite) return MemResult::InvalidNewMemoryPermission;
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllMatch(addr, size, [](const Block& b) { return MemState::IsData(b.state) && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
++        backend.Protect(addr, size, perm);
++        Modify(addr, size, [&](Block& b) { b.perm = perm; });
++        return MemResult::Success;
++    }
++    /// CreateTransferMemory: the owner's pages are locked and shown with `perm` until UnlockTransfer.
++    uint32_t LockTransfer(uint64_t addr, uint64_t size, uint32_t perm) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllMatch(addr, size, [](const Block& b) { return MemState::CanTransfer(b.state) && b.perm == MemPerm::ReadWrite && b.attr == 0; }))
++            return MemResult::InvalidCurrentMemory;
++        backend.Protect(addr, size, perm);
++        Modify(addr, size, [&](Block& b) {
++            b.attr |= MemAttr::Locked;
++            b.hidden_perm = b.perm;
++            b.perm = perm;
++        });
++        return MemResult::Success;
++    }
++    uint32_t UnlockTransfer(uint64_t addr, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        if (!AllMatch(addr, size, [](const Block& b) { return (b.attr & MemAttr::Locked) != 0; })) return MemResult::InvalidCurrentMemory;
++        backend.Protect(addr, size, MemPerm::ReadWrite);
++        Modify(addr, size, [](Block& b) {
++            b.attr &= ~MemAttr::Locked;
++            b.perm = b.hidden_perm;
++        });
++        return MemResult::Success;
++    }
++    /// A device (the GPU driver) maps or unmaps these pages.
++    uint32_t LockDevice(uint64_t addr, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        if (!AllMatch(addr, size, [](const Block& b) { return MemState::CanDeviceMap(b.state); })) return MemResult::InvalidCurrentMemory;
++        Modify(addr, size, [](Block& b) {
++            ++b.device_count;
++            b.attr |= MemAttr::DeviceShared;
++        });
++        return MemResult::Success;
++    }
++    uint32_t UnlockDevice(uint64_t addr, uint64_t size) {
++        std::scoped_lock lk{mutex};
++        if (!AllMatch(addr, size, [](const Block& b) { return b.device_count > 0; })) return MemResult::InvalidCurrentMemory;
++        Modify(addr, size, [](Block& b) {
++            if (--b.device_count == 0) b.attr &= ~MemAttr::DeviceShared;
++        });
++        return MemResult::Success;
++    }
++
++    /// The physical offset behind a guest address (nullopt when not mapped).
++    std::optional<uint64_t> PhysicalOf(uint64_t addr) {
++        std::scoped_lock lk{mutex};
++        if (!InSpace(addr, 1)) return std::nullopt;
++        auto it = Find(addr);
++        if (it->second.state == MemState::Free || it->second.state == MemState::Inaccessible) return std::nullopt;
++        return it->second.phys + (addr - it->first);
++    }
++    size_t BlockCount() {
++        std::scoped_lock lk{mutex};
++        return blocks.size();
++    }
++
++private:
++    struct Block {
++        uint64_t size;
++        uint32_t state, perm, attr;
++        uint32_t ipc_count, device_count;
++        uint64_t phys;
++        bool owned;              ///< physical pages belong to this mapping (freed on unmap)
++        uint32_t hidden_perm = 0; ///< the permission under a lock
++    };
++
++    static bool SameView(const Block& a, const Block& b) {
++        return a.state == b.state && a.perm == b.perm && a.attr == b.attr && a.ipc_count == b.ipc_count && a.device_count == b.device_count;
++    }
++    static bool Aligned(uint64_t a, uint64_t s) { return s && a % PageSize == 0 && s % PageSize == 0 && a + s > a; }
++    bool InSpace(uint64_t a, uint64_t s) const { return a >= layout.space_start && a + s <= layout.space_start + layout.space_size; }
++    static bool InRegion(uint64_t a, uint64_t s, uint64_t start, uint64_t size) { return a >= start && a + s <= start + size; }
++
++    std::map<uint64_t, Block>::iterator Find(uint64_t addr) {
++        auto it = blocks.upper_bound(addr);
++        return std::prev(it);
++    }
++    /// Splits so that a block starts at `addr`.
++    void SplitAt(uint64_t addr) {
++        if (addr >= layout.space_start + layout.space_size) return;
++        auto it = Find(addr);
++        if (it->first == addr) return;
++        Block tail = it->second;
++        const uint64_t head = addr - it->first;
++        tail.size -= head;
++        if (tail.state != MemState::Free) tail.phys += head;
++        it->second.size = head;
++        blocks.emplace(addr, tail);
++    }
++    template <typename F>
++    bool AllMatch(uint64_t addr, uint64_t size, F&& f, bool same = false) {
++        if (!InSpace(addr, size)) return false;
++        std::optional<uint32_t> first;
++        for (uint64_t at = addr; at < addr + size;) {
++            auto it = Find(at);
++            if (!f(it->second)) return false;
++            if (same) {
++                if (first && *first != it->second.state) return false;
++                first = it->second.state;
++            }
++            at = it->first + it->second.size;
++        }
++        return true;
++    }
++    bool AllFree(uint64_t addr, uint64_t size) {
++        return AllMatch(addr, size, [](const Block& b) { return b.state == MemState::Free; });
++    }
++    /// The blocks covering [addr, addr+size), cut to the range (after splitting).
++    std::vector<std::pair<uint64_t, Block>> Pieces(uint64_t addr, uint64_t size) {
++        SplitAt(addr);
++        SplitAt(addr + size);
++        std::vector<std::pair<uint64_t, Block>> out;
++        for (auto it = blocks.find(addr); it != blocks.end() && it->first < addr + size; ++it) out.emplace_back(it->first, it->second);
++        return out;
++    }
++    template <typename F>
++    void Modify(uint64_t addr, uint64_t size, F&& f) {
++        SplitAt(addr);
++        SplitAt(addr + size);
++        for (auto it = blocks.find(addr); it != blocks.end() && it->first < addr + size; ++it) f(it->second);
++        Coalesce(addr, size);
++    }
++    /// Replaces [addr, addr+size) with one block (no phys meaning for Free).
++    void Set(uint64_t addr, uint64_t size, Block b) {
++        SplitAt(addr);
++        SplitAt(addr + size);
++        for (auto it = blocks.find(addr); it != blocks.end() && it->first < addr + size;) it = blocks.erase(it);
++        b.size = size;
++        blocks.emplace(addr, b);
++        Coalesce(addr, size);
++    }
++    void ReleaseLocked(uint64_t addr, uint64_t size) {
++        for (auto& [va, b] : Pieces(addr, size))
++            if (b.owned) physical.Free(b.phys, b.size);
++        backend.Unmap(addr, size);
++        Set(addr, size, Block{size, MemState::Free, MemPerm::None, 0, 0, 0, 0, false});
++    }
++    /// Joins neighbouring blocks with the same properties and contiguous pages (free blocks always join).
++    void Coalesce(uint64_t addr, uint64_t size) {
++        auto it = Find(addr);
++        if (it != blocks.begin()) --it;
++        while (it != blocks.end()) {
++            auto next = std::next(it);
++            if (next == blocks.end()) break;
++            Block& a = it->second;
++            const Block& b = next->second;
++            const bool join = SameView(a, b) && a.owned == b.owned && a.hidden_perm == b.hidden_perm &&
++                              (a.state == MemState::Free || a.phys + a.size == b.phys);
++            if (join) {
++                a.size += b.size;
++                blocks.erase(next);
++                continue;
++            }
++            if (next->first > addr + size) break;
++            it = next;
++        }
++    }
++
++    Layout layout;
++    Backend& backend;
++    PhysicalAllocator& physical;
++    std::mutex mutex;
++    std::map<uint64_t, Block> blocks;
++    uint64_t heap_size = 0;
++};
++
++} // namespace KartRuntime
 diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
 new file mode 100644
 index 0000000000..fc5364b0f8
@@ -15252,6 +15749,172 @@ index 0000000000..a6681aba4f
 +  "${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror -pthread ${CXXFLAGS:-} "$t" -o "$out/$n"
 +  "$out/$n"
 +done
+diff --git a/src/kart_runtime/tests/test_address_space.cpp b/src/kart_runtime/tests/test_address_space.cpp
+new file mode 100644
+index 0000000000..f19cb6820e
+--- /dev/null
++++ b/src/kart_runtime/tests/test_address_space.cpp
+@@ -0,0 +1,160 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Tests for kart_runtime/address_space.h: the kernel's rules for a process's memory as a game uses them, with a fake host
++// mapping that keeps a page table over real bytes (so aliases are checked by reading the same data at two addresses).
++#include "../address_space.h"
++
++#include <cassert>
++#include <cstdio>
++#include <cstring>
++#include <unordered_map>
++
++using namespace KartRuntime;
++
++namespace {
++
++constexpr uint64_t Page = AddressSpace::PageSize;
++
++class FakeBackend final : public AddressSpace::Backend {
++public:
++    explicit FakeBackend(size_t backing_size) : backing(backing_size) {}
++    void Map(uint64_t va, uint64_t size, uint64_t phys, uint32_t perm) override {
++        for (uint64_t o = 0; o < size; o += Page) pages[(va + o) / Page] = {phys + o, perm};
++    }
++    void Unmap(uint64_t va, uint64_t size) override {
++        for (uint64_t o = 0; o < size; o += Page) pages.erase((va + o) / Page);
++    }
++    void Protect(uint64_t va, uint64_t size, uint32_t perm) override {
++        for (uint64_t o = 0; o < size; o += Page) pages.at((va + o) / Page).perm = perm;
++    }
++    bool Write(uint64_t va, const void* data, size_t n) {
++        const auto it = pages.find(va / Page);
++        if (it == pages.end() || !(it->second.perm & MemPerm::Write)) return false;
++        std::memcpy(backing.data() + it->second.phys + va % Page, data, n);
++        return true;
++    }
++    bool Read(uint64_t va, void* data, size_t n) {
++        const auto it = pages.find(va / Page);
++        if (it == pages.end() || !(it->second.perm & MemPerm::Read)) return false;
++        std::memcpy(data, backing.data() + it->second.phys + va % Page, n);
++        return true;
++    }
++    struct P {
++        uint64_t phys;
++        uint32_t perm;
++    };
++    std::vector<uint8_t> backing;
++    std::unordered_map<uint64_t, P> pages;
++};
++
++AddressSpace::Layout GameLayout() {
++    AddressSpace::Layout l;
++    l.space_start = 0;
++    l.space_size = 0x80'0000'0000;
++    l.code_start = 0x800'0000;
++    l.code_size = 0x7f'f800'0000;
++    l.heap_start = 0x21'0360'0000;
++    l.heap_size = 0x2'0000'0000;
++    l.alias_start = 0x11'0360'0000;
++    l.alias_size = 0x10'0000'0000;
++    l.stack_start = 0x10'8360'0000;
++    l.stack_size = 0x8000'0000;
++    l.kmap_start = 0x8360'0000;
++    l.kmap_size = 0x10'0000'0000;
++    return l;
++}
++
++} // namespace
++
++int main() {
++    FakeBackend host(64 << 20);
++    PhysicalAllocator phys(0, 64 << 20);
++    AddressSpace as(GameLayout(), host, phys);
++
++    // Empty space: one free block, the rest inaccessible.
++    auto info = as.Query(0x1234000);
++    assert(info.state == MemState::Free && info.base_address == 0 && info.size == 0x80'0000'0000);
++    info = as.Query(0x80'0000'0000);
++    assert(info.state == MemState::Inaccessible && info.base_address == 0x80'0000'0000 && info.base_address + info.size == 0);
++
++    // Code: text R-X, data RW (as the loader maps a module).
++    assert(as.MapNew(0x8000'0000, 0x10000, MemState::Code, MemPerm::ReadExecute) == 0);
++    assert(as.MapNew(0x8001'0000, 0x4000, MemState::CodeData, MemPerm::ReadWrite) == 0);
++    info = as.Query(0x8000'8000);
++    assert(info.base_address == 0x8000'0000 && info.size == 0x10000 && info.state == MemState::Code && info.permission == MemPerm::ReadExecute);
++    assert(as.MapNew(0x8000'f000, 0x2000, MemState::Code, MemPerm::Read) == MemResult::InvalidCurrentMemory); // overlap
++    std::printf("code: mapped, queried, overlap refused\n");
++
++    // Heap: grows and shrinks in 2 MiB steps.
++    uint64_t heap = 0;
++    assert(as.SetHeapSize(0x10'0000, &heap) == MemResult::InvalidSize);
++    assert(as.SetHeapSize(0x40'0000, &heap) == 0 && heap == 0x21'0360'0000);
++    assert(host.Write(heap + 0x123, "abc", 3));
++    assert(as.SetHeapSize(0x80'0000, &heap) == 0);
++    info = as.Query(heap + 0x50'0000);
++    assert(info.state == MemState::Normal && info.base_address == heap && info.size == 0x80'0000); // the two steps look like one
++    char got[4]{};
++    assert(host.Read(heap + 0x123, got, 3) && std::memcmp(got, "abc", 3) == 0);
++    assert(as.SetHeapSize(0x20'0000, &heap) == 0);
++    assert(as.Query(heap + 0x20'0000).state == MemState::Free);
++    assert(phys.Used() == 0x10000 + 0x4000 + 0x20'0000);
++    std::printf("heap: grow, shrink, contents kept, pages freed\n");
++
++    // Alias (thread stacks): the source is locked and hidden, the destination shows the same bytes.
++    const uint64_t stack = 0x10'8360'0000;
++    assert(as.MapAlias(0x9000'0000, heap, 0x4000) == MemResult::InvalidMemoryRegion); // destination outside the stack region
++    assert(as.MapAlias(stack, heap, 0x4000) == 0);
++    info = as.Query(heap);
++    assert(info.attribute == MemAttr::Locked && info.permission == MemPerm::None && info.size == 0x4000);
++    assert(!host.Read(heap + 0x123, got, 3));
++    assert(host.Read(stack + 0x123, got, 3) && std::memcmp(got, "abc", 3) == 0);
++    assert(as.Query(stack).state == MemState::Stack);
++    assert(as.MapAlias(stack + 0x10000, heap, 0x4000) == MemResult::InvalidCurrentMemory); // already locked
++    assert(as.Unmap(heap, 0x4000, MemState::Normal) == MemResult::InvalidCurrentMemory);     // locked memory stays
++    assert(as.UnmapAlias(stack, heap, 0x4000) == 0);
++    assert(as.Query(stack).state == MemState::Free && as.Query(heap).attribute == 0 && as.Query(heap).permission == MemPerm::ReadWrite);
++    assert(host.Read(heap + 0x123, got, 3));
++    info = as.Query(heap);
++    assert(info.size == 0x20'0000); // whole again
++    std::printf("alias: lock, hide, share, refuse, undo\n");
++
++    // Attributes (the GPU driver marks memory uncached).
++    assert(as.SetAttribute(heap, 0x10000, MemAttr::Uncached, MemAttr::Uncached) == 0);
++    assert(as.Query(heap).attribute == MemAttr::Uncached && as.Query(heap).size == 0x10000);
++    assert(as.SetAttribute(heap, 0x10000, MemAttr::Uncached, 0) == 0);
++    assert(as.Query(heap).attribute == 0 && as.Query(heap).size == 0x20'0000);
++    assert(as.SetAttribute(0x8000'0000, Page, MemAttr::Uncached, MemAttr::Uncached) == MemResult::InvalidCurrentMemory); // code
++    assert(as.SetAttribute(heap, Page, MemAttr::Locked, MemAttr::Locked) == MemResult::InvalidCombination);
++    assert(as.SetAttribute(0x8001'0000, Page, MemAttr::PermissionLocked, MemAttr::PermissionLocked) == 0);
++    std::printf("attributes: uncached on data, refused on code, bad masks\n");
++
++    // Transfer memory (audio work buffer) and device locks (GPU driver).
++    assert(as.LockTransfer(heap + 0x10000, 0x10000, MemPerm::None) == 0);
++    assert(as.Query(heap + 0x10000).attribute == MemAttr::Locked && !host.Write(heap + 0x10000, "x", 1));
++    assert(as.UnlockTransfer(heap + 0x10000, 0x10000) == 0 && host.Write(heap + 0x10000, "x", 1));
++    assert(as.LockDevice(heap, 0x8000) == 0 && as.LockDevice(heap, 0x4000) == 0);
++    info = as.Query(heap);
++    assert(info.device_count == 2 && info.size == 0x4000 && (info.attribute & MemAttr::DeviceShared));
++    assert(as.UnlockDevice(heap, 0x4000) == 0 && as.UnlockDevice(heap, 0x8000) == 0);
++    assert(as.Query(heap).device_count == 0 && as.Query(heap).size == 0x20'0000);
++    std::printf("transfer and device locks\n");
++
++    // Shared memory: pages owned elsewhere, mapped and unmapped without freeing them.
++    const auto shared = *phys.Allocate(0x40000);
++    const uint64_t used = phys.Used();
++    const auto where = as.FindFree(GameLayout().alias_start, GameLayout().alias_size, 0x40000);
++    assert(where && as.MapPhysical(*where, 0x40000, shared, MemState::Shared, MemPerm::Read) == 0);
++    assert(as.Query(*where).state == MemState::Shared && as.PhysicalOf(*where + 0x1234) == shared + 0x1234);
++    assert(as.Unmap(*where, 0x40000, MemState::Normal) == MemResult::InvalidCurrentMemory);
++    assert(as.Unmap(*where, 0x40000, MemState::Shared) == 0 && phys.Used() == used);
++    std::printf("shared memory\n");
++
++    // Everything unmapped: back to one free block, no pages in use but the shared one.
++    assert(as.SetHeapSize(0, &heap) == 0);
++    assert(as.Unmap(0x8000'0000, 0x10000, MemState::Code) == 0);
++    assert(as.Unmap(0x8001'0000, 0x4000, MemState::CodeData) == MemResult::InvalidCurrentMemory); // permission-locked
++    assert(as.SetAttribute(0x8001'0000, Page, MemAttr::PermissionLocked, 0) == 0);
++    assert(as.Unmap(0x8001'0000, 0x4000, MemState::CodeData) == 0);
++    assert(as.BlockCount() == 1 && phys.Used() == 0x40000 && host.pages.empty());
++    std::printf("address_space: all tests passed\n");
++    return 0;
++}
 diff --git a/src/kart_runtime/tests/test_core_scheduler.cpp b/src/kart_runtime/tests/test_core_scheduler.cpp
 new file mode 100644
 index 0000000000..e3e1ccc18e
