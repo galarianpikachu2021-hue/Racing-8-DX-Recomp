@@ -147,3 +147,35 @@ that runs on wall-clock time (audio, the display's vsync, a streaming thread) me
 Next:
 - find which thread passes the bad object, by thread role, at race start
 - compare thread priorities and core masks with the emulated kernel's for the same threads
+
+### The race-start crash: found and fixed (2026-11-15)
+
+**Cause: SetThreadCoreMask on a thread that was not started yet was dropped.** The game creates its worker threads, sets their core
+masks ("core 2 only" and so on) and only then starts them. A thread gets its scheduler entry at StartThread, so the runtime chose
+the new core but recorded nothing, and every worker started on the core it was created for: core 0, outside its own mask.
+
+The game noticed in the worst way. At its start each thread stores `GetCurrentCoreNumber() + 1` in a TLS slot (main+0x97c9f4), and
+that value picks a per-core work buffer (main+0x7205f4). All threads read core 0, so they all shared buffer 0. When the race starts
+and several threads fill those buffers at once, the main thread read another thread's records as its own object pointers: a garbage
+`this` (0x1000000000011) passed to an NVN entry point, a call to null, then a crash.
+
+How it was found:
+1. The guest registers from the core dump (block context in host `rbx`) and a frame walk through the direct-memory arena led to
+   the game's call site.
+2. The record layout showed the array was another structure.
+3. The import names (from main's PLT relocations) showed the per-core buffer and its TLS index.
+4. Reading every thread's TLS value from the dump showed they were all 1.
+
+Fix: `GuestThread::start_core` (set by CreateThread and by SetThreadCoreMask before the start); test in `test_game_kernel.cpp`.
+
+**Result:** the runtime kernel (`KARTRECOMP_NATIVE_KERNEL=1`) now matches the default mode in every check:
+
+| check | result |
+|---|---|
+| 1P race, 4.0.1 | 200 s, 60 fps, laps 1-2 render correctly |
+| 1P race, 3.0.4 | 150 s, 60 fps |
+| 4P race | 60.0 fps on average, no slow seconds (default mode: 59.9) |
+| keyless boot | races |
+
+The race-start dips (51-55 fps) are gone, because the workers now really run on their own cores. No call-to-null recoveries,
+no core dumps. Still opt-in until the user has played it.

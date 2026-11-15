@@ -15268,10 +15268,10 @@ index 0000000000..6b0956610e
 +} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/game_kernel.h b/src/kart_runtime/game_kernel.h
 new file mode 100644
-index 0000000000..e699f34c7c
+index 0000000000..a64d0b326d
 --- /dev/null
 +++ b/src/kart_runtime/game_kernel.h
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,602 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel for the game's process (docs/NATIVE_KERNEL.md, stages 3-4).
 +//
@@ -15336,6 +15336,7 @@ index 0000000000..e699f34c7c
 +    std::atomic<bool> started{false}, ended{false}, terminate{false};
 +    void* executor_data = nullptr; ///< the executor's per-thread state
 +    int wait_depth = 0;            ///< nested host waits (BeginWait / EndWait), on the thread itself only
++    int start_core = 0;            ///< the core it starts on (its ideal core, or what SetThreadCoreMask chose before the start)
 +};
 +
 +/// Runs a guest thread's code.
@@ -15656,6 +15657,7 @@ index 0000000000..e699f34c7c
 +        t->tls = tls;
 +        t->priority = priority;
 +        t->ideal_core = core;
++        t->start_core = core;
 +        t->affinity = uint64_t{1} << core;
 +        {
 +            std::scoped_lock lk{threads_lock};
@@ -15669,7 +15671,7 @@ index 0000000000..e699f34c7c
 +        auto t = kernel.GetAs<GuestThread>(handle);
 +        if (!t) return KernelResult::InvalidHandle;
 +        if (t->started.exchange(true)) return KernelResult::InvalidState;
-+        t->sched = sched.Create(t->ideal_core, t->priority);
++        t->sched = sched.Create(t->start_core, t->priority);
 +        std::scoped_lock lk{threads_lock};
 +        host_threads.emplace_back([this, t] { HostMain(t); });
 +        return 0;
@@ -15753,6 +15755,10 @@ index 0000000000..e699f34c7c
 +                    run_on = c;
 +                    break;
 +                }
++        // A thread not started yet starts there. (The game creates its workers, sets their core masks and only then starts them;
++        // the move used to be dropped, so every worker ran on core 0 - and the game, which keeps per-core buffers indexed by the
++        // core number a thread reads at its start, gave them all the same buffer: memory corruption at race start.)
++        t->start_core = run_on;
 +        if (t->sched) sched.SetCore(t->sched.get(), run_on);
 +        return 0;
 +    }
@@ -19375,10 +19381,10 @@ index 0000000000..bbaebea55b
 +#endif
 diff --git a/src/kart_runtime/tests/test_game_kernel.cpp b/src/kart_runtime/tests/test_game_kernel.cpp
 new file mode 100644
-index 0000000000..ef0472e64d
+index 0000000000..076765b120
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_game_kernel.cpp
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,314 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Tests for kart_runtime/game_kernel.h: game threads on virtual cores with a scripted executor (each step of a thread's
 +// "code" sets its registers and makes a system call), over a fake memory backend with real bytes.
@@ -19529,8 +19535,11 @@ index 0000000000..ef0472e64d
 +        },
 +    };
 +    // Sleeper: waits forever on its own handle-less object... (a thread that only ends by shutdown).
++    std::atomic<uint64_t> sleeper_core{9};
 +    exec.programs[sleeper_entry] = {
++        [&](ThreadContext&) { return 0x10; }, // GetCurrentProcessorNumber: the core its mask chose before it started
 +        [&](ThreadContext& c) {
++            sleeper_core = c.x[0];
 +            c.x[0] = 60'000'000'000; // 60 s
 +            return 0x0B;
 +        },
@@ -19648,7 +19657,16 @@ index 0000000000..ef0472e64d
 +        },
 +        [&](ThreadContext& c) {
 +            assert(c.x[0] == 0);
++            child_handle = c.x[1];
++            // Created for core 1, moved to core 2 before it starts (as the game does with its workers).
 +            c.x[0] = c.x[1];
++            c.x[1] = static_cast<uint64_t>(-1);
++            c.x[2] = 0b100;
++            return 0x0F;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            c.x[0] = child_handle.load();
 +            return 0x09;
 +        },
 +        [&](ThreadContext& c) {
@@ -19669,6 +19687,9 @@ index 0000000000..ef0472e64d
 +    std::printf("memory calls: heap, alias stack, query into guest memory, transfer lock + close\n");
 +
 +    // The sleeper is still asleep; shutdown ends it at once.
++    while (sleeper_core == 9) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    assert(sleeper_core == 2);
++    std::printf("core mask set before the start: the thread starts on that core\n");
 +    assert(kernel.LiveThreads() == 1);
 +    const auto t0 = std::chrono::steady_clock::now();
 +    kernel.Shutdown();
