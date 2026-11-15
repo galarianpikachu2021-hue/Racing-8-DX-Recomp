@@ -9,7 +9,14 @@ tmp="$(mktemp -d -p "${TMPDIR:-/tmp}")"; trap 'rm -rf "$tmp"' EXIT
 (cd "$tmp" && "$img" --appimage-extract >/dev/null 2>&1) || { echo "FAIL: cannot unpack the AppImage"; exit 1; }
 root="$tmp/squashfs-root"
 for p in libkr_upscaler_fsr3.so libkr_framegen_fsr3.so; do [ -e "$root/usr/bin/plugins/$p" ] || { echo "FAIL: $p is not in the release"; exit 1; }; done
-find "$root" -iname '*dlss*' -o -iname '*ngx*' | grep -q . && { echo "FAIL: DLSS/NGX files are in the release"; exit 1; }
+# The launcher's DLSS button builds the plugin on the user's PC from our own source (plugin-src/dlss: GPL, no NVIDIA file): that
+# folder may hold exactly those three files; anything else named DLSS/NGX anywhere is a failure.
+find "$root" \( -iname '*dlss*' -o -iname '*ngx*' \) -not -path '*/plugin-src/dlss' -not -path '*/plugin-src/dlss/*' | grep -q . &&
+    { echo "FAIL: DLSS/NGX files are in the release"; exit 1; }
+if [ -d "$root/usr/lib/kartrecomp/plugin-src/dlss" ]; then
+    extra=$(ls "$root/usr/lib/kartrecomp/plugin-src/dlss" | grep -vxE 'install-linux\.sh|kr_upscaler_dlss\.cpp|kr_upscaler_abi\.h')
+    [ -n "$extra" ] && { echo "FAIL: unexpected files in plugin-src/dlss: $extra"; exit 1; }
+fi
 bad=$(find "$root" -type f \( -iname '*.nsp' -o -iname '*.xci' -o -iname '*.nca' -o -iname '*.nso' -o -iname '*.npdm' -o -iname 'prod.keys*' -o -iname 'title.keys*' -o -name 'recomp_*.c' -o -name 'recompiled_*' -o -name 'module.json' \) -o \( -name '*.o' -not -path '*/toolchain/*' \) | head -3)
 [ -z "$bad" ] || { echo "FAIL: game-derived files in the release: $bad"; exit 1; }
 [ -f "$root/usr/bin/ENGINE_VERSION" ] || { echo "FAIL: no ENGINE_VERSION"; exit 1; }
