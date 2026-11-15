@@ -36,6 +36,9 @@ points the ultrawide option needs.
 - **Crash going into the next race** (after finishing a race of a Grand Prix). Checked with whole scripted Grand Prix runs: four
   races and the trophy, no errors.
 - **Wireless Play stopped the game** (error 2021-0007) as soon as it was opened.
+- **Online Play froze on "A communication error has occurred"** with the new engine. Nintendo's online service cannot be used by a
+  recompiled game, so the game now gets a clean "no connection" answer and returns to the main menu. To play over the internet, use
+  Wireless Play with online play enabled (above).
 - Closing the game could crash.
 
 ## For testers: the new kernel (experimental, Linux)

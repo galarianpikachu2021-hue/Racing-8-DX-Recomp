@@ -30,6 +30,8 @@ setting).
 
 --taps-from=F taps A once a second from frame F instead of holding it (to get from a finished race into the next one).
 
+--online[=N] is the same for the Online button (two Downs).
+
 --time-trial picks Time Trials instead of Grand Prix (the rest of the menu taps are the same; see docs/BENCHMARK.md).
 
 --cup=N picks the Nth cup to the right of the Mushroom Cup (the first race then differs).
@@ -59,10 +61,13 @@ def main() -> int:
     # Time trials have no antenna. --weave brings back the old sine-wave steering without it.
     weave = "--weave" in sys.argv
     wireless = next((int(a.split("=", 1)[1]) if "=" in a else 2 for a in sys.argv if a.startswith("--wireless")), None)
+    online = next((int(a.split("=", 1)[1]) if "=" in a else 2 for a in sys.argv if a.startswith("--online")), None)
+    if online is not None:
+        wireless = online
     if wireless is not None:
-        # Main menu (Single Player, Multiplayer, Online, Wireless Play): input from about frame 510; three Downs, then A.
+        # Main menu (Single Player, Multiplayer, Online, Wireless Play): input from about frame 510; three Downs (two for Online), then A.
         lines = [f"{f + k} KEY_A 0;0 0;0" for f in (400, 460) for k in range(4)]
-        for i in range(3):
+        for i in range(2 if online is not None else 3):
             lines += [f"{530 + 15 * i + k} KEY_DDOWN 0;0 0;0" for k in range(4)]
         lines += [f"{600 + 120 * i + k} KEY_A 0;0 0;0" for i in range(wireless + 1) for k in range(4)]
         # Then stay on that screen (a TAS run ends with its script): one stick nudge at the end (--frames, default 4000).

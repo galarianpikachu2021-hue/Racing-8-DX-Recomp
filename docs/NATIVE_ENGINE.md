@@ -743,3 +743,19 @@ Also fixed while looking (default mode):
 
 Test tool: `tools/make-menu-tas.py --taps-from=F` (tap A after the race) and `--no-pause-toggle` (Grand Prix with the saved
 Smart Steering setting).
+
+## Online Play button (2026-11-15)
+
+The game's Online Play needs Nintendo's servers. v0.2.2 made it fail cleanly through suyu's emulated `nifm`. The native engine
+answers every service itself, had no `nifm`, and the game froze on its "communication error" screen.
+
+`MakeNetwork` (`kart_runtime/services/system.h`) answers `nifm:u/a/s` the way suyu does with no connection:
+- Submit puts the request on hold.
+- The first GetResult answers "pending" (2110-0111) and makes the request invalid, signalling its events.
+- After that GetResult answers 2110-1111 (network communication disabled).
+- Wireless is reported on, so local wireless is not blocked.
+
+The SDK then clears the request's events with **svc ClearEvent**, which was not routed for runtime events in either kernel
+(2001-0114, then an SDK abort). It is now routed. Result: "Connecting...", then back at the main menu.
+
+Test: `make-menu-tas.py --online[=N]`. Diagnostics: a system call that answers "invalid handle" is logged with its arguments.
