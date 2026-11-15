@@ -113,7 +113,7 @@ index 88bf023008..7044ca660e 100644
              eden_path_cache = eden_path / CACHE_DIR;
              eden_path_config = eden_path / CONFIG_DIR;
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index 0ae108d9c1..8ce347aa34 100644
+index 0ae108d9c1..e27180825c 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -50,6 +50,7 @@
@@ -235,14 +235,15 @@ index 0ae108d9c1..8ce347aa34 100644
  #endif
          free_manager.SetAddressSpace(virtual_base, virtual_size);
          return true;
-@@ -784,6 +861,30 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
+@@ -784,6 +861,31 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
  }
  
  void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
 +#if defined(__linux__)
 +    // kart-recomp: a zero fill of whole pages frees them instead (74% of the game's resident guest memory was pages the
 +    // kernel had zero-filled and the game never wrote). Unaligned edges are still written.
-+    if (fill_value == 0 && impl && length >= PageAlignment) {
++    static const bool punch = std::getenv("KARTRECOMP_NO_CLEAR_PUNCH") == nullptr; // experiments: plain fills
++    if (punch && fill_value == 0 && impl && length >= PageAlignment) {
 +        const size_t begin = Common::AlignUp(physical_offset, PageAlignment);
 +        const size_t end = Common::AlignDown(physical_offset + length, PageAlignment);
 +        if (end > begin && impl->PunchHole(begin, end - begin)) {
@@ -952,7 +953,7 @@ index 408daa6839..8e01c564cd 100644
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..48a0f2ce02 100644
+index 67a55424e9..ae578b3a08 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -1349,8 +1350,21 @@ index 67a55424e9..48a0f2ce02 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2248,7 +2493,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2246,9 +2491,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+                              "recomp: no JIT fallback available at PC {:#x}; thread cannot "
+                              "continue",
                               impl->ctx.pc);
++                if (thread) {
++                    static std::atomic<int> told{0};
++                    if (told.fetch_add(1) < 3) {
++                        const auto& saved = thread->GetContext();
++                        LOG_CRITICAL(Core_ARM,
++                                     "recomp: that thread: id {} (core {}, runner core {}), its saved context pc {:#x} sp {:#x} lr {:#x}, "
++                                     "TLS {:#x}, runner TPIDRRO {:#x}, termination requested {}",
++                                     thread->GetThreadId(), thread->GetActiveCore(), impl->core_index, saved.pc, saved.sp, saved.lr,
++                                     GetInteger(thread->GetTlsAddress()), impl->ctx.tpidrro_el0, thread->IsTerminationRequested());
++                    }
++                }
                  return HaltReason::PrefetchAbort;
              }
 -            return RunFallback(thread);
@@ -1359,7 +1373,7 @@ index 67a55424e9..48a0f2ce02 100644
          }
  
          // Dump periodically: teardown is not guaranteed to run (the emulated
-@@ -2258,6 +2504,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2515,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -1369,7 +1383,7 @@ index 67a55424e9..48a0f2ce02 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2306,7 +2555,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2306,7 +2566,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              impl->ctx.pending_svc = kNoPendingSvc;
              // Forward the guest instruction-cache operation to each CPU interface.
              for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1378,7 +1392,7 @@ index 67a55424e9..48a0f2ce02 100644
              }
              impl->ctx.pc += 4;
              impl->ctx.halted = 0;
-@@ -2350,7 +2599,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2350,7 +2610,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               unsupported_opcode, impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -1388,7 +1402,7 @@ index 67a55424e9..48a0f2ce02 100644
          }
  
          if (impl->ctx.pending_svc != kNoPendingSvc) {
-@@ -2404,7 +2654,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+@@ -2404,7 +2665,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
          const u64 address = impl->ctx.pending_svc;
          impl->ctx.pending_svc = kNoPendingSvc;
          for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1397,7 +1411,7 @@ index 67a55424e9..48a0f2ce02 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2787,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2798,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -6290,10 +6304,10 @@ index 0000000000..a903b68ecc
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..e30a5d047e
+index 0000000000..90f4de21cc
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,434 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -6626,9 +6640,18 @@ index 0000000000..e30a5d047e
 +
 +std::shared_ptr<KartRuntime::Event> ThreadEndEvent(KernelCore& kernel, KThread* thread) {
 +    std::scoped_lock lk{g_thread_end_lock};
++    if (thread->IsSignaled(kernel)) {
++        // Ended already (OnThreadEnded ran before anyone waited): a signalled event for this wait only, NOT kept in the map. Kept,
++        // it outlived the thread: thread objects are reused, and the next thread on this object then looked ended from its start -
++        // the game's wait for it returned at once and it unmapped the stack of a thread still running (a jump to 0 when a race
++        // ended and the game replaced its worker threads).
++        g_thread_end.erase(thread);
++        auto ended = std::make_shared<KartRuntime::Event>(Runtime(kernel), "thread end");
++        ended->Signal();
++        return ended;
++    }
 +    auto& e = g_thread_end[thread];
-+    if (!e) e = std::make_shared<KartRuntime::Event>(Runtime(kernel), "thread end");
-+    if (thread->IsSignaled(kernel)) e->Signal(); // ended already (OnThreadEnded may have run before the event existed)
++    if (!e || e->IsSignaled()) e = std::make_shared<KartRuntime::Event>(Runtime(kernel), "thread end"); // never a stale one
 +    return e;
 +}
 +} // namespace
@@ -7482,10 +7505,10 @@ index 0000000000..cbf23ef782
 +} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..287eba7082
+index 0000000000..622fedfbe8
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,275 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_threads.h"
@@ -7524,6 +7547,7 @@ index 0000000000..287eba7082
 +    std::unique_ptr<CoreScheduler::Thread> sched;
 +    std::function<void()> entry; ///< service threads; empty = a game thread (runs the CPU interface)
 +    bool started = false;
++    bool exited = false; ///< its host thread has left for good (ExitCurrent)
 +};
 +
 +std::mutex g_lock;
@@ -7536,7 +7560,9 @@ index 0000000000..287eba7082
 +KernelCore* g_kernel = nullptr;
 +
 +CoreScheduler& Scheduler() {
-+    static CoreScheduler scheduler{static_cast<int>(Core::Hardware::NUM_CPU_CORES)};
++    // Moves of a running thread wait for its next yield or wait: it keeps executing in its core's code runner until then, and
++    // handing that core on at once let another thread load its registers into the same runner (a jump to 0 at the end of a race).
++    static CoreScheduler scheduler{static_cast<int>(Core::Hardware::NUM_CPU_CORES), true};
 +    return scheduler;
 +}
 +
@@ -7589,11 +7615,13 @@ index 0000000000..287eba7082
 +    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).LoadContext(thread);
 +}
 +
-+/// Saves the registers and gives the core up.
-+void Leave(KernelCore& kernel, KThread* thread) {
++/// Saves the registers and gives the core up. `keep_core`: the thread comes back to this core (a wait inside a host call made from
++/// the core's code runner, which is still running: a host hook's frame pacing, a display-queue wait); a move asked for meanwhile
++/// is done at its next yield.
++void Leave(KernelCore& kernel, KThread* thread, bool keep_core = false) {
 +    kernel.PhysicalCore(static_cast<std::size_t>(t_core)).SaveContext(thread);
 +    t_core = -1;
-+    Scheduler().Release(t_sched);
++    Scheduler().Release(t_sched, keep_core);
 +}
 +
 +void GuestLoop(KernelCore& kernel, KThread* thread) {
@@ -7649,6 +7677,8 @@ index 0000000000..287eba7082
 +    std::scoped_lock lk{g_lock};
 +    // Thread objects are recycled: one that exited leaves its entry (and its parked host thread's scheduler handle) behind.
 +    if (const auto it = g_threads.find(thread); it != g_threads.end()) {
++        if (it->second.started && !it->second.exited)
++            LOG_CRITICAL(Kernel, "native threads: thread object {} reused while its host thread still runs", fmt::ptr(thread));
 +        if (it->second.sched) g_retired.push_back(std::move(it->second.sched));
 +        g_threads.erase(it);
 +    }
@@ -7659,6 +7689,10 @@ index 0000000000..287eba7082
 +    // The thread has terminated inside the kernel. Its object may be reused at any time, so nothing of it is touched again:
 +    // give the core up and park this host thread for good. (TODO: end the host thread properly instead of parking it.)
 +    if (t_core >= 0) Leave(kernel, thread);
++    {
++        std::scoped_lock lk{g_lock};
++        if (const auto it = g_threads.find(thread); it != g_threads.end() && it->second.sched.get() == t_sched) it->second.exited = true;
++    }
 +    g_parked.fetch_add(1, std::memory_order_relaxed);
 +    std::mutex never;
 +    std::condition_variable forever;
@@ -7686,6 +7720,11 @@ index 0000000000..287eba7082
 +            LOG_INFO(Kernel, "native threads: game and service threads run as host threads (KARTRECOMP_NATIVE_THREADS=1)");
 +        }
 +    }
++    if (!entry) {
++        const auto& ctx = thread->GetContext();
++        LOG_INFO(Kernel, "native threads: game thread {} starts (entry {:#x}, stack {:#x}, core {}, priority {})", thread->GetThreadId(),
++                  ctx.pc, ctx.sp, CoreOf(thread), thread->GetPriority());
++    }
 +    std::thread(HostMain, std::ref(system), thread, sched, std::move(entry)).detach();
 +}
 +
@@ -7704,7 +7743,7 @@ index 0000000000..287eba7082
 +        return true;
 +    }
 +    if (!g_kernel || !t_thread || !t_sched || t_core < 0) return false;
-+    Leave(*g_kernel, t_thread);
++    Leave(*g_kernel, t_thread, true);
 +    return true;
 +}
 +
@@ -14828,10 +14867,10 @@ index 0000000000..62ba6c0346
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
 new file mode 100644
-index 0000000000..af20572554
+index 0000000000..d0e9266e24
 --- /dev/null
 +++ b/src/kart_runtime/core_scheduler.h
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,224 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart_runtime: virtual CPU cores for host threads.
 +//
@@ -14877,7 +14916,12 @@ index 0000000000..af20572554
 +        std::condition_variable wake;
 +    };
 +
-+    explicit CoreScheduler(int core_count) : cores(static_cast<std::size_t>(core_count)) {}
++    /// `defer_running_moves`: a running thread moved to another core keeps its core until it yields or waits (the runtime's own
++    /// kernel, where each thread has its own code runner). Without it the old core is handed on at once and the thread queues for
++    /// the new one: what the emulated kernel's native threads need, whose registers live in the per-core runner of the core they
++    /// entered a system call on (moving them mid-call handed one thread's registers to another: a jump to 0 after a lock wait).
++    explicit CoreScheduler(int core_count, bool defer_running_moves = false)
++        : cores(static_cast<std::size_t>(core_count)), defer_moves{defer_running_moves} {}
 +
 +    /// Called (with the scheduler's lock held: keep it short, do not call back in) when a running thread is asked to yield, so
 +    /// the owner can interrupt whatever that thread is executing. Optional.
@@ -14898,9 +14942,11 @@ index 0000000000..af20572554
 +        t->wake.wait(lk, [t] { return t->granted; });
 +    }
 +
-+    void Release(Thread* t) {
++    /// `keep_core`: the thread comes back to the same core (a wait inside a host call, while the core's code runner is still in
++    /// use by that call); a pending move is then done at its next yield instead.
++    void Release(Thread* t, bool keep_core = false) {
 +        std::scoped_lock lk{lock};
-+        ReleaseLocked(t);
++        ReleaseLocked(t, keep_core);
 +    }
 +
 +    void Yield(Thread* t) {
@@ -14931,7 +14977,7 @@ index 0000000000..af20572554
 +    void SetCore(Thread* t, int core) {
 +        std::scoped_lock lk{lock};
 +        const int old = t->core;
-+        if (t->granted) {
++        if (t->granted && defer_moves) {
 +            t->pending_core = old == core ? -1 : core;
 +            if (t->pending_core >= 0) RequestPreempt(t);
 +            return;
@@ -14941,6 +14987,15 @@ index 0000000000..af20572554
 +            Remove(cores[static_cast<std::size_t>(old)].waiting, t);
 +            t->core = core;
 +            cores[static_cast<std::size_t>(core)].waiting.push_back(t);
++            Dispatch(core);
++        } else if (t->granted) {
++            // Leave the old core now and queue for the new one; the thread itself blocks at its next Yield/Acquire.
++            cores[static_cast<std::size_t>(old)].running = nullptr;
++            t->granted = false;
++            t->core = core;
++            Enqueue(t);
++            RequestPreempt(t);
++            Dispatch(old);
 +            Dispatch(core);
 +        } else {
 +            t->core = core;
@@ -15004,6 +15059,7 @@ index 0000000000..af20572554
 +            best->preempt.store(false, std::memory_order_relaxed);
 +            c.running = best;
 +            best->wake.notify_one();
++            if (best->pending_core >= 0) RequestPreempt(best); // a move still to do (it came back here after a host wait)
 +            best = Best(c);
 +            if (!best) return;
 +        }
@@ -15015,7 +15071,7 @@ index 0000000000..af20572554
 +        if (on_preempt) on_preempt(t);
 +    }
 +
-+    void ReleaseLocked(Thread* t) {
++    void ReleaseLocked(Thread* t, bool keep_core = false) {
 +        CoreState& c = cores[static_cast<std::size_t>(t->core)];
 +        if (t->waiting) { // moved to another core while running, or released before it was granted
 +            Remove(c.waiting, t);
@@ -15025,7 +15081,7 @@ index 0000000000..af20572554
 +        t->granted = false;
 +        t->preempt.store(false, std::memory_order_relaxed);
 +        Dispatch(t->core);
-+        if (t->pending_core >= 0) { // the move asked for while it ran
++        if (t->pending_core >= 0 && !keep_core) { // the move asked for while it ran
 +            t->core = t->pending_core;
 +            t->pending_core = -1;
 +        }
@@ -15035,6 +15091,7 @@ index 0000000000..af20572554
 +    std::vector<CoreState> cores;
 +    std::uint64_t arrivals = 0;
 +    std::function<void(Thread*)> on_preempt;
++    const bool defer_moves;
 +};
 +
 +} // namespace KartRuntime
@@ -19100,10 +19157,10 @@ index 0000000000..bd490d35af
 +}
 diff --git a/src/kart_runtime/tests/test_core_scheduler.cpp b/src/kart_runtime/tests/test_core_scheduler.cpp
 new file mode 100644
-index 0000000000..cda0a6984c
+index 0000000000..78b15c88ec
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_core_scheduler.cpp
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,185 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Standalone test of KartRuntime::CoreScheduler (no test framework: exits non-zero with a message on failure).
 +#include <atomic>
@@ -19243,7 +19300,7 @@ index 0000000000..cda0a6984c
 +// Moving a RUNNING thread: it keeps its core (and reports it) until it yields, so no other thread executes with that core
 +// number meanwhile (the game indexes per-core buffers by it); after the yield it runs on the new core.
 +static void MoveRunningThread() {
-+    CoreScheduler s{2};
++    CoreScheduler s{2, true};
 +    auto a = s.Create(0, 30);
 +    s.Acquire(a.get());
 +    std::atomic<bool> b_ran{false};
@@ -19269,6 +19326,14 @@ index 0000000000..cda0a6984c
 +    CHECK(a->Core() == 0);
 +    s.Acquire(a.get());
 +    CHECK(s.Running(0) == a.get());
++    // A wait inside a host call (keep_core): the thread comes back to the same core; the move happens at its next yield.
++    s.SetCore(a.get(), 1);
++    s.Release(a.get(), true);
++    CHECK(a->Core() == 0);
++    s.Acquire(a.get());
++    CHECK(s.Running(0) == a.get() && s.PreemptRequested(a.get()));
++    s.Yield(a.get());
++    CHECK(a->Core() == 1 && s.Running(1) == a.get());
 +    s.Release(a.get());
 +}
 +
@@ -19381,7 +19446,7 @@ index 0000000000..bbaebea55b
 +#endif
 diff --git a/src/kart_runtime/tests/test_game_kernel.cpp b/src/kart_runtime/tests/test_game_kernel.cpp
 new file mode 100644
-index 0000000000..076765b120
+index 0000000000..9bc40a8729
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_game_kernel.cpp
 @@ -0,0 +1,314 @@
@@ -19500,7 +19565,7 @@ index 0000000000..076765b120
 +        [&] { gk->BeginWait(); },
 +        [&] { gk->EndWait(); },
 +    }};
-+    CoreScheduler sched{4};
++    CoreScheduler sched{4, true};
 +    ScriptExecutor exec;
 +    GameKernel::Config cfg;
 +    cfg.program_id = 0x0100152000022000;

@@ -713,3 +713,33 @@ rooms hosted by those emulators) work as long as the network version matches.
     character select; a 1P race with a room open runs at 60 fps; exits are clean.
   - **Not yet tested: two games in one room** (a second machine, or a second instance, is needed to see the other session in
     the lobby and race).
+
+## Crash going into the next race (2026-11-15)
+
+User report: the game crashed on "Next Race" after winning race 1. It reproduced without mods, in the default mode, always
+right when race 1 ended (about 231 s into the scripted run).
+
+**Cause: a stale "thread end" event** (`ThreadEndEvent` in `core/hle/kernel/native_services.cpp`).
+- Waits on a thread handle are answered by a runtime event per `KThread*`.
+- When the game waited on a thread that had already ended, the event was created signalled *and kept in the map*.
+  `OnThreadEnded`, which removes entries, had already run.
+- The emulated kernel reuses thread objects. The next thread on that object therefore looked ended from its start.
+- At race end the game replaces its worker threads. Its wait for one of the new workers (thread 71) returned at once, and it
+  unmapped that worker's stack (UnmapMemory, the last line of the kernel trace) while the worker was still running.
+- The worker's next stack read hit an unmapped page. The direct-memory handler gave it a zero page, it restored x19-x30 as zeros,
+  and it returned to address 0.
+
+Fix: for an ended thread a signalled event is made for that one wait and never stored, and a signalled entry is never reused.
+
+How it was found:
+1. The crash log now names the thread: `recomp: that thread: id ... saved context ...`.
+2. Direct-memory faults are now logged. They never were before: `TakeRecompDirectMemReport` had no caller, and now the window
+   status tick logs it. The log showed one zero-page read at the thread's own stack.
+3. `KARTRECOMP_KERNEL_TRACE` showed the game unmapping exactly that stack.
+
+Also fixed while looking (default mode):
+- A host wait inside a code runner (NVN frame pacing, display queue) keeps its core (`CoreScheduler::Release(t, keep_core)`).
+- Core moves of a running thread wait for its yield (`CoreScheduler{.., true}` for the native threads too).
+
+Test tool: `tools/make-menu-tas.py --taps-from=F` (tap A after the race) and `--no-pause-toggle` (Grand Prix with the saved
+Smart Steering setting).

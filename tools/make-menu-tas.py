@@ -25,6 +25,11 @@ race lacks.
 --wireless[=N] opens Wireless Play (local wireless; in the engine it runs over a multiplayer room, docs/NATIVE_ENGINE.md) from the
 main menu and taps A N more times (default 2), then waits there without input - for checking the ldn:u service.
 
+--no-pause-toggle leaves out the pause-menu Smart Steering toggle (for whole Grand Prix runs with the saved --smart-steering
+setting).
+
+--taps-from=F taps A once a second from frame F instead of holding it (to get from a finished race into the next one).
+
 --time-trial picks Time Trials instead of Grand Prix (the rest of the menu taps are the same; see docs/BENCHMARK.md).
 
 --cup=N picks the Nth cup to the right of the Mushroom Cup (the first race then differs).
@@ -103,10 +108,22 @@ def main() -> int:
     # 2026-11-11: loads got faster ("GO" at frame 2220 with the v0.2.3 engine) and the game's own Auto-accelerate is on, so the
     # kart drives off at GO by itself and reached the first wall (about 2600) before the old 2700 toggle. Pause at 2300 instead,
     # still on the opening straight; 80 frames of margin if a load is slower. While paused the kart does not move.
-    pause_window = range(2290, 2480) if centre_stick else range(0)
+    # --no-pause-toggle: no Smart Steering toggle from the pause menu (with --smart-steering, whose character-select toggle is saved
+    # and so holds for every race of a Grand Prix; the pause toggle only lasts one race).
+    if "--no-pause-toggle" in sys.argv:
+        centre_stick_pause = False
+    else:
+        centre_stick_pause = centre_stick
+    pause_window = range(2290, 2480) if centre_stick_pause else range(0)
     pause_toggle = {2300: "KEY_PLUS", 2370: "KEY_L", 2450: "KEY_PLUS"}
+    # --taps-from=F: from frame F on, tap A once a second instead of holding it (results screen, "Next Race", the next race's start).
+    taps_from = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--taps-from=")), None)
     # Race: accelerate, weave gently (8 s period), use an item every 5 s.
     for f in range(race_start, end):
+        if taps_from is not None and f >= taps_from:
+            if (f - taps_from) % 60 < 4:
+                lines.append(f"{f} KEY_A 0;0 0;0")
+            continue
         if f in pause_window:
             button = next((b for start, b in pause_toggle.items() if start <= f < start + (10 if b == "KEY_L" else 4)), None)
             if button:

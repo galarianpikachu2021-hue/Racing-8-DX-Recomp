@@ -878,7 +878,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..cd79a29299 100644
+index bca83ab630..8a6b36c91b 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,6 +1,15 @@
@@ -897,17 +897,18 @@ index bca83ab630..cd79a29299 100644
  #include <algorithm>
  #include <cstdlib>
  #include <cwchar>
-@@ -27,7 +36,9 @@ static constexpr Uint8 SDL_RELEASED = 0;
+@@ -27,7 +36,10 @@ static constexpr Uint8 SDL_RELEASED = 0;
  #include "common/param_package.h"
  #include "common/settings_input.h"
  #include "suyu_cmd/controller_assign.h"
 +#include "suyu_cmd/controller_profiles.h"
  #include "suyu_cmd/emu_window/emu_window_sdl2.h"
++#include "core/arm/recomp/arm_recomp.h"
 +#include "suyu_cmd/mem_scan.h"
  #include "suyu_cmd/native_status.h"
  #include "suyu_cmd/sdl_config.h"
  #include "suyu_cmd/suyu_icon.h"
-@@ -84,6 +95,24 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
+@@ -84,6 +96,24 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
      for (const auto& [motion, param] : input.GetMotionMappingForDevice(pad)) {
          player.motions[motion] = param.Serialize();
      }
@@ -932,7 +933,7 @@ index bca83ab630..cd79a29299 100644
  }
  } // namespace
  
-@@ -885,6 +914,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
+@@ -885,6 +915,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
          return;
      }
  #endif
@@ -987,7 +988,7 @@ index bca83ab630..cd79a29299 100644
      if (state == SDL_PRESSED) {
          input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
      } else if (state == SDL_RELEASED) {
-@@ -900,7 +977,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
+@@ -900,7 +978,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
      tas_playback = true;
  }
  
@@ -1089,7 +1090,7 @@ index bca83ab630..cd79a29299 100644
      if (!tas_playback) {
          return;
      }
-@@ -1016,6 +1187,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1016,6 +1188,7 @@ void EmuWindow_SDL2::WaitEvent() {
              LOG_ERROR(Frontend, "SDL_WaitEventTimeout failed: {}", error);
              SDL_ClearError();
          }
@@ -1097,7 +1098,7 @@ index bca83ab630..cd79a29299 100644
          const u64 idle_time = SDL_GetTicks();
          if (idle_time > last_time + kStatusRefreshMs) {
              last_time = idle_time;
-@@ -1090,6 +1262,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1090,6 +1263,7 @@ void EmuWindow_SDL2::WaitEvent() {
          break;
      }
  
@@ -1105,17 +1106,20 @@ index bca83ab630..cd79a29299 100644
      const u64 current_time = SDL_GetTicks();
      if (current_time > last_time + kStatusRefreshMs) {
          last_time = current_time;
-@@ -1215,6 +1388,9 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1215,6 +1389,12 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
      if (gamepad_check_pending) {
          AutoAssignControllers();
      }
 +    ServicePadRequests();
 +    ServiceQuitRequests();
 +    if (std::getenv("KARTRECOMP_MEMSCAN")) MemScan::Service(system);
++    // Faults on the game's direct memory (zero pages, dropped writes, opened pages): silent otherwise, and each one means the
++    // game touched memory that was not mapped for it.
++    if (const std::string dm = Core::TakeRecompDirectMemReport(); !dm.empty()) LOG_WARNING(Core_ARM, "{}", dm);
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
-@@ -1227,7 +1403,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1227,7 +1407,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
  
      SuyuCmd::NativeStatusSnapshot display{};
      SuyuCmd::TryGetNativeStatusSnapshot(display);
@@ -1124,7 +1128,7 @@ index bca83ab630..cd79a29299 100644
          display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
      }
      const std::string title = SuyuCmd::FormatNativeTitle(display);
-@@ -1243,7 +1419,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1243,7 +1423,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
      if (!g_export_package || !SdlConfig::auto_assign_controllers ||
@@ -1133,7 +1137,7 @@ index bca83ab630..cd79a29299 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,19 +1444,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,19 +1448,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
@@ -1154,7 +1158,7 @@ index bca83ab630..cd79a29299 100644
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
      if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
-@@ -1298,6 +1463,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1467,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
