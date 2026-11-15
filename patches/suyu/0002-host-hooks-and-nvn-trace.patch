@@ -952,7 +952,7 @@ index 408daa6839..8e01c564cd 100644
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..22418c261a 100644
+index 67a55424e9..48a0f2ce02 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -1172,7 +1172,32 @@ index 67a55424e9..22418c261a 100644
      std::size_t core_index{};
      bool uses_wall_clock{};
  #ifndef SUYU_NO_JIT
-@@ -1789,6 +1937,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
+@@ -1636,6 +1784,24 @@ struct ArmRecomp::Impl {
+     bool fallback_unavailable{false};
+ };
+ 
++void ArmRecomp::SetCoreIndex(std::size_t core) {
++    if (impl->core_index == core) return;
++    if (impl->core_index < g_current_pcs.size()) g_current_pcs[impl->core_index].store(0, std::memory_order_relaxed);
++    impl->core_index = core;
++    impl->last_thread = nullptr; // a reservation never carries over to another core
++}
++
++bool ArmRecomp::IsPrepared() const {
++    return impl->explicitly_prepared || (impl->modules_read && impl->rela_applied);
++}
++
++void ArmRecomp::AdoptPreparedState(const ArmRecomp& from) {
++    impl->modules = from.impl->modules;
++    impl->modules_read = from.impl->modules_read;
++    impl->rela_applied = from.impl->rela_applied;
++    impl->explicitly_prepared = from.impl->explicitly_prepared;
++}
++
+ ArmRecomp::ArmRecomp(System& system, bool uses_wall_clock, RecompLookupFn lookup,
+                      Kernel::KProcess* process, ExclusiveMonitor* exclusive_monitor,
+                      std::size_t core_index)
+@@ -1789,6 +1955,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
  #endif
  }
  
@@ -1183,7 +1208,7 @@ index 67a55424e9..22418c261a 100644
  HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // A context switch voids any outstanding reservation. A thread preempted
      // between its LDXR and STXR would otherwise have the STXR succeed against a
-@@ -1798,8 +1950,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1798,8 +1968,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // Only on an actual switch: this backend returns to the host constantly
      // (chain budget, SVCs), so clearing on every entry would void reservations
      // the same thread is still in the middle of.
@@ -1196,7 +1221,7 @@ index 67a55424e9..22418c261a 100644
          if (impl->exclusive_monitor) {
              impl->exclusive_monitor->ClearExclusive(impl->core_index);
          }
-@@ -1870,7 +2024,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1870,7 +2042,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // their per-entry check. Module bases are set by now (above, or by the
      // explicit prepare callback), and no block of this process has run yet.
      if (RecompGuardGen::Watching()) {
@@ -1205,7 +1230,7 @@ index 67a55424e9..22418c261a 100644
              const u64 key = process->GetProcessId() | (u64{1} << 63);
              if (!RecompGuardGen::IsActive(key)) {
                  impl->ActivateGuardGen(*process, key);
-@@ -1904,18 +2058,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1904,18 +2076,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          impl->in_fallback = false;
      }
      if (impl->in_fallback) {
@@ -1233,7 +1258,7 @@ index 67a55424e9..22418c261a 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +2087,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2105,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -1241,7 +1266,7 @@ index 67a55424e9..22418c261a 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +2127,55 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +2145,81 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -1289,6 +1314,32 @@ index 67a55424e9..22418c261a 100644
 +                              "recomp: call to null (x30={:#x}, x0={:#x}); returning to the caller instead "
 +                              "of ending the thread (recovery #{})",
 +                              impl->ctx.x[30], impl->ctx.x[0], n + 1);
++                    if (n < 2) {
++                        // Who called: the guest frame chain (x29 -> {previous x29, return address}) and x19 (the method's
++                        // `this` in the SDK's wrappers), for finding where the empty vtable came from.
++                        auto& mem = impl->system.ApplicationMemory();
++                        std::string chain;
++                        u64 fp = impl->ctx.x[29];
++                        for (int i = 0; i < 12 && fp && mem.IsValidVirtualAddressRange(fp, 16); ++i) {
++                            chain += fmt::format(" {:#x}", mem.Read64(fp + 8));
++                            const u64 next = mem.Read64(fp);
++                            if (next <= fp) break;
++                            fp = next;
++                        }
++                        const u64 self = impl->ctx.x[19];
++                        std::string obj;
++                        if (mem.IsValidVirtualAddressRange(self, 0x20)) {
++                            const u64 inner = mem.Read64(self + 0x10);
++                            obj = fmt::format("this {:#x} [+0x10]={:#x} [+0x18]={:#x}", self, inner, mem.Read64(self + 0x18));
++                            if (mem.IsValidVirtualAddressRange(inner, 8)) {
++                                const u64 vt = mem.Read64(inner);
++                                obj += fmt::format(" vtable {:#x}", vt);
++                                if (mem.IsValidVirtualAddressRange(vt, 0x48))
++                                    for (u64 k = 0; k < 9; ++k) obj += fmt::format(" {:#x}", mem.Read64(vt + 8 * k));
++                            }
++                        }
++                        LOG_ERROR(Core_ARM, "recomp: call to null: callers{}; {}", chain, obj);
++                    }
 +                }
 +                impl->ctx.pc = impl->ctx.x[30];
 +                impl->ctx.x[0] = 0;
@@ -1298,7 +1349,7 @@ index 67a55424e9..22418c261a 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2248,7 +2449,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2248,7 +2493,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -1308,7 +1359,7 @@ index 67a55424e9..22418c261a 100644
          }
  
          // Dump periodically: teardown is not guaranteed to run (the emulated
-@@ -2258,6 +2460,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2504,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -1318,7 +1369,7 @@ index 67a55424e9..22418c261a 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2306,7 +2511,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2306,7 +2555,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              impl->ctx.pending_svc = kNoPendingSvc;
              // Forward the guest instruction-cache operation to each CPU interface.
              for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1327,7 +1378,7 @@ index 67a55424e9..22418c261a 100644
              }
              impl->ctx.pc += 4;
              impl->ctx.halted = 0;
-@@ -2350,7 +2555,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2350,7 +2599,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               unsupported_opcode, impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -1337,7 +1388,7 @@ index 67a55424e9..22418c261a 100644
          }
  
          if (impl->ctx.pending_svc != kNoPendingSvc) {
-@@ -2404,7 +2610,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+@@ -2404,7 +2654,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
          const u64 address = impl->ctx.pending_svc;
          impl->ctx.pending_svc = kNoPendingSvc;
          for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1346,7 +1397,7 @@ index 67a55424e9..22418c261a 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2743,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2787,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -1373,7 +1424,7 @@ index 67a55424e9..22418c261a 100644
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
-index a1671ea1e7..5000a67cb0 100644
+index a1671ea1e7..3a27d2427e 100644
 --- a/src/core/arm/recomp/arm_recomp.h
 +++ b/src/core/arm/recomp/arm_recomp.h
 @@ -74,6 +74,21 @@ RecompFastmemLayout GetRecompFastmemLayout();
@@ -1398,11 +1449,19 @@ index a1671ea1e7..5000a67cb0 100644
  /// ABI 6 feature GG1 (generation code guard). The loader calls this after
  /// SetRecompLookup, with what each GG1 module's recomp_image_guard_gen_v1
  /// returned, and before the process is created. The guard only engages with
-@@ -190,6 +205,8 @@ public:
+@@ -190,6 +205,16 @@ public:
      ~ArmRecomp() override;
  
      HaltReason RunThread(Kernel::KThread* thread) override;
 +    /// kart-recomp: a runtime thread (no kernel thread) runs on this host thread; RunThread(nullptr) then runs it.
++    /// A runner made after the process was prepared (the runtime kernel gives every game thread its own) takes the prepared
++    /// module state of one of the process's runners, so it does not read or relocate the modules again.
++    void AdoptPreparedState(const ArmRecomp& from);
++    /// This runner has its module map and has made its relocation pass.
++    bool IsPrepared() const;
++    /// The virtual core this runner executes on now (exclusive-monitor slot, per-core diagnostics). A per-thread runner follows
++    /// its thread from core to core; only one runner holds a core at a time.
++    void SetCoreIndex(std::size_t core);
 +    static void SetNativeThreadToken(const void* token);
      HaltReason StepThread(Kernel::KThread* thread) override;
  
@@ -6231,10 +6290,10 @@ index 0000000000..a903b68ecc
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..c9586bbdc0
+index 0000000000..e30a5d047e
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,425 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -6302,6 +6361,10 @@ index 0000000000..c9586bbdc0
 +
 +} // namespace
 +
++// KARTRECOMP_NATIVE_SERVICES_TRACE: calls per service command, listed at shutdown.
++std::mutex g_call_count_lock;
++std::map<std::pair<std::string, u32>, u64> g_call_counts;
++
 +NativeKernel& Runtime(KernelCore& kernel) {
 +    // Lives to the end of the process: its objects hold the engine's library parts, which must not be destroyed after the
 +    // engine itself (process exit).
@@ -6341,6 +6404,8 @@ index 0000000000..c9586bbdc0
 +    static std::once_flag once;
 +    std::call_once(once, [&] {
 +        g_kernel.store(&kernel, std::memory_order_release);
++        // As the game's only kernel, handles look like the console's (no marker bit: it is the lock words' waiters flag).
++        if (NativeGame::Enabled()) runtime.SetPlainHandles();
 +        runtime.on_invalid_object = [](u32 handle, u32 object, u32 command, bool domain) {
 +            LOG_WARNING(Service, "native services: request {} on handle {:08X} names object {} the session does not have (domain {})", command, handle, object, domain);
 +        };
@@ -6361,8 +6426,8 @@ index 0000000000..c9586bbdc0
 +        };
 +        if (std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")) {
 +            KartRuntime::Service::on_call = [](const std::string& service, u32 cmd) {
-+                static std::mutex m;
-+                static std::map<std::pair<std::string, u32>, u64> counts;
++                auto& m = g_call_count_lock;
++                auto& counts = g_call_counts;
 +                std::scoped_lock lk{m};
 +                static const bool all = std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")[0] == '2';
 +                const u64 n = counts[{service, cmd}]++;
@@ -6639,6 +6704,10 @@ index 0000000000..c9586bbdc0
 +    // Handles stay valid (game threads may still be finishing a request); what must stop before the engine's own services
 +    // go is stopped here.
 +    StopAudioRenderers();
++    if (std::getenv("KARTRECOMP_NATIVE_SERVICES_TRACE")) {
++        std::scoped_lock lk{g_call_count_lock};
++        for (const auto& [key, n] : g_call_counts) LOG_INFO(Service, "native services: count {} command {}: {}", key.first, key.second, n);
++    }
 +    LOG_INFO(Service, "native services: waits answered by the runtime {}, by the emulated kernel {}; runtime event resets {}",
 +             g_native_waits.load(), g_emulated_waits.load(), g_native_resets.load());
 +    (void)kernel;
@@ -7413,12 +7482,14 @@ index 0000000000..cbf23ef782
 +} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..f846af96fa
+index 0000000000..287eba7082
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,259 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_threads.h"
++#include "kart_runtime/game_kernel.h"
 +
 +#include <array>
 +#include <atomic>
@@ -7627,12 +7698,18 @@ index 0000000000..f846af96fa
 +}
 +
 +bool BeginHostWait() {
++    // A game thread of the runtime's kernel (docs/NATIVE_KERNEL.md): the same, with its scheduler.
++    if (NativeGame::OnGameThread()) {
++        NativeGame::Kernel()->BeginWait();
++        return true;
++    }
 +    if (!g_kernel || !t_thread || !t_sched || t_core < 0) return false;
 +    Leave(*g_kernel, t_thread);
 +    return true;
 +}
 +
 +void EndHostWait() {
++    if (NativeGame::OnGameThread()) return NativeGame::Kernel()->EndWait();
 +    if (g_kernel && t_thread && t_sched && t_core < 0) Enter(*g_kernel, t_thread);
 +}
 +
@@ -15179,10 +15256,10 @@ index 0000000000..6b0956610e
 +} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/game_kernel.h b/src/kart_runtime/game_kernel.h
 new file mode 100644
-index 0000000000..404586d450
+index 0000000000..1514789858
 --- /dev/null
 +++ b/src/kart_runtime/game_kernel.h
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,582 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel for the game's process (docs/NATIVE_KERNEL.md, stages 3-4).
 +//
@@ -15246,6 +15323,7 @@ index 0000000000..404586d450
 +    std::unique_ptr<CoreScheduler::Thread> sched;
 +    std::atomic<bool> started{false}, ended{false}, terminate{false};
 +    void* executor_data = nullptr; ///< the executor's per-thread state
++    int wait_depth = 0;            ///< nested host waits (BeginWait / EndWait), on the thread itself only
 +};
 +
 +/// Runs a guest thread's code.
@@ -15257,6 +15335,8 @@ index 0000000000..404586d450
 +    virtual int Run(GuestThread& t, int core) = 0;
 +    /// Makes the Run on `core` return soon.
 +    virtual void Interrupt(int core) = 0;
++    /// `t` has ended (on its own host thread): per-thread state can go.
++    virtual void Ended(GuestThread&) {}
 +};
 +
 +class GameKernel {
@@ -15272,7 +15352,9 @@ index 0000000000..404586d450
 +        std::function<uint32_t*(uint64_t)> host_word; ///< guest word -> host pointer (lock / arbiter words)
 +        std::function<std::optional<uint32_t>(const std::string&)> connect_port; ///< ConnectToNamedPort (the service manager)
 +        std::function<void(GuestThread&, uint32_t svc)> unknown_svc;
-+        std::function<void(uint32_t reason, uint64_t a, uint64_t b)> on_break;
++        /// svcBreak. A break that is not a notification (bit 31 of the reason clear) is a crash: with no debugger attached the
++        /// console ends the process, and so does the runtime (after this hook, which can log the thread's state).
++        std::function<void(GuestThread&, uint32_t reason, uint64_t a, uint64_t b)> on_break;
 +        std::function<void(const std::string&)> debug_output;
 +        std::function<void()> on_exit_process;
 +    };
@@ -15291,11 +15373,13 @@ index 0000000000..404586d450
 +    /// The game thread running on this host thread (null on other threads).
 +    static GuestThread* Current() { return t_current; }
 +    /// A waiting game thread gives its core up / takes it back (hooks for the native kernel's and the arbiter's waits).
++    /// The calling game thread waits in host code: its virtual core is free meanwhile. Waits nest (a blocking service call whose
++    /// library code blocks again): only the outermost gives the core up and takes it back.
 +    void BeginWait() {
-+        if (GuestThread* t = t_current) sched.Release(t->sched.get());
++        if (GuestThread* t = t_current; t && t->wait_depth++ == 0) sched.Release(t->sched.get());
 +    }
 +    void EndWait() {
-+        if (GuestThread* t = t_current) sched.Acquire(t->sched.get());
++        if (GuestThread* t = t_current; t && t->wait_depth > 0 && --t->wait_depth == 0) sched.Acquire(t->sched.get());
 +    }
 +
 +    /// Creates and starts the main thread: stack in the stack region, x0 = 0, x1 = its handle.
@@ -15477,10 +15561,16 @@ index 0000000000..404586d450
 +            x[1] = th->id;
 +            break;
 +        }
-+        case 0x26: // Break
-+            if (cfg.on_break) cfg.on_break(static_cast<uint32_t>(x[0]), x[1], x[2]);
++        case 0x26: { // Break
++            const auto reason = static_cast<uint32_t>(x[0]);
++            if (cfg.on_break) cfg.on_break(t, reason, x[1], x[2]);
 +            ret(0);
++            if (!(reason & 0x80000000u)) { // not a notification: the process ends
++                if (cfg.on_exit_process) cfg.on_exit_process();
++                t.terminate = true;
++            }
 +            break;
++        }
 +        case 0x27: { // OutputDebugString(ptr, size)
 +            std::string s(std::min<uint64_t>(x[1], 0x1000), '\0');
 +            if (!s.empty() && kernel.Read(x[0], s.data(), s.size()) && cfg.debug_output) cfg.debug_output(s);
@@ -15578,6 +15668,7 @@ index 0000000000..404586d450
 +            if (sched.PreemptRequested(t->sched.get())) sched.Yield(t->sched.get());
 +        }
 +        sched.Release(t->sched.get());
++        exec.Ended(*t);
 +        t->ended = true;
 +        t->Signal(); // waiting for this thread ends
 +        t_current = nullptr;
@@ -16242,10 +16333,10 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..b703c348c2
+index 0000000000..43f996ab22
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
-@@ -0,0 +1,544 @@
+@@ -0,0 +1,551 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel objects a game sees through handles - service sessions, events - and waiting on them
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -16456,8 +16547,14 @@ index 0000000000..b703c348c2
 +        return f();
 +    }
 +
++    /// Next to the emulated kernel, runtime handles carry bit 30 so the two kinds can be told apart (IsNative). As the game's only
++    /// kernel (GameKernel) they must not: the SDK's lock words keep the owner thread's handle and use bit 30 as their "waiters"
++    /// flag, so a handle with bit 30 makes every lock look unowned and contended (SetPlainHandles; handles are then small
++    /// numbers, as on the console).
 +    static constexpr uint32_t HandleBit = 1u << 30;
 +    static bool IsNative(uint32_t handle) { return (handle & 0xC0000000u) == HandleBit; }
++    void SetPlainHandles() { handle_bit = 0; }
++    bool Owns(uint32_t handle) const { return handle != 0 && (handle & 0xC0000000u) == handle_bit; }
 +
 +    // ---- handle table
 +    uint32_t Add(std::shared_ptr<KernelObject> o) {
@@ -16471,12 +16568,12 @@ index 0000000000..b703c348c2
 +            table.emplace_back();
 +        }
 +        table[index] = std::move(o);
-+        return HandleBit | (index + 1);
++        return handle_bit | (index + 1);
 +    }
 +    std::shared_ptr<KernelObject> Get(uint32_t handle) {
 +        std::scoped_lock lk{table_mutex};
-+        if (!IsNative(handle)) return nullptr;
-+        const uint32_t index = (handle & ~HandleBit) - 1;
++        if (!Owns(handle)) return nullptr;
++        const uint32_t index = (handle & ~handle_bit) - 1;
 +        return index < table.size() ? table[index] : nullptr;
 +    }
 +    template <typename T>
@@ -16493,8 +16590,8 @@ index 0000000000..b703c348c2
 +    bool Close(uint32_t handle) {
 +        std::shared_ptr<KernelObject> dropped; // released outside the lock
 +        std::scoped_lock lk{table_mutex};
-+        if (!IsNative(handle)) return false;
-+        const uint32_t index = (handle & ~HandleBit) - 1;
++        if (!Owns(handle)) return false;
++        const uint32_t index = (handle & ~handle_bit) - 1;
 +        if (index >= table.size() || !table[index]) return false;
 +        dropped = std::move(table[index]);
 +        free_slots.insert(index);
@@ -16725,6 +16822,7 @@ index 0000000000..b703c348c2
 +    }
 +
 +    Hooks hooks;
++    uint32_t handle_bit = HandleBit;
 +    std::mutex table_mutex;
 +    std::vector<std::shared_ptr<KernelObject>> table;
 +    std::set<uint32_t> free_slots;

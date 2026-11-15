@@ -68,3 +68,54 @@ layouts from suyu's generated wrappers). The test drives it with a scripted exec
 stacks, wait on addresses, wait for a thread's end, move cores, lock transfer memory, and a sleeper ended by shutdown.
 Next: the adapter (stage 2 + executor) - the recompiled-code runner as an `Executor`, `Core::Memory` as the
 `AddressSpace::Backend`, the application pool as physical memory, the modules from the loader, the service objects.
+
+## First runs on the runtime kernel (2026-11-15)
+
+With `KARTRECOMP_NATIVE_KERNEL=1` the game (4.0.1, no mods) now boots on the runtime's kernel, goes through the menus and races
+at 55-60 fps for about 40 s. Then it crashes at race start (open, see below). Without the switch nothing changed (1P races on 4.0.1
+and 3.0.4 checked).
+
+What it took, in order found:
+
+1. **Handles must not carry bit 30.** The SDK's lock words keep the owner thread's handle and use bit 30 as their "has waiters"
+   flag. Runtime handles were marked with bit 30 (to tell them apart from the emulated kernel's), so as soon as threads were runtime
+   objects every lock looked unowned and contended. The symptoms were 1.6M ArbitrateUnlock calls, and the SDK's
+   `SdkRecursiveMutexType::IsLockedByCurrentThread` assertion fired inside `nn::prepo::detail::ipc::Initialize`
+   (`SetTerminateResult` 2162-0001, then Break). Fix: `NativeKernel::SetPlainHandles()`. As the game's only kernel, handles are
+   small numbers, as on the console; next to the emulated kernel bit 30 stays.
+2. **Break ends the process** (reason bit 31 clear), after logging a frame-pointer backtrace (`on_break`). The thread used to
+   loop on it.
+3. **Host waits give the virtual core up.** The NVN host's frame pacing and the display queue call
+   `NativeThreads::BeginHostWait()`, which only knew the emulated kernel's threads. A runtime game thread slept holding its core,
+   and the threads sharing that core starved: the boot logo never finished, and audio ran at half rate. It now goes to
+   `GameKernel::BeginWait/EndWait`, which nest (a blocking service call whose library code blocks again).
+4. **One code runner per game thread** (`RecompExecutor` in `native_game.cpp`). With the process's four per-core runners, a
+   thread that gave its core up in the middle of a host call came back with another thread's registers (pc 0xffffffff). Each runner:
+   - takes the first runner's prepared module state (`ArmRecomp::AdoptPreparedState`). Its own relocation pass in the middle of
+     the game would zero the relocation sizes of modules the game's loader has not relocated yet.
+   - follows its thread's core (`SetCoreIndex`: exclusive-monitor slot).
+   - has the core's reservation cleared when another runner takes the core, as a context switch does on the console.
+5. Diagnostics:
+   - `KARTRECOMP_NATIVE_KERNEL_TRACE` names the objects behind every WaitSynchronization (`wait 3f=event:kernel event`).
+   - `Service::on_error` logs failing results.
+   - `KARTRECOMP_NATIVE_SERVICES_TRACE` lists calls per command at exit.
+   - The call-to-null recovery logs the guest callers and the object.
+
+**Open: corruption at race start (~40 s).** The game passes a garbage object (`0x1000000000059`) to an NVN entry point, a global
+function pointer called from main+0x68bf6c into the SDK's NVN code at sdk+0x2d5998 (`obj->[0x10]->vtable[7]`). The run then
+crashes in that block (direct memory), sometimes after a few "call to null" recoveries at the same place. It only happens on the
+runtime kernel. Ruled out so far:
+- the relocation passes (now one)
+- exclusive reservations
+- heap block merging (merges require contiguous physical pages)
+- the GPU driver's device mapping (it uses the host page table the runtime updates)
+
+Candidates to look at next:
+- the game's ~850 SetMemoryAttribute(uncached) calls on GPU pools
+- transfer-memory protection (`LockTransfer` with permission None makes the audio buffer unreadable for the game *and* for
+  audio_core's writes)
+- shared-memory pages
+
+Finding the culprit: the core dump has the guest registers in the block's context (host `rbx`), and guest memory is the direct
+memory arena (logged at boot) plus the guest address, so the guest stack can be walked in gdb with a few lines of Python
+(read 16 bytes at arena + x29: previous x29 and the return address).
