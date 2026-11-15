@@ -129,7 +129,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(buildMiiTab(), tr("Miis (experimental)"));
     tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
     tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
-    tabs->addTab(scrolled(multiplayer_page = new MultiplayerPage), tr("Multiplayer"));
+    tabs->addTab(scrolled(multiplayer_page = new MultiplayerPage), tr("Online play"));
     setCentralWidget(tabs);
 
     QSettings prefs;

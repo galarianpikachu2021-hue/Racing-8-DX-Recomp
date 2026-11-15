@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The launcher's Multiplayer tab turns its settings into the engine's room switches (KARTRECOMP_ROOM*, suyu_cmd/kart_multiplayer.h).
+// The launcher's Online play tab turns its settings into the engine's room switches (KARTRECOMP_ROOM*, suyu_cmd/kart_multiplayer.h).
 #include <QtTest>
 #include <QApplication>
 #include <QSettings>
@@ -11,14 +11,19 @@ class TestMultiplayerPage : public QObject {
     Q_OBJECT
     QTemporaryDir dir;
 
-    static void Set(int mode, const QString& nick, const QString& addr, int port, const QString& pass, int members = 8) {
+    enum { Host = 0, Join = 1 };
+    static void Set(bool enabled, int role, const QString& nick, const QString& addr, int port, const QString& pass, int members = 8,
+                    const QString& name = {}) {
         QSettings s;
-        s.setValue(QStringLiteral("multiplayer/mode"), mode);
+        s.clear();
+        s.setValue(QStringLiteral("multiplayer/enabled"), enabled);
+        s.setValue(QStringLiteral("multiplayer/role"), role);
         s.setValue(QStringLiteral("multiplayer/nickname"), nick);
         s.setValue(QStringLiteral("multiplayer/address"), addr);
         s.setValue(QStringLiteral("multiplayer/port"), port);
         s.setValue(QStringLiteral("multiplayer/password"), pass);
         s.setValue(QStringLiteral("multiplayer/members"), members);
+        s.setValue(QStringLiteral("multiplayer/room_name"), name);
     }
 
 private slots:
@@ -29,7 +34,7 @@ private slots:
         QCoreApplication::setApplicationName(QStringLiteral("multiplayer"));
     }
     void off() {
-        Set(0, QStringLiteral("Racer One"), {}, 24872, {});
+        Set(false, Join, QStringLiteral("Racer One"), QStringLiteral("x"), 24872, {});
         MultiplayerPage page;
         QProcessEnvironment env;
         page.apply(env);
@@ -37,36 +42,57 @@ private slots:
         QVERIFY(page.problem().isEmpty());
     }
     void join() {
-        Set(1, QStringLiteral("Racer One"), QStringLiteral(" rooms.example.org "), 5000, QStringLiteral("pw"));
+        Set(true, Join, QStringLiteral("Racer One"), QStringLiteral(" rooms.example.org "), 5000, QStringLiteral("pw"));
         MultiplayerPage page;
         QProcessEnvironment env;
         page.apply(env);
         QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM")), QStringLiteral("Racer One:pw@rooms.example.org:5000"));
         QVERIFY(!env.contains(QStringLiteral("KARTRECOMP_ROOM_HOST")));
         if (const QByteArray out = qgetenv("MULTIPLAYER_TAB_PNG"); !out.isEmpty()) {
-            page.resize(760, 520);
+            page.resize(760, 620);
             page.grab().save(QString::fromLocal8Bit(out));
         }
     }
     void host() {
-        Set(2, QStringLiteral("Host_1"), {}, 24872, {}, 4);
+        Set(true, Host, QStringLiteral("Host_1"), {}, 24872, {}, 4, QStringLiteral("Friday cup"));
         MultiplayerPage page;
         QProcessEnvironment env;
         page.apply(env);
         QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM_HOST")), QStringLiteral("24872"));
         QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM_NICK")), QStringLiteral("Host_1"));
         QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM_MAX")), QStringLiteral("4"));
+        QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM_NAME")), QStringLiteral("Friday cup"));
+        if (const QByteArray out = qgetenv("ONLINE_TAB_HOST_PNG"); !out.isEmpty()) {
+            page.resize(760, 620);
+            page.grab().save(QString::fromLocal8Bit(out));
+        }
+    }
+    void oldSettings() {
+        // The first launcher with this tab stored only "mode" (0 off, 1 join, 2 host).
+        QSettings s;
+        s.clear();
+        s.setValue(QStringLiteral("multiplayer/mode"), 1);
+        s.setValue(QStringLiteral("multiplayer/nickname"), QStringLiteral("Racer One"));
+        s.setValue(QStringLiteral("multiplayer/address"), QStringLiteral("10.0.0.2"));
+        s.setValue(QStringLiteral("multiplayer/port"), 24872);
+        MultiplayerPage page;
+        QProcessEnvironment env;
+        page.apply(env);
+        QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM")), QStringLiteral("Racer One@10.0.0.2:24872"));
     }
     void invalid() {
-        Set(1, QStringLiteral("ab"), QStringLiteral("x"), 24872, {}); // nickname too short
+        Set(true, Join, QStringLiteral("ab"), QStringLiteral("x"), 24872, {}); // nickname too short
         MultiplayerPage page;
         QProcessEnvironment env;
         page.apply(env);
         QVERIFY(env.isEmpty());
         QVERIFY(!page.problem().isEmpty());
-        Set(1, QStringLiteral("Racer One"), {}, 24872, {}); // no address
+        Set(true, Join, QStringLiteral("Racer One"), {}, 24872, {}); // no address
         MultiplayerPage page2;
         QVERIFY(!page2.problem().isEmpty());
+        Set(true, Join, QStringLiteral("Racer One"), QStringLiteral("x"), 24872, QStringLiteral("a:b")); // ':' would split the spec
+        MultiplayerPage page3;
+        QVERIFY(!page3.problem().isEmpty());
     }
 };
 
