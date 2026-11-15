@@ -43,3 +43,15 @@ inaccessible area outside the space, code / data / TLS / stack pages from a phys
 (source locked and hidden, destination Stack in the stack region), Uncached / PermissionLocked attributes with the kernel's
 state rules, transfer locks, device lock counts, shared memory from foreign pages (not freed on unmap), free-range search.
 The fake backend in the test keeps a page table over real bytes, so an alias is checked by reading the same data twice.
+
+## The reference trace (2026-11-15)
+
+`KARTRECOMP_KERNEL_TRACE=<file>` (in `Svc::Call`) records the memory, thread and info calls with arguments and results, and
+the MemoryInfo QueryMemory writes. A 120 s race (`local/exp/runs/kernel-trace-401.txt`, local only): 2,297 calls - 855
+SetMemoryAttribute (the GPU driver marking pool memory uncached, mask/value 8), 1,041 QueryMemory (walks over the modules at
+boot), 53 CreateThread (core -2 = the ideal core) with 53 MapMemory (the SDK aliases each thread's stack from the heap into the
+stack region) and 16 UnmapMemory, 50 StartThread, 22 SetThreadCoreMask, 37 GetCurrentProcessorNumber, 85 GetThreadId, 41
+CloseHandle, 2 MapSharedMemory (hid, fonts), 2 CreateTransferMemory (audio, driver), one SetHeapSize (0xc1c00000), 37 GetInfo:
+core mask 7, alias region / size, heap region / size, ASLR region 0x800_0000 + 0x7f_f800_0000, stack region / size, total
+memory 0xcd50_0000, used memory, random entropy 0-3, idle ticks 0. The region positions move between runs (suyu places them
+from the code's end), so the runtime can use its own fixed layout.
