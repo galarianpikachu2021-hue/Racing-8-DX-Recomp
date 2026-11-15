@@ -823,7 +823,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..361da63f72 100644
+index 408daa6839..355b93f0a2 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,24 @@ add_library(core STATIC
@@ -906,7 +906,7 @@ index 408daa6839..361da63f72 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1371,21 @@ endif()
+@@ -1335,3 +1371,30 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -924,6 +924,15 @@ index 408daa6839..361da63f72 100644
 +    set(KR_KEEP hle/service/am/applet_manager.cpp hle/service/am/process_creation.cpp hle/service/am/frontend/applets.cpp
 +        hle/service/glue/glue_manager.cpp)
 +    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(aoc|bcat|bpc|btdrv|btm|erpt|es|eupld|fatal|fgm|friend|gpio|grc|i2c|lbl|ldn|ldr|lm|mig|mm|mnpp|ncm|ngc|nifm|nim|npns|olsc|omm|pcie|pctl|pcv|prepo|ptm|ro|spl|ssl|usb|am|vi|nvnflinger|nfc|nfp|caps|sockets|pm|psc|glue)/")
++    # Service shells whose work the runtime does (their library parts stay: profile manager, apm controller, Mii manager and
++    # database, file-system controllers, font loader, language tables, settings servers, the controller server object).
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/(audio|jit|filesystem/fsp|hid)/")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/acc/(acc|acc_aa|acc_su|acc_u0|acc_u1|async_context)\\.cpp$")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/apm/(apm|apm_interface)\\.cpp$")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/mii/mii\\.cpp$")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/hid/(hid|hidbus|hid_debug_server|hid_system_server|irs|xcd|active_vibration_device_list|applet_resource)\\.cpp$")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/set/(settings|factory_settings_server|firmware_debug_settings_server)\\.cpp$")
++    list(FILTER KR_CORE_SOURCES EXCLUDE REGEX "^hle/service/ns/(account_proxy_interface|application_manager_interface|application_version_interface|content_management_interface|develop_interface|document_interface|download_task_interface|dynamic_rights_interface|ecommerce_interface|factory_reset_interface|ns|query_service|read_only_application_control_data_interface|read_only_application_record_interface|service_getter_interface|system_update_control|system_update_interface|vulnerability_manager_interface)\\.cpp$")
 +    list(APPEND KR_CORE_SOURCES ${KR_KEEP})
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES})
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
@@ -5125,7 +5134,7 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_hid_service.cpp b/src/core/hle/kernel/native_hid_service.cpp
 new file mode 100644
-index 0000000000..90c6e3304d
+index 0000000000..214b43149c
 --- /dev/null
 +++ b/src/core/hle/kernel/native_hid_service.cpp
 @@ -0,0 +1,279 @@
@@ -5146,7 +5155,7 @@ index 0000000000..90c6e3304d
 +#include "core/hle/kernel/kernel.h"
 +#include "core/hle/kernel/native_services.h"
 +#include "core/hle/kernel/native_services_list.h"
-+#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/services.h"
 +#include "core/hle/service/sm/sm.h"
 +#include "hid_core/hid_result.h"
 +#include "hid_core/hid_types.h"
@@ -5402,9 +5411,9 @@ index 0000000000..90c6e3304d
 +} // namespace
 +
 +std::shared_ptr<Service> MakeHidService(KernelCore& kernel) {
-+    auto server = kernel.System().ServiceManager().GetService<IHidServer>("hid", true);
-+    if (!server) return nullptr;
-+    return HidServer(kernel, server->GetResourceManager());
++    auto rm = ::Service::GetHidResourceManager(kernel.System());
++    if (!rm) return nullptr;
++    return HidServer(kernel, std::move(rm));
 +}
 +
 +} // namespace Kernel::NativeServices
@@ -7406,10 +7415,10 @@ index 79c6ac2079..7a9c434d60 100644
      if (ns > 0) {
          // Convert the timeout from nanoseconds to ticks.
 diff --git a/src/core/hle/service/am/applet_manager.cpp b/src/core/hle/service/am/applet_manager.cpp
-index 3dd2adc9c0..08f8399c2b 100644
+index 3dd2adc9c0..965b5d4fb7 100644
 --- a/src/core/hle/service/am/applet_manager.cpp
 +++ b/src/core/hle/service/am/applet_manager.cpp
-@@ -4,6 +4,58 @@
+@@ -4,6 +4,56 @@
  // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
@@ -7419,7 +7428,7 @@ index 3dd2adc9c0..08f8399c2b 100644
 +#include "core/core.h"
 +#include "core/hle/kernel/native_services_list.h"
 +#include "core/hle/service/am/applet_manager.h"
-+#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/services.h"
 +#include "core/hle/service/os/process.h"
 +#include "core/hle/service/sm/sm.h"
 +#include "hid_core/resource_manager.h"
@@ -7430,10 +7439,8 @@ index 3dd2adc9c0..08f8399c2b 100644
 +AppletManager::~AppletManager() = default;
 +
 +void AppletManager::CreateAndInsertByFrontendAppletParameters(std::unique_ptr<Process> process, const FrontendAppletParameters&) {
-+    auto hid = m_system.ServiceManager().GetService<HID::IHidServer>("hid", true);
 +    const u64 pid = process->GetProcessId();
-+    if (hid) {
-+        auto rm = hid->GetResourceManager();
++    if (auto rm = Service::GetHidResourceManager(m_system)) {
 +        rm->RegisterAppletResourceUserId(pid, true);
 +        rm->SetAruidValidForVibration(pid, true);
 +        rm->EnableInput(pid, true);
@@ -7468,7 +7475,7 @@ index 3dd2adc9c0..08f8399c2b 100644
  #include "common/settings.h"
  #include "common/uuid.h"
  #include "core/core.h"
-@@ -11,6 +63,11 @@
+@@ -11,6 +61,11 @@
  #include "core/hle/service/acc/profile_manager.h"
  #include "core/hle/service/am/applet_data_broker.h"
  #include "core/hle/service/am/applet_manager.h"
@@ -7480,17 +7487,15 @@ index 3dd2adc9c0..08f8399c2b 100644
  #include "core/hle/service/am/frontend/applet_cabinet.h"
  #include "core/hle/service/am/frontend/applet_controller.h"
  #include "core/hle/service/am/frontend/applet_mii_edit_types.h"
-@@ -233,6 +290,23 @@ AppletManager::~AppletManager() = default;
+@@ -233,6 +288,21 @@ AppletManager::~AppletManager() = default;
  
  void AppletManager::CreateAndInsertByFrontendAppletParameters(
      std::unique_ptr<Process> process, const FrontendAppletParameters& params) {
 +    // kart-recomp: without the emulated applet manager (native services), the game's process is registered with the controller
 +    // library and started here, which is what the window system did for it.
 +    if (!Service::IsHleModuleStarted("am")) {
-+        auto hid = m_system.ServiceManager().GetService<HID::IHidServer>("hid", true);
 +        const u64 pid = process->GetProcessId();
-+        if (hid) {
-+            auto rm = hid->GetResourceManager();
++        if (auto rm = Service::GetHidResourceManager(m_system)) {
 +            rm->RegisterAppletResourceUserId(pid, true);
 +            rm->SetAruidValidForVibration(pid, true);
 +            rm->EnableInput(pid, true);
@@ -7504,7 +7509,7 @@ index 3dd2adc9c0..08f8399c2b 100644
      LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: setting pending process");
      {
          std::scoped_lock lk{m_lock};
-@@ -243,6 +317,15 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
+@@ -243,6 +313,15 @@ void AppletManager::CreateAndInsertByFrontendAppletParameters(
      LOG_INFO(Service_AM, "CreateAndInsertByFrontendAppletParameters: notified");
  }
  
@@ -7520,7 +7525,7 @@ index 3dd2adc9c0..08f8399c2b 100644
  void AppletManager::RequestExit() {
      std::scoped_lock lk{m_lock};
      if (m_window_system) {
-@@ -251,6 +334,7 @@ void AppletManager::RequestExit() {
+@@ -251,6 +330,7 @@ void AppletManager::RequestExit() {
  }
  
  void AppletManager::OperationModeChanged() {
@@ -7528,7 +7533,7 @@ index 3dd2adc9c0..08f8399c2b 100644
      std::scoped_lock lk{m_lock};
      if (m_window_system) {
          m_window_system->OnOperationModeChanged();
-@@ -361,3 +445,5 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
+@@ -361,3 +441,5 @@ void AppletManager::SetWindowSystem(WindowSystem* window_system) {
  }
  
  } // namespace Service::AM
@@ -7645,6 +7650,25 @@ index 9b86072f2f..509722eaae 100644
      auto& renderer = system.Renderer();
      Layout::FramebufferLayout layout =
          Layout::DefaultFrameLayout(screenshot_width, screenshot_height);
+diff --git a/src/core/hle/service/filesystem/filesystem.cpp b/src/core/hle/service/filesystem/filesystem.cpp
+index 723093b534..e5d4c86740 100644
+--- a/src/core/hle/service/filesystem/filesystem.cpp
++++ b/src/core/hle/service/filesystem/filesystem.cpp
+@@ -801,6 +801,7 @@ void FileSystemController::Reset() {
+     registrations.clear();
+ }
+ 
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
+ void LoopProcess(Core::System& system) {
+     auto server_manager = std::make_unique<ServerManager>(system);
+ 
+@@ -811,5 +812,6 @@ void LoopProcess(Core::System& system) {
+     server_manager->RegisterNamedService("fsp-srv", std::move(FileSystemProxyFactory));
+     ServerManager::RunServer(std::move(server_manager));
+ }
++#endif
+ 
+ } // namespace Service::FileSystem
 diff --git a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp b/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
 index 8b7a1b642e..0b3cbf15f9 100644
 --- a/src/core/hle/service/filesystem/fsp/fsp_srv.cpp
@@ -8373,10 +8397,10 @@ index 8b6d05a8dc..b50e5673d5 100644
          return ReportUnimplementedFunction(ctx, info);
  
 diff --git a/src/core/hle/service/services.cpp b/src/core/hle/service/services.cpp
-index 7bdd89905c..5ec0a3661c 100644
+index 7bdd89905c..c5ce8d827b 100644
 --- a/src/core/hle/service/services.cpp
 +++ b/src/core/hle/service/services.cpp
-@@ -1,11 +1,24 @@
+@@ -1,11 +1,26 @@
  // SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
  // SPDX-License-Identifier: GPL-3.0-or-later
 -
@@ -8387,7 +8411,9 @@ index 7bdd89905c..5ec0a3661c 100644
 -
 +#include "core/hle/service/filesystem/filesystem.h"
 +#include "core/hle/service/ns/platform_service_manager.h"
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
 +#include "core/hle/service/hid/hid_server.h"
++#endif
 +#include "core/hle/service/nvdrv/nvdrv_interface.h"
 +#include "hid_core/resource_manager.h"
 +#include "hid_core/resources/hid_firmware_settings.h"
@@ -8403,7 +8429,7 @@ index 7bdd89905c..5ec0a3661c 100644
  #include "core/hle/service/acc/acc.h"
  #include "core/hle/service/am/am.h"
  #include "core/hle/service/aoc/addon_content_manager.h"
-@@ -27,11 +40,7 @@
+@@ -27,11 +42,7 @@
  #include "core/hle/service/grc/grc.h"
  #include "core/hle/service/gpio/gpio.h"
  #include "core/hle/service/hid/hid.h"
@@ -8415,7 +8441,7 @@ index 7bdd89905c..5ec0a3661c 100644
  #include "core/hle/service/lbl/lbl.h"
  #include "core/hle/service/ldn/ldn.h"
  #include "core/hle/service/ldr/ldr.h"
-@@ -48,7 +57,6 @@
+@@ -48,7 +59,6 @@
  #include "core/hle/service/nim/nim.h"
  #include "core/hle/service/npns/npns.h"
  #include "core/hle/service/ns/ns.h"
@@ -8423,7 +8449,7 @@ index 7bdd89905c..5ec0a3661c 100644
  #include "core/hle/service/nvnflinger/nvnflinger.h"
  #include "core/hle/service/olsc/olsc.h"
  #include "core/hle/service/omm/omm.h"
-@@ -60,22 +68,51 @@
+@@ -60,22 +70,65 @@
  #include "core/hle/service/psc/psc.h"
  #include "core/hle/service/ptm/ptm.h"
  #include "core/hle/service/ro/ro.h"
@@ -8464,6 +8490,20 @@ index 7bdd89905c..5ec0a3661c 100644
 +}
 +} // namespace
 +
++namespace {
++std::shared_ptr<HID::ResourceManager> g_hid_resource_manager;
++}
++
++std::shared_ptr<HID::ResourceManager> GetHidResourceManager(Core::System& system) {
++    if (g_hid_resource_manager) return g_hid_resource_manager;
++#ifndef KARTRECOMP_DROP_UNUSED_SERVICES
++    if (auto server = system.ServiceManager().GetService<HID::IHidServer>("hid", true)) return server->GetResourceManager();
++#else
++    (void)system;
++#endif
++    return nullptr;
++}
++
 +bool IsHleModuleStarted(std::string_view name) {
 +    return StartModule(name);
 +}
@@ -8478,7 +8518,7 @@ index 7bdd89905c..5ec0a3661c 100644
  
      // Just a quick C++ lesson
      // Capturing lambdas will silently create new variables for the objects referenced via <ident> = <expr>
-@@ -102,8 +139,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+@@ -102,8 +155,10 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          {"nvservices", &Nvidia::LoopProcess},
          {"bsdsocket",  &Sockets::LoopProcess},
      })
@@ -8491,7 +8531,7 @@ index 7bdd89905c..5ec0a3661c 100644
      // Avoid cold clones of lambdas -- succintly
      for (auto const& e : std::vector<std::pair<std::string_view, void (*)(Core::System&)>>{
          {"sm",         &SM::LoopProcess},
-@@ -157,7 +196,38 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
+@@ -157,7 +212,36 @@ Services::Services(std::shared_ptr<SM::ServiceManager>& sm, Core::System& system
          {"i2c",        &I2C::LoopProcess},
          {"gpio",        &GPIO::LoopProcess},
      })
@@ -8512,12 +8552,10 @@ index 7bdd89905c..5ec0a3661c 100644
 +        library("set:sys", [object] { return object; });
 +    }
 +    if (!StartModule("hid")) {
-+        // hid_core's resource manager (shared memory, pads, rumble, motion and its update work) behind an "hid" server object.
++        // hid_core's resource manager (shared memory, pads, rumble, motion and its update work).
 +        auto firmware = std::make_shared<HID::HidFirmwareSettings>(system);
-+        auto rm = std::make_shared<HID::ResourceManager>(system, firmware);
-+        rm->Initialize();
-+        auto object = std::make_shared<HID::IHidServer>(system, rm, firmware);
-+        library("hid", [object] { return object; });
++        g_hid_resource_manager = std::make_shared<HID::ResourceManager>(system, firmware);
++        g_hid_resource_manager->Initialize();
 +    }
 +    if (!StartModule("nvservices")) {
 +        // The GPU driver module behind an "nvdrv" interface object.
@@ -8532,24 +8570,31 @@ index 7bdd89905c..5ec0a3661c 100644
  
  } // namespace Service
 diff --git a/src/core/hle/service/services.h b/src/core/hle/service/services.h
-index a89b04af2d..2412bfaa40 100644
+index a89b04af2d..0912f6e9e1 100644
 --- a/src/core/hle/service/services.h
 +++ b/src/core/hle/service/services.h
-@@ -6,6 +6,8 @@
+@@ -6,6 +6,9 @@
  
  #pragma once
  
++#include <memory>
 +#include <string_view>
 +
  #include "common/polyfill_thread.h"
  #include "core/hle/service/sm/sm.h"
  
-@@ -13,6 +15,9 @@ namespace Service {
+@@ -13,6 +16,15 @@ namespace Service {
  
  /// @brief The purpose of this class is to own any objects that need to be shared across the other service
  /// implementations. Will be torn down when the global system instance is shutdown.
 +/// kart-recomp: whether the emulated service module `name` is started (native services start only the ones used as libraries).
 +bool IsHleModuleStarted(std::string_view name);
++
++namespace HID {
++class ResourceManager;
++}
++/// kart-recomp: the controller library's resource manager (built at boot, or the emulated "hid" module's when that runs).
++std::shared_ptr<HID::ResourceManager> GetHidResourceManager(Core::System& system);
 +
  class Services final {
  public:
@@ -8982,6 +9027,35 @@ index 37aa7a876e..5101ed3497 100644
          auto& gpu = system.GPU();
          gpu_device_memory->ApplyOpOnPointer(
              p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size); });
+diff --git a/src/core/memory/cheat_engine.cpp b/src/core/memory/cheat_engine.cpp
+index a7dc92a2e3..6a761feb42 100644
+--- a/src/core/memory/cheat_engine.cpp
++++ b/src/core/memory/cheat_engine.cpp
+@@ -14,7 +14,7 @@
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/k_process_page_table.h"
+ #include "core/hle/kernel/svc_types.h"
+-#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/services.h"
+ #include "core/hle/service/sm/sm.h"
+ #include "core/memory.h"
+ #include "core/memory/cheat_engine.h"
+@@ -73,13 +73,12 @@ void StandardVmCallbacks::MemoryWriteUnsafe(VAddr address, const void* data, u64
+ }
+ 
+ u64 StandardVmCallbacks::HidKeysDown() {
+-    const auto hid = system.ServiceManager().GetService<Service::HID::IHidServer>("hid");
+-    if (hid == nullptr) {
++    const auto applet_resource = Service::GetHidResourceManager(system);
++    if (applet_resource == nullptr) {
+         LOG_WARNING(CheatEngine, "Attempted to read input state, but hid is not initialized!");
+         return 0;
+     }
+ 
+-    const auto applet_resource = hid->GetResourceManager();
+     if (applet_resource == nullptr || applet_resource->GetNpad() == nullptr) {
+         LOG_WARNING(CheatEngine,
+                     "Attempted to read input state, but applet resource is not initialized!");
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
 index 0000000000..bb76429020
@@ -11710,6 +11784,31 @@ index 1b328796c9..a5bf25a9bd 100644
  
      if (!is_connected) {
          if (npad_type == NpadStyleIndex::Handheld) {
+diff --git a/src/hid_core/frontend/input_interpreter.cpp b/src/hid_core/frontend/input_interpreter.cpp
+index b6c8d8c5df..a9d0cc0022 100644
+--- a/src/hid_core/frontend/input_interpreter.cpp
++++ b/src/hid_core/frontend/input_interpreter.cpp
+@@ -2,7 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "core/core.h"
+-#include "core/hle/service/hid/hid_server.h"
++#include "core/hle/service/services.h"
+ #include "core/hle/service/sm/sm.h"
+ #include "hid_core/frontend/input_interpreter.h"
+ #include "hid_core/hid_types.h"
+@@ -10,10 +10,7 @@
+ #include "hid_core/resources/npad/npad.h"
+ 
+ InputInterpreter::InputInterpreter(Core::System& system)
+-    : npad{system.ServiceManager()
+-               .GetService<Service::HID::IHidServer>("hid")
+-               ->GetResourceManager()
+-               ->GetNpad()} {
++    : npad{Service::GetHidResourceManager(system)->GetNpad()} {
+     ResetButtonStates();
+ }
+ 
 diff --git a/src/kart_runtime/README.md b/src/kart_runtime/README.md
 new file mode 100644
 index 0000000000..9e51c01115

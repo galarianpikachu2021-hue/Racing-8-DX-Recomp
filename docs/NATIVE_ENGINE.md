@@ -667,3 +667,10 @@ Checked: 1P 4.0.1 and 3.0.4, 4P split-screen, the keyless boot; 149 -> 94 host t
 - Checked: 1P 4.0.1 and 3.0.4, 4P split-screen (59.7 fps), keyless boot, clean exits; 149 -> 86 host threads.
 - Waiting for a thread to end is native too (`ThreadEndEvent`, signalled from `KThread::FinishTermination`): a race makes
   15,427 waits, all answered by the runtime, none by the emulated kernel.
+- Also left out of the Linux engine build (same option): the applet manager, display, buffer-queue, NFC/amiibo, time
+  (glue/psc), capture, socket and process-manager modules (the applet manager class keeps only the game start), and the
+  service shells whose work the runtime does: audio, file-system proxy, account, apm, Mii, controller servers, the ns
+  system-update/application interfaces, settings servers other than `set:sys`. What stays of `core/hle/service` is library
+  code: the profile manager, apm controller, Mii manager/database, file-system controllers, font loader, language tables,
+  `set:sys`, the driver module, the registry, and the controller library's resource manager (held directly:
+  `Service::GetHidResourceManager`). Checked: 1P 4.0.1 and 3.0.4, 4P, keyless, clean exits.
