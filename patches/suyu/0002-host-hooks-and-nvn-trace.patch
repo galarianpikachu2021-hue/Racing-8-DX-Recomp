@@ -7119,6 +7119,61 @@ index 0000000000..6412740164
 +[[noreturn]] void ExitCurrent(KernelCore& kernel, KThread* thread);
 +
 +} // namespace Kernel::NativeThreads
+diff --git a/src/core/hle/kernel/svc.cpp b/src/core/hle/kernel/svc.cpp
+index f9807d1e4e..794ba221a7 100644
+--- a/src/core/hle/kernel/svc.cpp
++++ b/src/core/hle/kernel/svc.cpp
+@@ -1,3 +1,6 @@
++#include <mutex>
++#include <cstdlib>
++#include <cstdio>
+ // SPDX-FileCopyrightText: Copyright 2025 suyu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+@@ -12,6 +15,7 @@
+ #include "core/core.h"
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/svc.h"
++#include "core/memory.h"
+ 
+ namespace Kernel::Svc {
+ 
+@@ -2505,10 +2509,35 @@ void Call(Core::System& system, u32 imm) {
+         imm, GetArg32(args, 0), GetArg32(args, 1), GetArg32(args, 2),
+         GetArg32(args, 3), GetArg32(args, 4), GetArg32(args, 5), GetArg32(args, 6));
+     //kernel.EnterSVCProfile();
++    // kart-recomp research aid (KARTRECOMP_KERNEL_TRACE=<file>): the memory, thread and info calls with their arguments and
++    // results (QueryMemory with the MemoryInfo written), the reference for the runtime's own kernel (docs/NATIVE_KERNEL.md).
++    static std::FILE* trace = [] {
++        const char* v = std::getenv("KARTRECOMP_KERNEL_TRACE");
++        return v && *v ? std::fopen(v, "w") : nullptr;
++    }();
++    const bool traced = trace && (imm <= 0x10 || imm == 0x13 || imm == 0x14 || imm == 0x15 || imm == 0x16 || imm == 0x25 || imm == 0x29 || imm == 0x24) && imm != 0x0B;
++    std::array<uint64_t, 8> in_args = args;
+     if (process.Is64Bit())
+         Call64(system, imm, args);
+     else
+         Call32(system, imm, args);
++    if (traced) {
++        static std::mutex m;
++        std::scoped_lock lk{m};
++        std::fprintf(trace, "%02X in %llx %llx %llx %llx %llx %llx out %llx %llx %llx", imm, (unsigned long long)in_args[0],
++                     (unsigned long long)in_args[1], (unsigned long long)in_args[2], (unsigned long long)in_args[3],
++                     (unsigned long long)in_args[4], (unsigned long long)in_args[5], (unsigned long long)args[0],
++                     (unsigned long long)args[1], (unsigned long long)args[2]);
++        if (imm == 0x06 && args[0] == 0) {
++            Svc::MemoryInfo info{};
++            GetCurrentMemory(kernel).ReadBlock(in_args[0], &info, sizeof(info));
++            std::fprintf(trace, " info %llx %llx %x %x %x %x %x", (unsigned long long)info.base_address, (unsigned long long)info.size,
++                         static_cast<u32>(info.state), static_cast<u32>(info.attribute), static_cast<u32>(info.permission), info.ipc_count,
++                         info.device_count);
++        }
++        std::fprintf(trace, "\n");
++        std::fflush(trace);
++    }
+     //kernel.ExitSVCProfile();
+     kernel.CurrentPhysicalCore().LoadSvcArguments(process, args);
+ }
 diff --git a/src/core/hle/kernel/svc/svc_address_arbiter.cpp b/src/core/hle/kernel/svc/svc_address_arbiter.cpp
 index dbf76e61cd..9b998e65c3 100644
 --- a/src/core/hle/kernel/svc/svc_address_arbiter.cpp
@@ -12759,6 +12814,562 @@ index 0000000000..6b0956610e
 +}
 +
 +} // namespace KartRuntime::DirectMemory
+diff --git a/src/kart_runtime/game_kernel.h b/src/kart_runtime/game_kernel.h
+new file mode 100644
+index 0000000000..d953e29f56
+--- /dev/null
++++ b/src/kart_runtime/game_kernel.h
+@@ -0,0 +1,550 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp runtime: the kernel for the game's process (docs/NATIVE_KERNEL.md, stages 3-4).
++//
++// Game threads are runtime threads: each one a host thread that takes one of the console's four virtual cores from the
++// core scheduler, runs the recompiled code through an `Executor` until the code makes a system call, answers the call here and
++// goes on. A thread that waits gives its core up meanwhile. The system calls the game makes are answered from the runtime's
++// parts: the address space (memory calls), the native kernel (handles, sessions, events, waits), the sync arbiter (locks,
++// condition variables, address waits, sleeps) and this file (threads, info, shared and transfer memory).
++//
++// Standard library only (tests: tests/test_game_kernel.cpp).
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <random>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "address_space.h"
++#include "core_scheduler.h"
++#include "native_kernel.h"
++#include "sync_arbiter.h"
++
++namespace KartRuntime {
++
++/// A guest thread's registers (AArch64).
++struct ThreadContext {
++    std::array<uint64_t, 31> x{};
++    uint64_t sp = 0, pc = 0;
++    uint32_t pstate = 0, fpcr = 0, fpsr = 0;
++    std::array<uint64_t, 64> v{}; ///< 32 vector registers, 128 bits each
++    uint64_t tpidr = 0;           ///< TPIDR_EL0 (the game's own)
++};
++
++class GameKernel;
++
++/// A game thread. Its handle object is a waitable that is signalled when the thread has ended.
++class GuestThread final : public Event {
++public:
++    GuestThread(NativeKernel& k, uint64_t id_) : Event{k, "thread"}, id{id_} {}
++    const char* Kind() const override { return "thread"; }
++    static constexpr ObjectType StaticType = ObjectType::Thread;
++    ObjectType Type() const override { return StaticType; }
++
++    const uint64_t id;
++    ThreadContext ctx;
++    uint64_t tls = 0; ///< the thread's 0x200-byte local region (TPIDRRO_EL0)
++    int priority = 44;
++    int ideal_core = 0;
++    uint64_t affinity = 1;
++    std::unique_ptr<CoreScheduler::Thread> sched;
++    std::atomic<bool> started{false}, ended{false}, terminate{false};
++    void* executor_data = nullptr; ///< the executor's per-thread state
++};
++
++/// Runs a guest thread's code.
++class Executor {
++public:
++    virtual ~Executor() = default;
++    /// Runs `t` (holding virtual core `core`) until it makes a system call: returns the call's number, or -1 when it was
++    /// interrupted (preemption, termination).
++    virtual int Run(GuestThread& t, int core) = 0;
++    /// Makes the Run on `core` return soon.
++    virtual void Interrupt(int core) = 0;
++};
++
++class GameKernel {
++public:
++    struct Config {
++        uint64_t program_id = 0, process_id = 0x51;
++        uint64_t entry = 0;
++        uint64_t main_stack_size = 0x100000;
++        int main_priority = 44, main_core = 0;
++        uint64_t core_mask = 0b111, priority_mask = ~uint64_t{0};
++        uint64_t total_memory = 0;  ///< GetInfo total memory size
++        std::function<uint64_t()> tick; ///< the 19.2 MHz system counter
++        std::function<uint32_t*(uint64_t)> host_word; ///< guest word -> host pointer (lock / arbiter words)
++        std::function<std::optional<uint32_t>(const std::string&)> connect_port; ///< ConnectToNamedPort (the service manager)
++        std::function<void(GuestThread&, uint32_t svc)> unknown_svc;
++        std::function<void(uint32_t reason, uint64_t a, uint64_t b)> on_break;
++        std::function<void(const std::string&)> debug_output;
++        std::function<void()> on_exit_process;
++    };
++
++    static constexpr uint32_t CurrentThreadHandle = 0xFFFF8000, CurrentProcessHandle = 0xFFFF8001;
++    static constexpr uint64_t TlsSlot = 0x200;
++
++    GameKernel(Config c, AddressSpace& memory, NativeKernel& handles, SyncArbiter& arbiter, CoreScheduler& scheduler,
++               Executor& executor)
++        : cfg{std::move(c)}, mem{memory}, kernel{handles}, sync{arbiter}, sched{scheduler}, exec{executor} {
++        std::random_device rd;
++        for (auto& e : entropy) e = (uint64_t{rd()} << 32) | rd();
++    }
++    ~GameKernel() { Shutdown(); }
++
++    /// The game thread running on this host thread (null on other threads).
++    static GuestThread* Current() { return t_current; }
++    /// A waiting game thread gives its core up / takes it back (hooks for the native kernel's and the arbiter's waits).
++    void BeginWait() {
++        if (GuestThread* t = t_current) sched.Release(t->sched.get());
++    }
++    void EndWait() {
++        if (GuestThread* t = t_current) sched.Acquire(t->sched.get());
++    }
++
++    /// Creates and starts the main thread: stack in the stack region, x0 = 0, x1 = its handle.
++    uint32_t StartMain() {
++        const auto stack = mem.FindFree(mem.GetLayout().stack_start, mem.GetLayout().stack_size, cfg.main_stack_size);
++        if (!stack) return MemResult::OutOfAddressSpace;
++        if (const uint32_t r = mem.MapNew(*stack, cfg.main_stack_size, MemState::Stack, MemPerm::ReadWrite); r) return r;
++        uint32_t handle = 0;
++        if (const uint32_t r = CreateThread(cfg.entry, 0, *stack + cfg.main_stack_size, cfg.main_priority, cfg.main_core, &handle); r)
++            return r;
++        auto t = kernel.GetAs<GuestThread>(handle);
++        t->ctx.x[1] = handle;
++        main_thread = t;
++        return StartThread(handle);
++    }
++
++    /// Ends every thread (engine shutdown): their waits end, their code is interrupted, their host threads are joined.
++    void Shutdown() {
++        std::vector<std::shared_ptr<GuestThread>> list;
++        {
++            std::scoped_lock lk{threads_lock};
++            list = threads;
++        }
++        for (auto& t : list) {
++            t->terminate = true;
++            kernel.Terminate(t->id);
++            sync.Cancel(t->id);
++            if (t->sched) exec.Interrupt(t->sched->Core());
++        }
++        std::vector<std::thread> hosts;
++        {
++            std::scoped_lock lk{threads_lock};
++            hosts.swap(host_threads);
++        }
++        for (auto& h : hosts)
++            if (h.joinable()) h.join();
++    }
++
++    size_t LiveThreads() {
++        std::scoped_lock lk{threads_lock};
++        size_t n = 0;
++        for (auto& t : threads) n += t->started && !t->ended;
++        return n;
++    }
++    std::shared_ptr<GuestThread> MainThread() { return main_thread; }
++
++    // ---- system calls
++    /// Answers system call `svc` for `t` (arguments and results in its registers).
++    void Svc(GuestThread& t, uint32_t svc) {
++        auto& x = t.ctx.x;
++        auto ret = [&](uint32_t r) { x[0] = r; };
++        switch (svc) {
++        case 0x01: { // SetHeapSize(size) -> addr
++            uint64_t addr = 0;
++            ret(mem.SetHeapSize(x[1], &addr));
++            x[1] = addr;
++            break;
++        }
++        case 0x02: ret(mem.SetPermission(x[0], x[1], static_cast<uint32_t>(x[2]))); break;
++        case 0x03: ret(mem.SetAttribute(x[0], x[1], static_cast<uint32_t>(x[2]), static_cast<uint32_t>(x[3]))); break;
++        case 0x04: ret(mem.MapAlias(x[0], x[1], x[2])); break;
++        case 0x05: ret(mem.UnmapAlias(x[0], x[1], x[2])); break;
++        case 0x06: { // QueryMemory(out info, out page info, addr)
++            const MemoryInfo info = mem.Query(x[2]);
++            ret(kernel.Write(x[0], &info, sizeof(info)) ? 0 : MemResult::InvalidCurrentMemory);
++            x[1] = 0;
++            break;
++        }
++        case 0x07: // ExitProcess
++            if (cfg.on_exit_process) cfg.on_exit_process();
++            t.terminate = true;
++            break;
++        case 0x08: { // CreateThread(entry, arg, stack top, priority, core) -> handle
++            uint32_t h = 0;
++            ret(CreateThread(x[1], x[2], x[3], static_cast<int32_t>(x[4]), static_cast<int32_t>(x[5]), &h));
++            x[1] = h;
++            break;
++        }
++        case 0x09: ret(StartThread(static_cast<uint32_t>(x[0]))); break;
++        case 0x0A: t.terminate = true; break; // ExitThread
++        case 0x0B: Sleep(t, static_cast<int64_t>(x[0])); break;
++        case 0x0C: { // GetThreadPriority(handle)
++            auto th = ThreadOf(t, static_cast<uint32_t>(x[1]));
++            if (!th) return ret(KernelResult::InvalidHandle);
++            ret(0);
++            x[1] = static_cast<uint64_t>(th->priority);
++            break;
++        }
++        case 0x0D: { // SetThreadPriority(handle, priority)
++            auto th = ThreadOf(t, static_cast<uint32_t>(x[0]));
++            if (!th) return ret(KernelResult::InvalidHandle);
++            const int p = static_cast<int32_t>(x[1]);
++            if (p < 0 || p > 63 || !((cfg.priority_mask >> p) & 1)) return ret(0xE001); // invalid priority
++            th->priority = p;
++            if (th->sched) sched.SetPriority(th->sched.get(), p);
++            ret(0);
++            break;
++        }
++        case 0x0E: { // GetThreadCoreMask(handle) -> ideal core, mask
++            auto th = ThreadOf(t, static_cast<uint32_t>(x[2]));
++            if (!th) return ret(KernelResult::InvalidHandle);
++            ret(0);
++            x[1] = static_cast<uint64_t>(th->ideal_core);
++            x[2] = th->affinity;
++            break;
++        }
++        case 0x0F: ret(SetCoreMask(t, static_cast<uint32_t>(x[0]), static_cast<int32_t>(x[1]), x[2])); break;
++        case 0x10: x[0] = static_cast<uint64_t>(t.sched->Core()); break; // GetCurrentProcessorNumber
++        case 0x13: ret(MapShared(static_cast<uint32_t>(x[0]), x[1], x[2], static_cast<uint32_t>(x[3]))); break;
++        case 0x14: ret(UnmapShared(static_cast<uint32_t>(x[0]), x[1], x[2])); break;
++        case 0x15: { // CreateTransferMemory(addr, size, perm) -> handle
++            uint32_t h = 0;
++            ret(CreateTransferMemory(x[1], x[2], static_cast<uint32_t>(x[3]), &h));
++            x[1] = h;
++            break;
++        }
++        case 0x16: ret(kernel.Close(static_cast<uint32_t>(x[0])) ? 0 : KernelResult::InvalidHandle); break;
++        case 0x17: { // ResetSignal
++            auto e = kernel.GetAs<Event>(static_cast<uint32_t>(x[0]));
++            if (!e) return ret(KernelResult::InvalidHandle);
++            if (!e->IsSignaled()) return ret(KernelResult::InvalidState);
++            e->Clear();
++            if (on_reset) on_reset(*e);
++            ret(0);
++            break;
++        }
++        case 0x18: Wait(t); break;
++        case 0x19: { // CancelSynchronization(thread handle)
++            auto th = ThreadOf(t, static_cast<uint32_t>(x[0]));
++            if (!th) return ret(KernelResult::InvalidHandle);
++            kernel.CancelWait(th->id);
++            ret(0);
++            break;
++        }
++        case 0x1A: ret(Arbiter(sync.LockWait(t.id, x[1], static_cast<uint32_t>(x[0]), static_cast<uint32_t>(x[2]), t.priority))); break;
++        case 0x1B: ret(Arbiter(sync.Unlock(x[0]))); break;
++        case 0x1C: ret(Arbiter(sync.ConditionWait(t.id, x[0], x[1], static_cast<uint32_t>(x[2]), t.priority, static_cast<int64_t>(x[3])))); break;
++        case 0x1D: sync.ConditionSignal(x[0], static_cast<int32_t>(x[1])); break;
++        case 0x1E: x[0] = cfg.tick ? cfg.tick() : 0; break; // GetSystemTick
++        case 0x1F: { // ConnectToNamedPort(name)
++            char name[13]{};
++            if (!kernel.Read(x[1], name, 12)) return ret(MemResult::InvalidAddress);
++            const auto h = cfg.connect_port ? cfg.connect_port(name) : std::nullopt;
++            if (!h) return ret(0xF201); // not found
++            ret(0);
++            x[1] = *h;
++            break;
++        }
++        case 0x21: { // SendSyncRequest(session): the message is the thread's local region
++            uint8_t msg[Hipc::MessageSize];
++            if (!kernel.Read(t.tls, msg, sizeof(msg))) return ret(MemResult::InvalidAddress);
++            const uint32_t r = kernel.SendSyncRequest(static_cast<uint32_t>(x[0]), msg);
++            if (r == 0) kernel.Write(t.tls, msg, sizeof(msg));
++            ret(r);
++            break;
++        }
++        case 0x24: // GetProcessId
++            ret(0);
++            x[1] = cfg.process_id;
++            break;
++        case 0x25: { // GetThreadId(handle)
++            auto th = ThreadOf(t, static_cast<uint32_t>(x[1]));
++            if (!th) return ret(KernelResult::InvalidHandle);
++            ret(0);
++            x[1] = th->id;
++            break;
++        }
++        case 0x26: // Break
++            if (cfg.on_break) cfg.on_break(static_cast<uint32_t>(x[0]), x[1], x[2]);
++            ret(0);
++            break;
++        case 0x27: { // OutputDebugString(ptr, size)
++            std::string s(std::min<uint64_t>(x[1], 0x1000), '\0');
++            if (!s.empty() && kernel.Read(x[0], s.data(), s.size()) && cfg.debug_output) cfg.debug_output(s);
++            ret(0);
++            break;
++        }
++        case 0x29: { // GetInfo(type, handle, sub)
++            uint64_t v = 0;
++            ret(GetInfo(static_cast<uint32_t>(x[1]), static_cast<uint32_t>(x[2]), x[3], &v));
++            x[1] = v;
++            break;
++        }
++        case 0x34:
++            ret(Arbiter(sync.AddressWait(t.id, x[0], static_cast<SyncArbiter::WaitType>(x[1]), static_cast<int32_t>(x[2]), t.priority,
++                                         static_cast<int64_t>(x[3]))));
++            break;
++        case 0x35:
++            ret(Arbiter(sync.AddressSignal(x[0], static_cast<SyncArbiter::SignalType>(x[1]), static_cast<int32_t>(x[2]), static_cast<int32_t>(x[3]))));
++            break;
++        default:
++            if (cfg.unknown_svc) cfg.unknown_svc(t, svc);
++            ret(0xF201); // not implemented
++            break;
++        }
++    }
++
++    /// Shared memory owned by a service (fonts, controller state): pages at `phys` mapped by the game with MapSharedMemory.
++    class SharedMemory final : public KernelObject {
++    public:
++        SharedMemory(uint64_t p, uint64_t s, uint32_t perm) : phys{p}, size{s}, owner_perm{perm} {}
++        const char* Kind() const override { return "shared memory"; }
++        static constexpr ObjectType StaticType = ObjectType::SharedMemory;
++        ObjectType Type() const override { return StaticType; }
++        const uint64_t phys, size;
++        const uint32_t owner_perm;
++    };
++    /// Memory the game lends to a service (audio and driver work buffers).
++    class TransferMemory final : public KernelObject {
++    public:
++        TransferMemory(AddressSpace& m, uint64_t a, uint64_t s) : mem{m}, address{a}, size{s} {}
++        ~TransferMemory() override { mem.UnlockTransfer(address, size); }
++        const char* Kind() const override { return "transfer memory"; }
++        static constexpr ObjectType StaticType = ObjectType::TransferMemory;
++        ObjectType Type() const override { return StaticType; }
++        AddressSpace& mem;
++        const uint64_t address, size;
++    };
++
++    /// Called after a runtime ResetSignal (the adapter resets an emulated event behind a mirror).
++    std::function<void(Event&)> on_reset;
++
++private:
++    static inline thread_local GuestThread* t_current = nullptr;
++
++    uint32_t CreateThread(uint64_t entry, uint64_t arg, uint64_t stack_top, int priority, int core, uint32_t* out) {
++        if (core == -2) core = cfg.main_core;
++        if (core < 0 || core > 3 || !((cfg.core_mask >> core) & 1)) return 0xF601; // invalid core id
++        if (priority < 0 || priority > 63 || !((cfg.priority_mask >> priority) & 1)) return 0xE001;
++        const uint64_t tls = AllocateTls();
++        if (!tls) return MemResult::OutOfMemory;
++        auto t = std::make_shared<GuestThread>(kernel, next_id++);
++        t->ctx.pc = entry;
++        t->ctx.x[0] = arg;
++        t->ctx.sp = stack_top;
++        t->tls = tls;
++        t->priority = priority;
++        t->ideal_core = core;
++        t->affinity = uint64_t{1} << core;
++        {
++            std::scoped_lock lk{threads_lock};
++            threads.push_back(t);
++        }
++        *out = kernel.Add(t);
++        return 0;
++    }
++
++    uint32_t StartThread(uint32_t handle) {
++        auto t = kernel.GetAs<GuestThread>(handle);
++        if (!t) return KernelResult::InvalidHandle;
++        if (t->started.exchange(true)) return KernelResult::InvalidState;
++        t->sched = sched.Create(t->ideal_core, t->priority);
++        std::scoped_lock lk{threads_lock};
++        host_threads.emplace_back([this, t] { HostMain(t); });
++        return 0;
++    }
++
++    void HostMain(std::shared_ptr<GuestThread> t) {
++        t_current = t.get();
++        sched.Acquire(t->sched.get());
++        while (!t->terminate) {
++            const int svc = exec.Run(*t, t->sched->Core());
++            if (svc >= 0) Svc(*t, static_cast<uint32_t>(svc));
++            if (t->terminate) break;
++            if (sched.PreemptRequested(t->sched.get())) sched.Yield(t->sched.get());
++        }
++        sched.Release(t->sched.get());
++        t->ended = true;
++        t->Signal(); // waiting for this thread ends
++        t_current = nullptr;
++    }
++
++    void Sleep(GuestThread& t, int64_t ns) {
++        if (ns <= 0) {
++            // 0 / -1 / -2: yield (to a thread of the same priority, any priority, or another core).
++            sched.Yield(t.sched.get());
++            return;
++        }
++        sync.Sleep(t.id, ns);
++    }
++
++    void Wait(GuestThread& t) {
++        auto& x = t.ctx.x;
++        const int32_t count = static_cast<int32_t>(x[2]);
++        if (count < 0 || count > 64) {
++            x[0] = KernelResult::OutOfRange;
++            return;
++        }
++        std::vector<uint32_t> handles(static_cast<size_t>(count));
++        if (count && !kernel.Read(x[1], handles.data(), handles.size() * 4)) {
++            x[0] = MemResult::InvalidAddress;
++            return;
++        }
++        std::vector<std::shared_ptr<Waitable>> objs;
++        for (const uint32_t h : handles) {
++            auto w = kernel.GetAs<Waitable>(h);
++            if (!w) {
++                x[0] = KernelResult::InvalidHandle;
++                return;
++            }
++            objs.push_back(std::move(w));
++        }
++        int32_t index = -1;
++        const uint32_t r = kernel.WaitAny(t.id, objs, static_cast<int64_t>(x[3]), &index);
++        x[0] = r;
++        if (r == 0) x[1] = static_cast<uint64_t>(index);
++        if (r == KernelResult::Cancelled && t.terminate) x[0] = 0xEC01;
++    }
++
++    uint32_t SetCoreMask(GuestThread& self, uint32_t handle, int core, uint64_t mask) {
++        auto t = ThreadOf(self, handle);
++        if (!t) return KernelResult::InvalidHandle;
++        if (core == -2) core = cfg.main_core;
++        if (core == -3) core = t->ideal_core; // keep the ideal core
++        if (mask == 0 || (mask & ~cfg.core_mask)) return 0xFA01;
++        if (core >= 0 && !((mask >> core) & 1)) return 0xFA01;
++        if (core >= 0) t->ideal_core = core;
++        t->affinity = mask;
++        int run_on = t->ideal_core;
++        if (!((mask >> run_on) & 1))
++            for (int c = 0; c < 4; ++c)
++                if ((mask >> c) & 1) {
++                    run_on = c;
++                    break;
++                }
++        if (t->sched) sched.SetCore(t->sched.get(), run_on);
++        return 0;
++    }
++
++    uint32_t MapShared(uint32_t handle, uint64_t addr, uint64_t size, uint32_t perm) {
++        auto shm = kernel.GetAs<SharedMemory>(handle);
++        if (!shm) return KernelResult::InvalidHandle;
++        if (size != shm->size) return MemResult::InvalidSize;
++        if (perm != MemPerm::Read && perm != MemPerm::ReadWrite) return MemResult::InvalidNewMemoryPermission;
++        const auto& l = mem.GetLayout();
++        if (addr >= l.heap_start && addr < l.heap_start + l.heap_size) return MemResult::InvalidMemoryRegion;
++        return mem.MapPhysical(addr, size, shm->phys, MemState::Shared, perm);
++    }
++    uint32_t UnmapShared(uint32_t handle, uint64_t addr, uint64_t size) {
++        auto shm = kernel.GetAs<SharedMemory>(handle);
++        if (!shm) return KernelResult::InvalidHandle;
++        return mem.Unmap(addr, size, MemState::Shared);
++    }
++    uint32_t CreateTransferMemory(uint64_t addr, uint64_t size, uint32_t perm, uint32_t* out) {
++        if (perm != MemPerm::None && perm != MemPerm::Read && perm != MemPerm::ReadWrite) return MemResult::InvalidNewMemoryPermission;
++        if (const uint32_t r = mem.LockTransfer(addr, size, perm); r) return r;
++        *out = kernel.Add(std::make_shared<TransferMemory>(mem, addr, size));
++        return 0;
++    }
++
++    uint32_t GetInfo(uint32_t type, uint32_t handle, uint64_t sub, uint64_t* out) {
++        const auto& l = mem.GetLayout();
++        switch (type) {
++        case 11: // RandomEntropy (handle 0, sub 0-3)
++            if (handle != 0) return KernelResult::InvalidHandle;
++            if (sub > 3) return 0xF001; // invalid combination
++            *out = entropy[sub];
++            return 0;
++        case 8: // DebuggerAttached
++        case 10: // IdleTickCount
++            *out = 0;
++            return 0;
++        default:
++            break;
++        }
++        if (handle != CurrentProcessHandle) return KernelResult::InvalidHandle;
++        if (sub != 0) return 0xF001;
++        switch (type) {
++        case 0: *out = cfg.core_mask; return 0;
++        case 1: *out = cfg.priority_mask; return 0;
++        case 2: *out = l.alias_start; return 0;
++        case 3: *out = l.alias_size; return 0;
++        case 4: *out = l.heap_start; return 0;
++        case 5: *out = l.heap_size; return 0;
++        case 6: case 21: *out = cfg.total_memory; return 0;        // TotalMemorySize / TotalNonSystemMemorySize
++        case 7: case 22: *out = used_memory ? used_memory() : 0; return 0; // UsedMemorySize / UsedNonSystemMemorySize
++        case 12: *out = l.code_start; return 0;                     // AslrRegionAddress
++        case 13: *out = l.code_size; return 0;
++        case 14: *out = l.stack_start; return 0;
++        case 15: *out = l.stack_size; return 0;
++        case 16: case 17: *out = 0; return 0;                      // system resource size
++        case 18: *out = cfg.program_id; return 0;
++        case 23: *out = 1; return 0;                               // IsApplication
++        case 24: *out = 0x100; return 0;                           // FreeThreadCount
++        default: return 0xF001;
++        }
++    }
++
++    uint64_t AllocateTls() {
++        std::scoped_lock lk{tls_lock};
++        for (auto& [page, used] : tls_pages)
++            for (int i = 0; i < 8; ++i)
++                if (!(used & (1u << i))) {
++                    used |= 1u << i;
++                    return page + static_cast<uint64_t>(i) * TlsSlot;
++                }
++        const auto& l = mem.GetLayout();
++        const auto page = mem.FindFree(l.kmap_start, l.kmap_size, AddressSpace::PageSize);
++        if (!page || mem.MapNew(*page, AddressSpace::PageSize, MemState::ThreadLocal, MemPerm::ReadWrite)) return 0;
++        tls_pages.emplace_back(*page, 1u);
++        return *page;
++    }
++
++    std::shared_ptr<GuestThread> ThreadOf(GuestThread& self, uint32_t handle) {
++        if (handle == CurrentThreadHandle) return std::static_pointer_cast<GuestThread>(self.shared_from_this());
++        return kernel.GetAs<GuestThread>(handle);
++    }
++
++    static uint32_t Arbiter(SyncArbiter::Result r) {
++        switch (r) {
++        case SyncArbiter::Result::Success: return 0;
++        case SyncArbiter::Result::TimedOut: return KernelResult::TimedOut;
++        case SyncArbiter::Result::InvalidState: return KernelResult::InvalidState;
++        case SyncArbiter::Result::InvalidCurrentMemory: return MemResult::InvalidCurrentMemory;
++        case SyncArbiter::Result::Cancelled: return 0xEC01; // termination requested
++        }
++        return KernelResult::InvalidState;
++    }
++
++public:
++    std::function<uint64_t()> used_memory; ///< GetInfo used memory size
++
++private:
++    Config cfg;
++    AddressSpace& mem;
++    NativeKernel& kernel;
++    SyncArbiter& sync;
++    CoreScheduler& sched;
++    Executor& exec;
++    std::array<uint64_t, 4> entropy{};
++    std::atomic<uint64_t> next_id{0x60};
++    std::mutex threads_lock;
++    std::vector<std::shared_ptr<GuestThread>> threads;
++    std::vector<std::thread> host_threads;
++    std::shared_ptr<GuestThread> main_thread;
++    std::mutex tls_lock;
++    std::vector<std::pair<uint64_t, uint32_t>> tls_pages; ///< page, used slots
++};
++
++} // namespace KartRuntime
 diff --git a/src/kart_runtime/hipc.h b/src/kart_runtime/hipc.h
 new file mode 100644
 index 0000000000..dd0326c478
@@ -13250,7 +13861,7 @@ index 0000000000..6fcddd551f
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/native_kernel.h b/src/kart_runtime/native_kernel.h
 new file mode 100644
-index 0000000000..6d7d36b493
+index 0000000000..afd37f7701
 --- /dev/null
 +++ b/src/kart_runtime/native_kernel.h
 @@ -0,0 +1,529 @@
@@ -13302,7 +13913,7 @@ index 0000000000..6d7d36b493
 +constexpr uint32_t InvalidObject = 0x1A80A;  // 10 | (212 << 9)
 +} // namespace CmifResult
 +
-+enum class ObjectType { Event, Service, Session, SharedMemory, Other };
++enum class ObjectType { Event, Service, Session, SharedMemory, Thread, TransferMemory, Other };
 +
 +/// Objects behind handles. Types are told apart by `Type()` (the engine builds without RTTI).
 +class KernelObject : public std::enable_shared_from_this<KernelObject> {
@@ -16163,6 +16774,311 @@ index 0000000000..bbaebea55b
 +    return KartRuntime::DirectMemory::Install(nullptr, 0, nullptr) ? 1 : 0;
 +}
 +#endif
+diff --git a/src/kart_runtime/tests/test_game_kernel.cpp b/src/kart_runtime/tests/test_game_kernel.cpp
+new file mode 100644
+index 0000000000..ef0472e64d
+--- /dev/null
++++ b/src/kart_runtime/tests/test_game_kernel.cpp
+@@ -0,0 +1,299 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Tests for kart_runtime/game_kernel.h: game threads on virtual cores with a scripted executor (each step of a thread's
++// "code" sets its registers and makes a system call), over a fake memory backend with real bytes.
++#include "../game_kernel.h"
++
++#include <cassert>
++#include <cstdio>
++#include <map>
++#include <unordered_map>
++
++using namespace KartRuntime;
++
++namespace {
++
++constexpr uint64_t Page = AddressSpace::PageSize;
++
++class Backend final : public AddressSpace::Backend {
++public:
++    Backend() : bytes(64 << 20) {}
++    void Map(uint64_t va, uint64_t size, uint64_t phys, uint32_t) override {
++        std::scoped_lock lk{m};
++        for (uint64_t o = 0; o < size; o += Page) pages[(va + o) / Page] = phys + o;
++    }
++    void Unmap(uint64_t va, uint64_t size) override {
++        std::scoped_lock lk{m};
++        for (uint64_t o = 0; o < size; o += Page) pages.erase((va + o) / Page);
++    }
++    void Protect(uint64_t, uint64_t, uint32_t) override {}
++    uint8_t* Host(uint64_t va) {
++        std::scoped_lock lk{m};
++        const auto it = pages.find(va / Page);
++        return it == pages.end() ? nullptr : bytes.data() + it->second + va % Page;
++    }
++    std::vector<uint8_t> bytes;
++    std::mutex m;
++    std::unordered_map<uint64_t, uint64_t> pages;
++};
++
++AddressSpace::Layout Layout() {
++    AddressSpace::Layout l;
++    l.space_size = 0x80'0000'0000;
++    l.code_start = 0x800'0000;
++    l.code_size = 0x7f'f800'0000;
++    l.heap_start = 0x21'0360'0000;
++    l.heap_size = 0x2'0000'0000;
++    l.alias_start = 0x11'0360'0000;
++    l.alias_size = 0x10'0000'0000;
++    l.stack_start = 0x10'8360'0000;
++    l.stack_size = 0x8000'0000;
++    l.kmap_start = 0x8360'0000;
++    l.kmap_size = 0x10'0000'0000;
++    return l;
++}
++
++/// A thread's code: steps, each setting registers and returning a system call number (after the call, the next step sees the
++/// results in x0, x1...).
++using Step = std::function<int(ThreadContext&)>;
++
++class ScriptExecutor final : public Executor {
++public:
++    std::map<uint64_t, std::vector<Step>> programs; ///< by entry pc
++    int Run(GuestThread& t, int) override {
++        if (!t.executor_data) {
++            std::scoped_lock lk{m};
++            t.executor_data = &state[&t];
++            state[&t].program = &programs.at(t.ctx.pc);
++        }
++        auto& s = *static_cast<State*>(t.executor_data);
++        if (s.next >= s.program->size()) return 0x0A; // falls off the end: ExitThread
++        return (*s.program)[s.next++](t.ctx);
++    }
++    void Interrupt(int) override {}
++
++private:
++    struct State {
++        const std::vector<Step>* program = nullptr;
++        size_t next = 0;
++    };
++    std::mutex m;
++    std::map<GuestThread*, State> state;
++};
++
++} // namespace
++
++int main() {
++    Backend backend;
++    PhysicalAllocator phys(0, 64 << 20);
++    AddressSpace mem(Layout(), backend, phys);
++    GameKernel* gk = nullptr;
++    NativeKernel handles{{
++        [&](uint64_t a, void* out, size_t n) {
++            for (size_t i = 0; i < n; ++i) {
++                uint8_t* p = backend.Host(a + i);
++                if (!p) return false;
++                static_cast<uint8_t*>(out)[i] = *p;
++            }
++            return true;
++        },
++        [&](uint64_t a, const void* in, size_t n) {
++            for (size_t i = 0; i < n; ++i) {
++                uint8_t* p = backend.Host(a + i);
++                if (!p) return false;
++                *p = static_cast<const uint8_t*>(in)[i];
++            }
++            return true;
++        },
++        [&] { gk->BeginWait(); },
++        [&] { gk->EndWait(); },
++        [] { return uint64_t{0x51}; },
++    }};
++    SyncArbiter sync{{
++        [&](uint64_t a) { return reinterpret_cast<uint32_t*>(backend.Host(a)); },
++        [&] { gk->BeginWait(); },
++        [&] { gk->EndWait(); },
++    }};
++    CoreScheduler sched{4};
++    ScriptExecutor exec;
++    GameKernel::Config cfg;
++    cfg.program_id = 0x0100152000022000;
++    cfg.entry = 0x8000'0000;
++    cfg.main_core = 0;
++    cfg.total_memory = 0xcd50'0000;
++    GameKernel kernel{cfg, mem, handles, sync, sched, exec};
++    gk = &kernel;
++    sync.Unlock(0); // (no-op: keeps the arbiter's lazy state initialised the same way in every run)
++
++    // Shared state the scripts record into.
++    std::atomic<int> child_ran{0};
++    std::atomic<uint64_t> heap{0}, child_handle{0}, word{0}, info_total{0}, main_core{9}, moved_core{9};
++    std::atomic<uint32_t> wait_result{1}, wait_index{9}, query_state{0}, shm_result{1};
++    uint64_t child_id = 0, self_id = 0;
++
++    const uint64_t child_entry = 0x8000'1000, sleeper_entry = 0x8000'2000;
++    // Child: report, wait on an address until main signals it, exit.
++    exec.programs[child_entry] = {
++        [&](ThreadContext& c) {
++            child_ran = 1;
++            c.x[1] = GameKernel::CurrentThreadHandle;
++            return 0x25; // GetThreadId
++        },
++        [&](ThreadContext& c) {
++            child_id = c.x[1];
++            c.x[0] = word.load();
++            c.x[1] = 2; // WaitIfEqual
++            c.x[2] = 0;
++            c.x[3] = ~uint64_t{0}; // forever
++            return 0x34;
++        },
++    };
++    // Sleeper: waits forever on its own handle-less object... (a thread that only ends by shutdown).
++    exec.programs[sleeper_entry] = {
++        [&](ThreadContext& c) {
++            c.x[0] = 60'000'000'000; // 60 s
++            return 0x0B;
++        },
++    };
++    exec.programs[cfg.entry] = {
++        [&](ThreadContext& c) { // the main thread's handle came in x1
++            c.x[1] = GameKernel::CurrentThreadHandle;
++            return 0x25;
++        },
++        [&](ThreadContext& c) {
++            self_id = c.x[1];
++            c.x[1] = 0x400000;
++            return 0x01; // SetHeapSize
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            heap = c.x[1];
++            word = heap + 0x100;
++            // Child stack: alias 0x4000 of heap into the stack region, as the SDK does.
++            c.x[0] = Layout().stack_start + 0x1000'0000;
++            c.x[1] = heap + 0x10000;
++            c.x[2] = 0x4000;
++            return 0x04; // MapMemory
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            c.x[1] = child_entry;
++            c.x[2] = 0;
++            c.x[3] = Layout().stack_start + 0x1000'4000;
++            c.x[4] = 44;
++            c.x[5] = 1; // another core (main spins below while it waits for the child)
++            return 0x08; // CreateThread
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            child_handle = c.x[1];
++            c.x[0] = c.x[1];
++            return 0x09; // StartThread
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            return 0x10; // GetCurrentProcessorNumber
++        },
++        [&](ThreadContext& c) {
++            main_core = c.x[0];
++            // Let the child reach its wait, then signal it.
++            while (sync.Waiting() == 0) std::this_thread::yield();
++            c.x[0] = word.load();
++            c.x[1] = 0; // Signal
++            c.x[2] = 0;
++            c.x[3] = 1;
++            return 0x35;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            // Wait for the child to end: the handle list in the heap.
++            const uint32_t h = static_cast<uint32_t>(child_handle.load());
++            std::memcpy(backend.Host(heap + 0x200), &h, 4);
++            c.x[1] = heap + 0x200;
++            c.x[2] = 1;
++            c.x[3] = 5'000'000'000;
++            return 0x18;
++        },
++        [&](ThreadContext& c) {
++            wait_result = static_cast<uint32_t>(c.x[0]);
++            wait_index = static_cast<uint32_t>(c.x[1]);
++            c.x[0] = heap + 0x300; // QueryMemory into the heap
++            c.x[2] = Layout().stack_start + 0x1000'0000;
++            return 0x06;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            MemoryInfo info{};
++            std::memcpy(&info, backend.Host(heap + 0x300), sizeof(info));
++            query_state = info.state;
++            c.x[1] = 6; // TotalMemorySize
++            c.x[2] = GameKernel::CurrentProcessHandle;
++            c.x[3] = 0;
++            return 0x29;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            info_total = c.x[1];
++            c.x[0] = GameKernel::CurrentThreadHandle;
++            c.x[1] = static_cast<uint64_t>(-1);
++            c.x[2] = 0b0100; // core 2 only
++            return 0x0F; // SetThreadCoreMask
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            return 0x10;
++        },
++        [&](ThreadContext& c) {
++            moved_core = c.x[0];
++            // Transfer memory locks the pages; a second lock is refused.
++            c.x[1] = heap + 0x20000;
++            c.x[2] = 0x10000;
++            c.x[3] = 0;
++            return 0x15;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            assert(mem.Query(heap + 0x20000).attribute == MemAttr::Locked);
++            c.x[0] = c.x[1];
++            return 0x16; // CloseHandle: unlocked
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0 && mem.Query(heap + 0x20000).attribute == 0);
++            // A thread that sleeps a minute: shutdown must end it.
++            c.x[1] = sleeper_entry;
++            c.x[3] = Layout().stack_start + 0x2000'0000;
++            c.x[4] = 50;
++            c.x[5] = 1;
++            return 0x08;
++        },
++        [&](ThreadContext& c) {
++            assert(c.x[0] == 0);
++            c.x[0] = c.x[1];
++            return 0x09;
++        },
++        [&](ThreadContext& c) {
++            shm_result = static_cast<uint32_t>(c.x[0]);
++            return 0x0A; // ExitThread
++        },
++    };
++
++    assert(kernel.StartMain() == 0);
++    while (!kernel.MainThread()->ended) std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    assert(child_ran == 1 && child_id != self_id && child_id >= 0x60);
++    assert(wait_result == 0 && wait_index == 0);
++    assert(query_state == MemState::Stack);
++    assert(info_total == 0xcd50'0000);
++    assert(main_core == 0 && moved_core == 2);
++    assert(shm_result == 0);
++    std::printf("threads: create, start, ids, address wait + signal, wait for a thread's end, core moves\n");
++    std::printf("memory calls: heap, alias stack, query into guest memory, transfer lock + close\n");
++
++    // The sleeper is still asleep; shutdown ends it at once.
++    assert(kernel.LiveThreads() == 1);
++    const auto t0 = std::chrono::steady_clock::now();
++    kernel.Shutdown();
++    assert(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
++    assert(kernel.LiveThreads() == 0);
++    std::printf("shutdown: a sleeping thread ends at once\n");
++    std::printf("game_kernel: all tests passed\n");
++    return 0;
++}
 diff --git a/src/kart_runtime/tests/test_native_fs.cpp b/src/kart_runtime/tests/test_native_fs.cpp
 new file mode 100644
 index 0000000000..adf06efe2d

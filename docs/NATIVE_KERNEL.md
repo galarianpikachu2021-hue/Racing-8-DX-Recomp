@@ -55,3 +55,16 @@ CloseHandle, 2 MapSharedMemory (hid, fonts), 2 CreateTransferMemory (audio, driv
 core mask 7, alias region / size, heap region / size, ASLR region 0x800_0000 + 0x7f_f800_0000, stack region / size, total
 memory 0xcd50_0000, used memory, random entropy 0-3, idle ticks 0. The region positions move between runs (suyu places them
 from the code's end), so the runtime can use its own fixed layout.
+
+## Stages 3-4, runtime side (2026-11-15)
+
+`kart_runtime/game_kernel.h` + `tests/test_game_kernel.cpp` (ASan/UBSan and TSan clean): `GuestThread` (registers, TLS slot,
+priority, ideal core, affinity, its handle is a waitable signalled at its end), `Executor` (runs a thread's code on a virtual
+core until a system call or an interrupt), and `GameKernel`: the host-thread loop (take a core, run, answer the call, yield
+on a preemption request), TLS pages of 8 slots in the kernel-map region, the main thread (stack in the stack region, x1 = its
+handle), shutdown (every wait cancelled, code interrupted, host threads joined) and the system-call table for every call in
+the reference trace plus the sync, IPC and wait calls: 0x01-0x10, 0x13-0x1F, 0x21, 0x24-0x27, 0x29, 0x34-0x35 (register
+layouts from suyu's generated wrappers). The test drives it with a scripted executor: threads that create threads, alias
+stacks, wait on addresses, wait for a thread's end, move cores, lock transfer memory, and a sleeper ended by shutdown.
+Next: the adapter (stage 2 + executor) - the recompiled-code runner as an `Executor`, `Core::Memory` as the
+`AddressSpace::Backend`, the application pool as physical memory, the modules from the loader, the service objects.
