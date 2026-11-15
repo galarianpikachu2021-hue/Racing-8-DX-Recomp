@@ -119,3 +119,31 @@ Candidates to look at next:
 Finding the culprit: the core dump has the guest registers in the block's context (host `rbx`), and guest memory is the direct
 memory arena (logged at boot) plus the guest address, so the guest stack can be walked in gdb with a few lines of Python
 (read 16 bytes at arena + x29: previous x29 and the return address).
+
+### Second round (2026-11-15, later)
+
+Fixed (all real, none of them was the race-start crash):
+- **Moving a running thread to another core** (`CoreScheduler::SetCore`, used by both kernels' native threads). The old code handed
+  the core on at once and asked for a preemption, but the interrupt went to the *destination* core's runner. The moved thread kept
+  executing next to the core's new owner while reporting the new core's number. Now a running thread gets a pending move and
+  keeps its core until it yields or waits (test `MoveRunningThread`).
+- **Fresh pages are cleared** (`AddressSpace::Backend::Clear`, punched out of the backing as suyu's heap fill does). The pool's pages
+  could hold old data.
+- **x18 starts random and odd** in new threads, as the console's kernel sets it.
+- Check: `GetCurrentProcessorNumber` from a thread that does not hold its core is logged. None seen.
+
+Ruled out:
+- the zero punch (`KARTRECOMP_ZERO_PUNCH=0` still crashes)
+- direct-memory faults (none reported)
+- sharing of the game's per-core buffers (`main+0x7205f4` uses `nn::os::GetTlsValue`, else `GetCurrentCoreNumber`, and
+  svc 0x10 is called once per thread)
+- waiting at the next system call instead of inside `nvnWindowAcquireTexture` (still crashes, and draws over the window texture
+  on screen: flickering UI, reverted)
+
+**Strongest clue:** with `KARTRECOMP_NVN_NO_PACING=1` (frames not paced, ~210-260 fps) the game plays the whole 12,000-frame script
+through race start without a crash, twice. Paced at 60 fps it crashes at race start every time. So it depends on timing: something
+that runs on wall-clock time (audio, the display's vsync, a streaming thread) meets race start.
+
+Next:
+- find which thread passes the bad object, by thread role, at race start
+- compare thread priorities and core masks with the emulated kernel's for the same threads

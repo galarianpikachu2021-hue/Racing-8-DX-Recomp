@@ -11531,10 +11531,10 @@ index a7dc92a2e3..6a761feb42 100644
                      "Attempted to read input state, but applet resource is not initialized!");
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..bb76429020
+index 0000000000..a2d7fc727f
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1449 @@
+@@ -0,0 +1,1452 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +#include "common/settings.h"
@@ -12254,7 +12254,8 @@ index 0000000000..bb76429020
 +        const auto now = std::chrono::steady_clock::now();
 +        while (!s.display_times.empty() && s.display_times.front() <= now) s.display_times.pop_front();
 +        const size_t may_wait = count >= 2 ? count - 2 : 0;
-+        if (s.display_times.size() > may_wait) t_wait_until = s.display_times[s.display_times.size() - may_wait - 1];
++        static const bool no_pacing = std::getenv("KARTRECOMP_NVN_NO_PACING") != nullptr; // experiments: never wait here
++        if (!no_pacing && s.display_times.size() > may_wait) t_wait_until = s.display_times[s.display_times.size() - may_wait - 1];
 +    };
 +
 +    // Queue
@@ -12975,7 +12976,9 @@ index 0000000000..bb76429020
 +        if (t_wait_until != std::chrono::steady_clock::time_point{}) {
 +            const auto until = t_wait_until;
 +            t_wait_until = {};
-+            const bool left = Kernel::NativeThreads::BeginHostWait(); // a native game thread gives its core up meanwhile
++            // The wait must stay here (the window texture is then free when the game draws into it; waiting later, at the next
++            // system call, made the game draw over the texture on screen: flickering UI). A game thread gives its core up meanwhile.
++            const bool left = Kernel::NativeThreads::BeginHostWait();
 +            std::this_thread::sleep_until(until);
 +            if (left) Kernel::NativeThreads::EndHostWait();
 +        }
@@ -14302,10 +14305,10 @@ index 0000000000..9e51c01115
 +| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
 diff --git a/src/kart_runtime/address_space.h b/src/kart_runtime/address_space.h
 new file mode 100644
-index 0000000000..630a68a3d9
+index 0000000000..62ba6c0346
 --- /dev/null
 +++ b/src/kart_runtime/address_space.h
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,517 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the game process's address space (docs/NATIVE_KERNEL.md, stage 1).
 +//
@@ -14473,6 +14476,9 @@ index 0000000000..630a68a3d9
 +        virtual void Map(uint64_t va, uint64_t size, uint64_t phys, uint32_t perm) = 0;
 +        virtual void Unmap(uint64_t va, uint64_t size) = 0;
 +        virtual void Protect(uint64_t va, uint64_t size, uint32_t perm) = 0;
++        /// Physical pages handed out fresh (heap, stacks, TLS): their contents become zeros, as the console's kernel clears memory
++        /// it gives a process (the pool's pages may hold anything: they were used before, by the loader or by the game).
++        virtual void Clear(uint64_t phys, uint64_t size) { (void)phys, (void)size; }
 +    };
 +
 +    AddressSpace(Layout l, Backend& b, PhysicalAllocator& p) : layout{l}, backend{b}, physical{p} {
@@ -14777,6 +14783,7 @@ index 0000000000..630a68a3d9
 +        if (runs.empty()) return MemResult::OutOfMemory;
 +        uint64_t va = addr;
 +        for (const auto& [phys, len] : runs) {
++            backend.Clear(phys, len);
 +            backend.Map(va, len, phys, perm);
 +            Set(va, len, Block{len, state, perm, 0, 0, 0, phys, true});
 +            va += len;
@@ -14821,10 +14828,10 @@ index 0000000000..630a68a3d9
 +} // namespace KartRuntime
 diff --git a/src/kart_runtime/core_scheduler.h b/src/kart_runtime/core_scheduler.h
 new file mode 100644
-index 0000000000..fc5364b0f8
+index 0000000000..af20572554
 --- /dev/null
 +++ b/src/kart_runtime/core_scheduler.h
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,206 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart_runtime: virtual CPU cores for host threads.
 +//
@@ -14864,6 +14871,7 @@ index 0000000000..fc5364b0f8
 +        int priority = 0;
 +        bool waiting = false;         ///< in its core's wait list
 +        bool granted = false;         ///< it is the running thread of its core
++        int pending_core = -1;        ///< a move asked for while it ran: done when it next yields or releases
 +        std::uint64_t order = 0;      ///< arrival order among equal priorities
 +        std::atomic<bool> preempt{false};
 +        std::condition_variable wake;
@@ -14898,7 +14906,7 @@ index 0000000000..fc5364b0f8
 +    void Yield(Thread* t) {
 +        std::unique_lock lk{lock};
 +        t->preempt.store(false, std::memory_order_relaxed);
-+        if (!BetterOrEqualWaiter(t)) return;
++        if (t->pending_core < 0 && !BetterOrEqualWaiter(t)) return;
 +        ReleaseLocked(t);
 +        Enqueue(t);
 +        Dispatch(t->core);
@@ -14914,25 +14922,25 @@ index 0000000000..fc5364b0f8
 +        Dispatch(t->core);
 +    }
 +
-+    /// Moves a thread to another core. A running thread keeps running until it next releases or yields (ask it with
-+    /// PreemptRequested); a waiting one waits for the new core.
++    /// Moves a thread to another core. A running thread keeps its core (and reports it) until it next releases or yields - it is
++    /// asked to with PreemptRequested - and moves then; a waiting one waits for the new core.
++    ///
++    /// The running case must not hand the old core on while the thread still executes: the game keeps per-core data indexed by
++    /// nn::os::GetCurrentCoreNumber (a per-core buffer at race start), and two threads executing with one core number shared it
++    /// (memory corruption, a garbage object passed to the graphics driver, a crash ~40 s into a race).
 +    void SetCore(Thread* t, int core) {
 +        std::scoped_lock lk{lock};
 +        const int old = t->core;
++        if (t->granted) {
++            t->pending_core = old == core ? -1 : core;
++            if (t->pending_core >= 0) RequestPreempt(t);
++            return;
++        }
 +        if (old == core) return;
 +        if (t->waiting) {
 +            Remove(cores[static_cast<std::size_t>(old)].waiting, t);
 +            t->core = core;
 +            cores[static_cast<std::size_t>(core)].waiting.push_back(t);
-+            Dispatch(core);
-+        } else if (t->granted) {
-+            // Leave the old core now and queue for the new one; the thread itself blocks at its next Yield/Acquire.
-+            cores[static_cast<std::size_t>(old)].running = nullptr;
-+            t->granted = false;
-+            t->core = core;
-+            Enqueue(t);
-+            RequestPreempt(t);
-+            Dispatch(old);
 +            Dispatch(core);
 +        } else {
 +            t->core = core;
@@ -15017,6 +15025,10 @@ index 0000000000..fc5364b0f8
 +        t->granted = false;
 +        t->preempt.store(false, std::memory_order_relaxed);
 +        Dispatch(t->core);
++        if (t->pending_core >= 0) { // the move asked for while it ran
++            t->core = t->pending_core;
++            t->pending_core = -1;
++        }
 +    }
 +
 +    std::mutex lock;
@@ -15256,10 +15268,10 @@ index 0000000000..6b0956610e
 +} // namespace KartRuntime::DirectMemory
 diff --git a/src/kart_runtime/game_kernel.h b/src/kart_runtime/game_kernel.h
 new file mode 100644
-index 0000000000..1514789858
+index 0000000000..e699f34c7c
 --- /dev/null
 +++ b/src/kart_runtime/game_kernel.h
-@@ -0,0 +1,582 @@
+@@ -0,0 +1,596 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the kernel for the game's process (docs/NATIVE_KERNEL.md, stages 3-4).
 +//
@@ -15501,7 +15513,7 @@ index 0000000000..1514789858
 +            break;
 +        }
 +        case 0x0F: ret(SetCoreMask(t, static_cast<uint32_t>(x[0]), static_cast<int32_t>(x[1]), x[2])); break;
-+        case 0x10: x[0] = static_cast<uint64_t>(t.sched->Core()); break; // GetCurrentProcessorNumber
++        case 0x10: CheckOwner(t, "core number"); x[0] = static_cast<uint64_t>(t.sched->Core()); break; // GetCurrentProcessorNumber
 +        case 0x13: ret(MapShared(static_cast<uint32_t>(x[0]), x[1], x[2], static_cast<uint32_t>(x[3]))); break;
 +        case 0x14: ret(UnmapShared(static_cast<uint32_t>(x[0]), x[1], x[2])); break;
 +        case 0x15: { // CreateTransferMemory(addr, size, perm) -> handle
@@ -15636,6 +15648,11 @@ index 0000000000..1514789858
 +        t->ctx.pc = entry;
 +        t->ctx.x[0] = arg;
 +        t->ctx.sp = stack_top;
++        // x18 (the platform register) starts as a random odd value, as the console's kernel sets it (KThread's context reset).
++        {
++            static thread_local std::mt19937_64 rng{std::random_device{}()};
++            t->ctx.x[18] = rng() | 1;
++        }
 +        t->tls = tls;
 +        t->priority = priority;
 +        t->ideal_core = core;
@@ -15672,6 +15689,15 @@ index 0000000000..1514789858
 +        t->ended = true;
 +        t->Signal(); // waiting for this thread ends
 +        t_current = nullptr;
++    }
++
++    /// Diagnostics: a thread executing game code must be the running thread of its core (the game keeps per-core data).
++    void CheckOwner(GuestThread& t, const char* where) {
++        if (sched.Running(t.sched->Core()) == t.sched.get()) return;
++        static std::atomic<int> logged{0};
++        if (logged.fetch_add(1) < 20 && cfg.debug_output)
++            cfg.debug_output("runtime kernel: thread " + std::to_string(t.id) + " " + where + " on core " + std::to_string(t.sched->Core()) +
++                             " without holding it");
 +    }
 +
 +    void Sleep(GuestThread& t, int64_t ns) {
@@ -19068,10 +19094,10 @@ index 0000000000..bd490d35af
 +}
 diff --git a/src/kart_runtime/tests/test_core_scheduler.cpp b/src/kart_runtime/tests/test_core_scheduler.cpp
 new file mode 100644
-index 0000000000..e3e1ccc18e
+index 0000000000..cda0a6984c
 --- /dev/null
 +++ b/src/kart_runtime/tests/test_core_scheduler.cpp
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,177 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Standalone test of KartRuntime::CoreScheduler (no test framework: exits non-zero with a message on failure).
 +#include <atomic>
@@ -19208,11 +19234,44 @@ index 0000000000..e3e1ccc18e
 +    s.Release(a.get());
 +}
 +
++// Moving a RUNNING thread: it keeps its core (and reports it) until it yields, so no other thread executes with that core
++// number meanwhile (the game indexes per-core buffers by it); after the yield it runs on the new core.
++static void MoveRunningThread() {
++    CoreScheduler s{2};
++    auto a = s.Create(0, 30);
++    s.Acquire(a.get());
++    std::atomic<bool> b_ran{false};
++    auto b = s.Create(0, 30); // same core, same priority: waits behind a
++    std::thread other([&] {
++        s.Acquire(b.get());
++        b_ran = true;
++        s.Release(b.get());
++    });
++    std::this_thread::sleep_for(50ms);
++    s.SetCore(a.get(), 1);
++    CHECK(s.PreemptRequested(a.get()));
++    CHECK(a->Core() == 0 && s.Running(0) == a.get()); // still core 0's thread until it yields
++    std::this_thread::sleep_for(50ms);
++    CHECK(!b_ran); // core 0 was not handed on while a still ran
++    s.Yield(a.get()); // the safe point: a moves to core 1 (idle), b gets core 0
++    CHECK(a->Core() == 1 && s.Running(1) == a.get());
++    other.join();
++    CHECK(b_ran);
++    // A move asked for while running, then a wait (Release): the next Acquire is on the new core.
++    s.SetCore(a.get(), 0);
++    s.Release(a.get());
++    CHECK(a->Core() == 0);
++    s.Acquire(a.get());
++    CHECK(s.Running(0) == a.get());
++    s.Release(a.get());
++}
++
 +int main() {
 +    OnePerCore();
 +    PriorityOrder();
 +    Preemption();
 +    PriorityAndCoreChanges();
++    MoveRunningThread();
 +    std::puts("core_scheduler: all tests passed");
 +    return 0;
 +}
