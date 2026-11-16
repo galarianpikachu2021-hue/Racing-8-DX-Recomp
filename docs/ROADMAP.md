@@ -21,6 +21,7 @@ Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is
 - Figure out the network backend with the suyu engine (today the game's online menu fails to connect and returns to the main menu).
 - Figure out the server side: local (LAN / self-hosted) or a public service; ask the devs of the existing community servers before
   building anything.
+### open for beta testing! check beta in releases
 
 ## More updates
 - Done in v0.2.3: **4.0.1** (`tools/recomp/map_hot_list.py` carries the hot list over; it exports, builds and boots fully static).
