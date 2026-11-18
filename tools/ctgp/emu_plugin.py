@@ -287,6 +287,14 @@ def main():
             lines.append(f"course {i} {p.cstr(w[0], 64)} {p.cstr(w[1], 64)} index={sx(w[4])} base={sx(w[5])} name={sx(w[6])} "
                          f"platform={sx(w[7])} slot={sx(w[8])} author={sx(w[9])} bgm={sx(w[10])} cup={sb(b[3])} b30={b[0]} b31={b[1]} "
                          f"b32={b[2]} flag={sb(b[4])}")
+            # music sets (+0x38: vector of 0x18-byte records, one per set): song, prefix, artist, ?, sub name, ?
+            v = w[14]
+            if v:
+                b0, e0 = p.u32(v), p.u32(v + 4)
+                for k in range((e0 - b0) // 4):
+                    r = p.u32(b0 + 4 * k)
+                    rec = p.u32(r)  # each set: {record*, ?, record*}; the record is 0x18 bytes
+                    lines.append(f"music {i} {k} " + " ".join(str(sx(p.u32(rec + 4 * j))) for j in range(6)))
         cdb = p.u32(S + 8)
         out = p.malloc(4)
         for cup in range(0, 64):

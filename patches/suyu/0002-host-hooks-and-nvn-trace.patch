@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..753b0b0342
+index 0000000000..4382a53d17
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1335 @@
+@@ -0,0 +1,1352 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -1717,6 +1717,15 @@ index 0000000000..753b0b0342
 +            }
 +            if (c.id != static_cast<int>(courses.size())) return false; // ids must be dense and in order
 +            courses.push_back(std::move(c));
++        } else if (kind == "music") {
++            int id = -1, set = -1;
++            MusicSet m;
++            ls >> id >> set >> m.song >> m.prefix >> m.artist >> m.unknown >> m.sub;
++            if (id >= 0 && id < static_cast<int>(courses.size()) && set >= 0 && set < 8) {
++                auto& list = courses[static_cast<size_t>(id)].music;
++                if (list.size() <= static_cast<size_t>(set)) list.resize(static_cast<size_t>(set) + 1);
++                list[static_cast<size_t>(set)] = m;
++            }
 +        } else if (kind == "rows_a_top" || kind == "rows_a_bottom") {
 +            std::string list;
 +            ls >> list;
@@ -1940,6 +1949,14 @@ index 0000000000..753b0b0342
 +    return st;
 +}
 +
++/// The music set chosen for a track this session (CTGP's in-race switch, entry + 0x2c), else the F10 default.
++std::map<int, int> g_music_set;
++int MusicSetFor(const Course& c) {
++    if (const auto it = g_music_set.find(c.id); it != g_music_set.end()) return it->second;
++    const int def = Settings_().music;
++    return def == 1 && c.music.size() > 1 ? 1 : 0;
++}
++
 +int TestCup() {
 +    static const int cup = [] { const char* v = std::getenv("KARTRECOMP_CTGP_TEST_CUP"); return v && *v ? std::atoi(v) : -1; }();
 +    return cup;
@@ -2148,7 +2165,7 @@ index 0000000000..753b0b0342
 +                break;
 +            }
 +        // Author's Pick: the track's _B stream when it has one (plugin: entry + 0x2c == 1)
-+        if (Settings_().music == 1 && HostFileExists("Audio/Resource/Stream/pBGM_" + c->folder + "_B" + suffix))
++        if (MusicSetFor(*c) == 1 && HostFileExists("Audio/Resource/Stream/pBGM_" + c->folder + "_B" + suffix))
 +            alt = kStream + "pBGM_" + c->folder + "_B" + suffix;
 +        const std::string file = "pBGM_" + c->folder + suffix;
 +        if (alt.empty() && HostFileExists("Audio/Resource/Stream/" + file)) alt = kStream + file;
@@ -2982,10 +2999,10 @@ index 0000000000..753b0b0342
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_dx.h b/src/core/arm/recomp/ctgp_dx.h
 new file mode 100644
-index 0000000000..1dedb70831
+index 0000000000..9ef2bc0702
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,67 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: CTGP Deluxe recreated for the 64-bit game builds (3.0.4, 4.0.1).
 +//
@@ -3007,6 +3024,15 @@ index 0000000000..1dedb70831
 +
 +namespace Core::CtgpDx {
 +
++/// One music set of a track (plugin record, 0x18 bytes): labels in CTGPText / Common (-1 = none).
++struct MusicSet {
++    int song = -1;     ///< song name (630000..; -1 = the track's own name)
++    int prefix = -1;   ///< prefix / platform
++    int artist = -1;   ///< 620000.. / 600001
++    int unknown = -1;
++    int sub = -1;      ///< sub name ("(Remix)", seasons: 610100..)
++};
++
 +/// One course id of the extended course table (the game's 0..123, CTGP's 124..187).
 +struct Course {
 +    int id = 0;
@@ -3021,6 +3047,7 @@ index 0000000000..1dedb70831
 +    int bgm = -1;        ///< course index whose music settings are used
 +    int cup = -1;        ///< cup id (0..39)
 +    int flag = -1;
++    std::vector<MusicSet> music; ///< its music sets (0 CTGPDX OST, 1 Author's Pick), when it has its own
 +};
 +
 +struct Cup {

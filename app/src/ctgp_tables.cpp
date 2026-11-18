@@ -22,6 +22,9 @@ constexpr uint32_t kDbPush = 0xafcc;        ///< db->push(entry*)
 constexpr uint32_t kCupAddA = 0x3b98;       ///< cupdb->add_game(id, cup*, top_row)
 constexpr uint32_t kCupAddB = 0x3c04;       ///< cupdb->add_booster(id, cup*, top_row)
 constexpr uint32_t kCupCtor = 0x3254;       ///< Cup(cup*, icon name, label): {0, label, icon, 0, {}} (NEON zeroing: stubbed)
+constexpr uint32_t kMusicBuilder = 0x9c24;  ///< void(db*): the music sets of the tracks that have their own (after the course builder)
+constexpr uint32_t kDbLookup = 0x9bf4;      ///< db->entry(&out, id)
+constexpr uint32_t kAddMusicSet = 0x246d4;  ///< entry->music_sets.push(set*); set = {record*, 0, record*}, record 0x18 bytes
 struct Expect {
     uint32_t at, word;
 };
@@ -35,6 +38,9 @@ constexpr Expect kExpect[] = {
     {kCupAddA, 0xe92d40f0},       // push {r4-r7, lr}
     {kCupAddB, 0xe92d40f0},
     {kCupCtor, 0xf2c00050},       // vmov.i32 q8, #0
+    {kMusicBuilder, 0xe92d4ff7},  // push {r0-r2, r4-fp, lr}
+    {kDbLookup, 0xe5903000},      // ldr r3, [r0]
+    {kAddMusicSet, 0xe92d4013},   // push {r0, r1, r4, lr}
 };
 
 constexpr uint32_t kHeap = 0x10000000, kStack = 0x20000000, kStackSize = 0x100000, kStubs = 0x0f000000, kReturn = 0x0efffff0;
@@ -361,6 +367,20 @@ CtgpTablesResult ReadCtgpTables(const QByteArray& nro) {
         res.error = QStringLiteral("Reading the CTGP DX course table failed: %1").arg(QString::fromStdString(m.error));
         return res;
     }
+    // Music sets (song name / prefix / artist / sub labels per set: CTGPDX OST, Author's Pick), built after the courses.
+    struct MusicRec { int course; uint32_t set; };
+    std::vector<MusicRec> music;
+    std::map<uint32_t, int> entry_id;
+    for (size_t k = 0; k < entries.size(); ++k) entry_id[entries[k]] = static_cast<int>(k);
+    m.stubs[kDbLookup] = [&entries](Machine& mm) { mm.Wr32(mm.r[1], mm.r[2] < entries.size() ? entries[mm.r[2]] : 0); };
+    m.stubs[kAddMusicSet] = [&music, &entry_id](Machine& mm) {
+        const auto it = entry_id.find(mm.r[0]);
+        if (it != entry_id.end()) music.push_back({it->second, mm.r[1]});
+    };
+    if (!m.Call(kMusicBuilder, {db})) {
+        res.error = QStringLiteral("Reading the CTGP DX music table failed: %1").arg(QString::fromStdString(m.error));
+        return res;
+    }
     // Cups: the constructor (FUN_3254: {0, label, icon, ...}) runs as code; the adds are stubbed and keep the screen rows.
     struct CupRec { uint32_t id, obj; bool booster, top; };
     std::vector<CupRec> cups;
@@ -390,6 +410,15 @@ CtgpTablesResult ReadCtgpTables(const QByteArray& nro) {
                       sx(m.Rd32(e + 0x18)), sx(m.Rd32(e + 0x1c)), sx(m.Rd32(e + 0x20)), sx(m.Rd32(e + 0x24)), sx(m.Rd32(e + 0x28)),
                       sb(m.Rd8(e + 0x33)), m.Rd8(e + 0x30), m.Rd8(e + 0x31), m.Rd8(e + 0x32), sb(m.Rd8(e + 0x34)));
         out += line;
+    }
+    {
+        std::map<int, int> next_set;
+        for (const MusicRec& r : music) {
+            const uint32_t rec = m.Rd32(r.set);
+            std::string line = "music " + std::to_string(r.course) + " " + std::to_string(next_set[r.course]++);
+            for (int k = 0; k < 6; ++k) line += " " + std::to_string(sx(m.Rd32(rec + 4 * k)));
+            out += line + "\n";
+        }
     }
     // A cup's courses are the entries whose cup byte is that cup, in slot order (the plugin links them the same way at start-up).
     std::map<int, std::map<int, int>> cup_courses;
