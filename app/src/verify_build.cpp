@@ -50,6 +50,10 @@ int PresentingSeconds(const QString& logPath) {
     return seconds;
 }
 constexpr int kFrameSeconds = 3;
+// The test boot runs without a picture (no window), and since the engine no longer has the emulated GPU's frame path, a
+// picture-less boot reports no frames (GitHub reports, 2026-11-18: every build "never presented frames"). Without frames, a build
+// passes when the game reached its main loop and then kept running game code for this long without stopping.
+constexpr qint64 kRunningMs = 20'000;
 } // namespace
 
 VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int timeoutSec, const std::atomic<bool>* cancel) {
@@ -82,6 +86,8 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
     };
     QElapsedTimer clock;
     clock.start();
+    qint64 main_loop_at = -1;   // when the main loop was first seen (ms on `clock`)
+    qint64 main_loop_blocks = 0; // blocks run at that point
     while (clock.elapsed() < timeoutSec * 1000LL) {
         if (cancel && cancel->load()) { stop(); return {false, QStringLiteral("Cancelled.")}; }
         if (p.waitForFinished(250)) {
@@ -102,6 +108,14 @@ VerifyResult VerifyBuild(const QString& engine, const DataLayout& layout, int ti
                                     : QCoreApplication::translate("Messages", "The build is not fully static (%1 transitions to a JIT, which this project never allows).").arg(c.jit)};
         }
         if (c.blocks >= kMainLoopBlocks && PresentingSeconds(layout.dataRoot + "/log/suyu_log.txt") >= kFrameSeconds) {
+            stop();
+            return {true, {}};
+        }
+        if (c.blocks >= kMainLoopBlocks && main_loop_at < 0) {
+            main_loop_at = clock.elapsed();
+            main_loop_blocks = c.blocks;
+        }
+        if (main_loop_at >= 0 && clock.elapsed() - main_loop_at >= kRunningMs && c.blocks > main_loop_blocks + kMainLoopBlocks) {
             stop();
             return {true, {}};
         }
