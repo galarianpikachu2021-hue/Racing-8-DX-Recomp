@@ -1,5 +1,10 @@
 # Windows session: build and test v0.2.4 on this PC
 
+> **Next beta (after 0.2.5 beta, 2026-11-18): the Windows zip must include commit 9fd3e71** (`app/src/verify_build.cpp`). Setup's test
+> boot reported "never presented frames" on every build (both v0.2.4 and the 0.2.5 beta engines; the picture-less boot shows no
+> frames). Setup now also passes a build that reaches the game's main loop and keeps running game code for 20 s. On Windows: build
+> the launcher from a `main` that has this commit, then run Setup once end to end and report whether it passes.
+
 > **v0.2.4 is released (2026-11-12)** with your Windows zip (SHA-256 8a54f640...) and the Linux AppImage. Your seven `windows-port`
 > commits are merged into `main` (push descriptors were also checked on Linux/AMD: correct picture, render thread lighter, 60 fps in
 > 1P and 4P). Next Linux work: the native-engine plan (replacing the emulated OS layer subsystem by subsystem, `docs/NATIVE_ENGINE.md`
