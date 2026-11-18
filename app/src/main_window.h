@@ -97,6 +97,7 @@ private:
     QCheckBox* nvn_capture_check = nullptr;
     QComboBox* native_res_combo = nullptr;
     QComboBox* pin_combo = nullptr;
+    QComboBox* audio_combo = nullptr;
     QComboBox* language_combo = nullptr;
     QPushButton* play_button = nullptr;
     QPushButton* stop_button = nullptr;

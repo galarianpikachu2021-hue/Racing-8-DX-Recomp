@@ -1,3 +1,106 @@
+diff --git a/src/audio_core/renderer/audio_renderer.cpp b/src/audio_core/renderer/audio_renderer.cpp
+index 7c728cb862..eb28c988da 100644
+--- a/src/audio_core/renderer/audio_renderer.cpp
++++ b/src/audio_core/renderer/audio_renderer.cpp
+@@ -16,7 +16,7 @@ Renderer::Renderer(Core::System& system_, Manager& manager_, Kernel::KEvent* ren
+     : core{system_}, manager{manager_}, system{system_, rendered_event} {}
+ 
+ Result Renderer::Initialize(const AudioRendererParameterInternal& params,
+-                            Kernel::KTransferMemory* transfer_memory,
++                            u64 transfer_memory_address,
+                             const u64 transfer_memory_size, Kernel::KProcess* process_handle,
+                             const u64 applet_resource_user_id, const s32 session_id) {
+     if (params.execution_mode == ExecutionMode::Auto) {
+@@ -29,7 +29,7 @@ Result Renderer::Initialize(const AudioRendererParameterInternal& params,
+     }
+ 
+     initialized = true;
+-    system.Initialize(params, transfer_memory, transfer_memory_size, process_handle,
++    system.Initialize(params, transfer_memory_address, transfer_memory_size, process_handle,
+                       applet_resource_user_id, session_id);
+ 
+     return ResultSuccess;
+diff --git a/src/audio_core/renderer/audio_renderer.h b/src/audio_core/renderer/audio_renderer.h
+index f16adeda78..b353e1ac9e 100644
+--- a/src/audio_core/renderer/audio_renderer.h
++++ b/src/audio_core/renderer/audio_renderer.h
+@@ -44,7 +44,7 @@ public:
+      * @return Result code.
+      */
+     Result Initialize(const AudioRendererParameterInternal& params,
+-                      Kernel::KTransferMemory* transfer_memory, u64 transfer_memory_size,
++                      u64 transfer_memory_address, u64 transfer_memory_size,
+                       Kernel::KProcess* process_handle, u64 applet_resource_user_id,
+                       s32 session_id);
+ 
+diff --git a/src/audio_core/renderer/system.cpp b/src/audio_core/renderer/system.cpp
+index 11f2dd3c93..9d827c1971 100644
+--- a/src/audio_core/renderer/system.cpp
++++ b/src/audio_core/renderer/system.cpp
+@@ -104,7 +104,7 @@ System::System(Core::System& core_, Kernel::KEvent* adsp_rendered_event_)
+       adsp_rendered_event{adsp_rendered_event_} {}
+ 
+ Result System::Initialize(const AudioRendererParameterInternal& params,
+-                          Kernel::KTransferMemory* transfer_memory, u64 transfer_memory_size,
++                          u64 transfer_memory_address, u64 transfer_memory_size,
+                           Kernel::KProcess* process_handle_, u64 applet_resource_user_id_,
+                           s32 session_id_) {
+     if (!CheckValidRevision(params.revision)) {
+@@ -134,7 +134,7 @@ Result System::Initialize(const AudioRendererParameterInternal& params,
+     render_device = params.rendering_device;
+     execution_mode = params.execution_mode;
+ 
+-    process_handle->GetMemory().ZeroBlock(transfer_memory->GetSourceAddress(),
++    process_handle->GetMemory().ZeroBlock(transfer_memory_address,
+                                           transfer_memory_size);
+ 
+     // Note: We're not actually using the transfer memory because it's a pain to code for.
+diff --git a/src/audio_core/renderer/system.h b/src/audio_core/renderer/system.h
+index 3533a74efd..1b62392167 100644
+--- a/src/audio_core/renderer/system.h
++++ b/src/audio_core/renderer/system.h
+@@ -80,7 +80,7 @@ public:
+      * @return Result code.
+      */
+     Result Initialize(const AudioRendererParameterInternal& params,
+-                      Kernel::KTransferMemory* transfer_memory, u64 transfer_memory_size,
++                      u64 transfer_memory_address, u64 transfer_memory_size,
+                       Kernel::KProcess* process_handle, u64 applet_resource_user_id,
+                       s32 session_id);
+ 
+diff --git a/src/audio_core/sink/sdl3_sink.cpp b/src/audio_core/sink/sdl3_sink.cpp
+index e542577f59..26d8b3833f 100644
+--- a/src/audio_core/sink/sdl3_sink.cpp
++++ b/src/audio_core/sink/sdl3_sink.cpp
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
+ #include <span>
+ #include <vector>
+ 
+@@ -227,7 +228,10 @@ SDLSink::SDLSink(std::string_view target_device_name) {
+         output_device.clear();
+     }
+ 
+-    device_channels = 2;
++    // kart-recomp: KARTRECOMP_AUDIO_CHANNELS=6 (the launcher's "5.1 surround"): the output stream takes 6 channels; SDL3 mixes
++    // them down when the device has fewer.
++    const char* surround = std::getenv("KARTRECOMP_AUDIO_CHANNELS");
++    device_channels = surround && std::atoi(surround) == 6 ? 6 : 2;
+ }
+ 
+ SDLSink::~SDLSink() = default;
+@@ -236,7 +240,7 @@ SinkStream* SDLSink::AcquireSinkStream(Core::System& system, u32 system_channels
+                                        const std::string&, StreamType type) {
+     system_channels = system_channels_;
+     SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<SDLSinkStream>(
+-        device_channels, system_channels, output_device, input_device, type, system));
++        type == StreamType::In ? 2u : device_channels, system_channels, output_device, input_device, type, system));
+     return stream.get();
+ }
+ 
 diff --git a/src/common/cpu_features.cpp b/src/common/cpu_features.cpp
 index 920dee36eb..f75fba5367 100644
 --- a/src/common/cpu_features.cpp
@@ -4954,15 +5057,16 @@ index 6363a9e0ab..b613a6512a 100644
          return Core::Hardware::NUM_CPU_CORES - 1;
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
-index 0000000000..eb20110fe8
+index 0000000000..50ebedf63e
 --- /dev/null
 +++ b/src/core/hle/kernel/native_audio_service.cpp
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,241 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the audio renderer service ("audren:u") answered by the runtime. The renderer itself - voices, mixes, effects,
 +// sinks, the DSP command lists and the output to the host's audio device - is suyu's audio_core library; this replaces the
 +// service around it. The renderer's "rendered" event is still an emulated kernel event (audio_core signals it), handed out as a
 +// copy handle.
++#include <cstdlib>
 +#include <memory>
 +#include <mutex>
 +#include <vector>
@@ -5108,7 +5212,12 @@ index 0000000000..eb20110fe8
 +        st->event->Signal(kernel);
 +        event(c);
 +    });
-+    s->On(5, [&system](Context& c) { c.Push<u32>(system.AudioCore().GetOutputSink().GetSystemChannels()); });
++    // GetActiveChannelCount: what the game mixes for. 6 with the launcher's "5.1 surround" (KARTRECOMP_AUDIO_CHANNELS=6), as a
++    // console set to 5.1 answers; otherwise what the output runs at.
++    s->On(5, [&system](Context& c) {
++        const char* surround = std::getenv("KARTRECOMP_AUDIO_CHANNELS");
++        c.Push<u32>(surround && std::atoi(surround) == 6 ? 6u : system.AudioCore().GetOutputSink().GetSystemChannels());
++    });
 +    s->On(6, list);
 +    s->On(7, set_volume);
 +    s->On(8, get_volume);

@@ -302,6 +302,13 @@ QWidget* MainWindow::buildPlayTab() {
     form->addRow(tr("Pin CPU threads (Linux):"), pin_combo);
 #endif
 
+    audio_combo = makeCombo({tr("Stereo"), tr("5.1 surround")});
+    audio_combo->setToolTip(tr("5.1: the game mixes for six speakers, as a console set to 5.1 does. With fewer speakers the system mixes "
+                               "it down, so it is safe to leave on."));
+    audio_combo->setCurrentIndex(QSettings().value(QStringLiteral("audio_surround"), false).toBool() ? 1 : 0);
+    connect(audio_combo, &QComboBox::currentIndexChanged, this, [](int index) { QSettings().setValue(QStringLiteral("audio_surround"), index == 1); });
+    form->addRow(tr("Audio output:"), audio_combo);
+
 #ifdef Q_OS_LINUX
     malloc_check = new QCheckBox(tr("Faster memory allocator (tcmalloc, if installed)"));
     malloc_check->setToolTip(tr("Preloads gperftools' tcmalloc: the renderer and the graphics hooks allocate a lot, and it is worth several fps "
@@ -635,6 +642,7 @@ QProcessEnvironment MainWindow::launchEnvironment() const {
         }
     }
 #endif
+    if (audio_combo && audio_combo->currentIndex() == 1) env.insert(QStringLiteral("KARTRECOMP_AUDIO_CHANNELS"), QStringLiteral("6"));
     if (steam_deck) {
         env.insert(QStringLiteral("KARTRECOMP_DECK"), QStringLiteral("1"));
         env.insert(QStringLiteral("KARTRECOMP_NATIVE_HEIGHT"), QStringLiteral("800")); // the Deck's screen (1280x800)
