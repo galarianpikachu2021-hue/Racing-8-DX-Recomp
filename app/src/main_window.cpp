@@ -1178,9 +1178,11 @@ void MainWindow::refreshMods() {
     const QSignalBlocker block(mods_list);
     mods_list->clear();
     const auto ctgp = have_root ? ModAddon::CtgpState(root) : ModAddon::State::NotImported;
-    const auto add_item = [this](const QString& text, bool checkable, bool checked) {
+    // While the game runs the boxes are shown but cannot be clicked: mods are read when the game starts and the game rewrites
+    // its config (which holds the on/off list) when it quits, so a change now would be lost.
+    const auto add_item = [this, idle](const QString& text, bool checkable, bool checked) {
         auto* item = new QListWidgetItem(text);
-        item->setFlags(item->flags() | (checkable ? Qt::ItemIsUserCheckable : Qt::NoItemFlags));
+        item->setFlags(checkable && idle ? item->flags() | Qt::ItemIsUserCheckable : item->flags() & ~Qt::ItemIsUserCheckable);
         if (checkable) item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
         mods_list->addItem(item);
     };
@@ -1224,6 +1226,11 @@ void MainWindow::refreshMods() {
     } else {
         selected_exists = false;
     }
+    if (game.state() != QProcess::NotRunning)
+        text = tr("<b>The game is running.</b> Quit it to change mods: they are read when the game starts.") + QStringLiteral("<br>") +
+               text.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    else if (importing) text = tr("Importing… the list unlocks when it is done.") + QLatin1Char('\n') + text;
+    mod_details->setTextFormat(game.state() != QProcess::NotRunning ? Qt::RichText : Qt::PlainText);
     mod_details->setText(text);
     mod_import_button->setEnabled(have_root && idle);
     mod_add_folder_button->setEnabled(have_root && idle);
