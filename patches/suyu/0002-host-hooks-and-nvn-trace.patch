@@ -1101,7 +1101,7 @@ index 408daa6839..8e01c564cd 100644
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..ae578b3a08 100644
+index 67a55424e9..b24a0e167d 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -1559,7 +1559,7 @@ index 67a55424e9..ae578b3a08 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2798,25 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2798,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -1569,7 +1569,15 @@ index 67a55424e9..ae578b3a08 100644
 +extern "C" int recomp_block_hook(void* raw, uint64_t module_offset);
 +extern "C" int recomp_block_hook(void* raw, uint64_t module_offset) {
 +    auto* c = static_cast<Core::GuestContextView*>(raw);
-+    if (!Core::t_hook_system) {
++    // Native game threads never pass the emulated dispatcher that sets t_hook_system: use the System the hooks were installed for.
++    Core::System* const hook_system = Core::t_hook_system ? Core::t_hook_system : Core::KartHookTrace::HookSystem();
++    static const bool debug = std::getenv("KARTRECOMP_HOOK_DEBUG") != nullptr; // first calls, to check the block-hook path
++    static std::atomic<int> debug_calls{0};
++    if (debug && debug_calls.fetch_add(1) < 20) {
++        LOG_INFO(Core_ARM, "block hook: offset {:#x} pc {:#x} main base {:#x} system {} active {}", module_offset, c->pc,
++                 Core::KartHookTrace::MainBase(), hook_system != nullptr, Core::RecompHooks::Active());
++    }
++    if (!hook_system) {
 +        return 0;
 +    }
 +    const u64 base = Core::KartHookTrace::MainBase();
@@ -1582,7 +1590,7 @@ index 67a55424e9..ae578b3a08 100644
 +    if (!Core::RecompHooks::Active()) {
 +        return 0;
 +    }
-+    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *Core::t_hook_system, c->vreg};
++    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg};
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
@@ -1886,10 +1894,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..5ae317f244
+index 0000000000..f1d4ebeea8
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,534 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_data_path.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
@@ -1945,20 +1953,34 @@ index 0000000000..5ae317f244
 +
 +} // namespace
 +
++// The main module's hook map (one byte per instruction word; a set byte sends that block to recomp_block_hook). A loaded game image
++// hands it over through recomp_main_hooks_v1 (SetHookMap, frontend_common/kart_static_recomp.cpp); the old single-binary build
++// links it directly (weak symbol). Null: the game was built without block hooks.
 +#if defined(_MSC_VER) && !defined(__clang__)
-+// MSVC has no weak symbols. The shipped unhooked build has no hook map at all, so on MSVC it is simply absent.
-+#define g_main_hookmap (static_cast<uint8_t*>(nullptr))
++static uint8_t* g_hookmap = nullptr; // MSVC has no weak symbols
 +#else
 +extern "C" uint8_t g_main_hookmap[] __attribute__((weak));
++static uint8_t* g_hookmap = g_main_hookmap;
 +#endif
 +constexpr u64 kHookMapEntries = 0x400000;
++
++void SetHookMap(uint8_t* map) {
++    g_hookmap = map;
++}
++
++static System* g_hook_system_any = nullptr;
++System* HookSystem() {
++    return g_hook_system_any;
++}
 +
 +u64 MainBase() { return g_main_base; }
 +
 +void NoteHookAddress(u64 pc) {
-+    if (g_main_base == 0 || pc < g_main_base || !g_main_hookmap) return;
++    if (std::getenv("KARTRECOMP_HOOK_DEBUG"))
++        LOG_INFO(Core_ARM, "hook map: {:#x} (main base {:#x}, map {})", pc, g_main_base, static_cast<const void*>(g_hookmap));
++    if (g_main_base == 0 || pc < g_main_base || !g_hookmap) return;
 +    const u64 idx = (pc - g_main_base) >> 2;
-+    if (idx < kHookMapEntries) g_main_hookmap[idx] = 1;
++    if (idx < kHookMapEntries) g_hookmap[idx] = 1;
 +}
 +
 +namespace {
@@ -2152,6 +2174,7 @@ index 0000000000..5ae317f244
 +GameAddrs g_a{};
 +
 +void InstallModHooks(Core::System& system, u64 load_base) {
++    g_hook_system_any = &system;
 +    if (g_main_build == kBuild304) g_a = kAddrs304;
 +    else if (g_main_build == kBuild401) g_a = kAddrs401;
 +    else {
@@ -2326,7 +2349,7 @@ index 0000000000..5ae317f244
 +        g_main_base = load_base;
 +        if (g_cov_enabled) {
 +            g_seen.assign(0x1000000 >> 2, 0); // 16 MiB of code is more than main has
-+            if (g_main_hookmap) std::memset(g_main_hookmap, 1, kHookMapEntries); // every block reports itself
++            if (g_hookmap) std::memset(g_hookmap, 1, kHookMapEntries); // every block reports itself
 +        }
 +    }
 +    if (name == "main") {
@@ -2411,10 +2434,10 @@ index 0000000000..5ae317f244
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/kart_hook_trace.h b/src/core/arm/recomp/kart_hook_trace.h
 new file mode 100644
-index 0000000000..11a6dabdf0
+index 0000000000..72d2411ca3
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.h
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,43 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: reverse-engineering aid. KARTRECOMP_HOOK_TRACE="1acb0,4910c8" logs every entry of those blocks of the `main` module
 +// (offsets from its load base) with x0..x7, the caller and any readable text the arguments point at. Blocks only reach the host
@@ -2441,6 +2464,10 @@ index 0000000000..11a6dabdf0
 +/// Native block hooks (generated code built with tools/recomp/add_block_hooks.py): the module's hook map byte for `pc` is switched on.
 +u64 MainBase();
 +void NoteHookAddress(u64 pc);
++/// The loaded game image's hook map (null: built without block hooks).
++void SetHookMap(uint8_t* map);
++/// The System the game hooks were installed for (block hooks on native threads, which never pass the emulated dispatcher).
++System* HookSystem();
 +
 +/// KARTRECOMP_STRING_WATCH=<prefix>: every time the dispatcher is entered, x0..x3 are checked for a pointer to text starting with the prefix;
 +/// the first hits are logged to <log dir>/string_watch.txt with the entry pc, the caller and the text (finds who passes a given kind of name).
@@ -14181,7 +14208,7 @@ index 0000000000..c36de3728b
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..22939bf57d 100644
+index 699980238b..2bf07135fe 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -349,18 +349,37 @@ inline constexpr int kChainBudget = 256;
@@ -14496,7 +14523,7 @@ index 699980238b..22939bf57d 100644
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
 -          "#elif defined(_WIN32)\n"
-+       << (mod == "main" ? "/* kart-recomp: native block hooks (main module). */\nuint8_t g_main_hookmap[0x400000];\n" : "")
++       << (mod == "main" ? "/* kart-recomp: native block hooks (main module). */\nuint8_t g_main_hookmap[0x400000];\nint (*recomp_block_hook_fn)(GuestContext*, uint64_t) = 0;\n#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\nuint8_t* recomp_main_hooks_v1(int (*fn)(GuestContext*, uint64_t)) { recomp_block_hook_fn = fn; return g_main_hookmap; }\n" : "")
 +       << "#elif defined(_WIN32)\n"
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
@@ -14678,13 +14705,15 @@ index 699980238b..22939bf57d 100644
  // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
  // Kept under MSVC's 16380-byte limit per string literal.
  inline const char* FpxAbiH() {
-@@ -6888,10 +7168,26 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,10 +7168,28 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
 +/* kart-recomp: native block hooks (main module only). */
 +extern uint8_t g_main_hookmap[];
-+int recomp_block_hook(GuestContext*, uint64_t);
++/* The host's hook entry, set at load through recomp_main_hooks_v1 (a loadable image cannot link to the host's symbols). */
++extern int (*recomp_block_hook_fn)(GuestContext*, uint64_t);
++static inline int recomp_block_hook(GuestContext* c, uint64_t o){ return recomp_block_hook_fn ? recomp_block_hook_fn(c, o) : 0; }
  extern int g_recomp_guard_host_v2;
  void recomp_code_guard(GuestContext*,uint64_t,const uint32_t*,uint32_t,int);
  void recomp_ic_ivau(GuestContext*,uint64_t,int);
@@ -14705,7 +14734,7 @@ index 699980238b..22939bf57d 100644
  typedef void (*BlockFn)(GuestContext*);
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -6960,6 +7256,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6960,6 +7258,14 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
          text.replace(text.find(abi5_line), abi5_line.size(),
                       std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
      }
@@ -14720,7 +14749,7 @@ index 699980238b..22939bf57d 100644
      if (fpx) {
          // After GuestContext, before the include guard closes.
          static constexpr std::string_view guard_end = "#endif\n";
-@@ -7241,7 +7545,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+@@ -7241,7 +7547,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
      // than being a single literal. Adjacent-literal concatenation would not
      // help: the limit applies to the result as well. The memory helpers are a
      // piece of their own because ABI 6 reuses their exact text as its slow path.
@@ -14730,12 +14759,19 @@ index 699980238b..22939bf57d 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -7580,6 +7885,9 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +7887,16 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif
 +#ifndef RECOMP_STATIC_MODULE
 +uint8_t g_main_hookmap[0x400000]; /* kart-recomp: one byte per instruction word of the main module */
++int (*recomp_block_hook_fn)(GuestContext*, uint64_t) = 0;
++#if defined(_WIN32)
++__declspec(dllexport)
++#else
++__attribute__((visibility("default")))
++#endif
++uint8_t* recomp_main_hooks_v1(int (*fn)(GuestContext*, uint64_t)) { recomp_block_hook_fn = fn; return g_main_hookmap; }
 +#endif
  
  uint64_t recomp_umulh(uint64_t a,uint64_t b){

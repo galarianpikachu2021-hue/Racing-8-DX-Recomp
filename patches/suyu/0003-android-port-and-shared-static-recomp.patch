@@ -265,14 +265,15 @@ index afd45206c1..1604a92001 100644
      LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..d9be321567
+index 0000000000..32071817c4
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,494 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
 +// their SUYU_RECOMP_* definitions) by src/kartrecomp_static_recomp.cmake. Moved verbatim from suyu.cpp.
++#include "core/arm/recomp/kart_hook_trace.h"
 +#include "common/kart_tune_sites.h"
 +#include "frontend_common/kart_static_recomp.h"
 +
@@ -351,6 +352,8 @@ index 0000000000..d9be321567
 +}
 +
 +
++extern "C" int recomp_block_hook(void* raw, uint64_t module_offset); // core/arm/recomp/arm_recomp.cpp
++
 +namespace {
 +struct RecompModule {
 +    Core::RecompBlockFn (*lookup)(u64){};
@@ -402,6 +405,13 @@ index 0000000000..d9be321567
 +            LOG_CRITICAL(Frontend, "{} has no recomp_image_lookup; re-export", file.string());
 +            CloseLib(h);
 +            return false;
++        }
++        // A game built with block hooks (CTGP DX's extra cups): give it the host's hook entry and take its hook map.
++        // Only the image that holds main: every module's runtime defines the entry, with its own (unused) map.
++        if (auto hooks = name == "image" ? reinterpret_cast<uint8_t* (*)(int (*)(void*, uint64_t))>(FindSym(h, "recomp_main_hooks_v1"))
++                                          : nullptr) {
++            Core::KartHookTrace::SetHookMap(hooks(&recomp_block_hook));
++            LOG_INFO(Frontend, "game image built with block hooks");
 +        }
 +        auto run_slice = reinterpret_cast<Core::RecompBlockFn>(FindSym(h, "recomp_image_run_slice"));
 +        auto image_abi = reinterpret_cast<unsigned (*)()>(FindSym(h, "recomp_image_abi"));
