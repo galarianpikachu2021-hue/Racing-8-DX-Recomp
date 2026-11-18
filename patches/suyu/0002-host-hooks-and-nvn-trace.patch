@@ -11430,6 +11430,223 @@ index cf43a50363..decb91b0f7 100644
      s32 m_swap_interval = 1;
      f32 m_compose_speed_scale = 1.0f;
  };
+diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
+index a1a8f8c104..b1b6644457 100644
+--- a/src/core/internal_network/network.cpp
++++ b/src/core/internal_network/network.cpp
+@@ -31,6 +31,7 @@
+ #include "common/logging.h"
+ #include "common/settings.h"
+ #include "core/internal_network/network.h"
++#include "core/internal_network/socket_proxy.h"
+ #include "core/internal_network/network_interface.h"
+ #include "core/internal_network/sockets.h"
+ #include "network/network.h"
+@@ -765,6 +766,44 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
+ std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
+     const size_t num = pollfds.size();
+ 
++    // kart-recomp: room (proxy) sockets have no host socket, so the host's poll never saw their packets and every poll on them
++    // slept its whole timeout - added to each packet's way in Wireless Play over a room. Poll them here: ready at once when a
++    // packet is waiting, otherwise wait for the next room packet (or a host socket) until the timeout.
++    if (std::any_of(pollfds.begin(), pollfds.end(), [](const PollFD& p) { return p.socket && p.socket->IsProxy(); })) {
++        const auto start = std::chrono::steady_clock::now();
++        for (;;) {
++            const u64 seen = ProxyActivity();
++            s32 ready = 0;
++            std::vector<WSAPOLLFD> host;
++            std::vector<size_t> host_index;
++            for (size_t i = 0; i < num; ++i) {
++                auto& p = pollfds[i];
++                p.revents = PollEvents{};
++                if (p.socket->IsProxy()) {
++                    if (True(p.events & (PollEvents::In | PollEvents::RdNorm)) && p.socket->ProxyReadable()) p.revents |= PollEvents::In;
++                    if (True(p.events & PollEvents::Out)) p.revents |= PollEvents::Out; // sending never blocks
++                    ready += p.revents != PollEvents{} ? 1 : 0;
++                } else {
++                    host.push_back(WSAPOLLFD{.fd = p.socket->GetFD(), .events = TranslatePollEvents(p.events), .revents = 0});
++                    host_index.push_back(i);
++                }
++            }
++            if (!host.empty() && WSAPoll(host.data(), static_cast<ULONG>(host.size()), 0) > 0) {
++                for (size_t k = 0; k < host.size(); ++k) {
++                    pollfds[host_index[k]].revents = TranslatePollRevents(host[k].revents);
++                    ready += host[k].revents != 0 ? 1 : 0;
++                }
++            }
++            if (ready > 0) return {ready, Errno::SUCCESS};
++            const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
++            if (timeout == 0 || (timeout > 0 && waited.count() >= timeout)) return {0, Errno::SUCCESS};
++            // Host sockets are looked at again every 2 ms; room packets wake the wait at once.
++            auto step = std::chrono::milliseconds(host.empty() ? 50 : 2);
++            if (timeout > 0) step = std::min(step, std::chrono::milliseconds(timeout) - waited);
++            WaitProxyActivity(seen, step);
++        }
++    }
++
+     std::vector<WSAPOLLFD> host_pollfds(pollfds.size());
+     std::transform(pollfds.begin(), pollfds.end(), host_pollfds.begin(), [](PollFD fd) {
+         WSAPOLLFD result;
+diff --git a/src/core/internal_network/socket_proxy.cpp b/src/core/internal_network/socket_proxy.cpp
+index 3f0a21bf59..abc941f736 100644
+--- a/src/core/internal_network/socket_proxy.cpp
++++ b/src/core/internal_network/socket_proxy.cpp
+@@ -29,6 +29,27 @@ ProxySocket::~ProxySocket() {
+     fd = INVALID_SOCKET;
+ }
+ 
++namespace {
++std::mutex g_activity_mutex;
++std::condition_variable g_activity_cv;
++u64 g_activity = 0;
++} // namespace
++
++u64 ProxyActivity() {
++    std::lock_guard lk{g_activity_mutex};
++    return g_activity;
++}
++
++void WaitProxyActivity(u64 seen, std::chrono::milliseconds at_most) {
++    std::unique_lock lk{g_activity_mutex};
++    g_activity_cv.wait_for(lk, at_most, [seen] { return g_activity != seen; });
++}
++
++bool ProxySocket::ProxyReadable() {
++    std::lock_guard guard(packets_mutex);
++    return !received_packets.empty();
++}
++
+ void ProxySocket::HandleProxyPacket(const ProxyPacket& packet) {
+     if (protocol != packet.protocol || local_endpoint.portno != packet.remote_endpoint.portno ||
+         closed) {
+@@ -43,8 +64,16 @@ void ProxySocket::HandleProxyPacket(const ProxyPacket& packet) {
+     auto decompressed = packet;
+     decompressed.data = Common::Compression::DecompressDataZSTD(packet.data);
+ 
+-    std::lock_guard guard(packets_mutex);
+-    received_packets.push(decompressed);
++    {
++        std::lock_guard guard(packets_mutex);
++        received_packets.push(decompressed);
++    }
++    packets_cv.notify_all();
++    {
++        std::lock_guard lk{g_activity_mutex};
++        ++g_activity;
++    }
++    g_activity_cv.notify_all();
+ }
+ 
+ template <typename T>
+@@ -119,28 +148,17 @@ std::pair<s32, Errno> ProxySocket::RecvFrom(int flags, std::span<u8> message, So
+     // packet arrives. In order to prevent lost packets from hanging the emulation thread, we set
+     // the timeout to 5s instead
+     const auto timeout = receive_timeout == 0 ? 5000 : receive_timeout;
+-    while (true) {
+-        {
+-            std::lock_guard guard(packets_mutex);
+-            if (received_packets.size() > 0) {
+-                return ReceivePacket(flags, message, addr, message.size());
+-            }
+-        }
+-
+-        if (!blocking) {
+-            return {-1, Errno::AGAIN};
+-        }
+-
+-        std::this_thread::yield();
+-
+-        const auto time_diff = std::chrono::steady_clock::now() - timestamp;
+-        const auto time_diff_ms =
+-            std::chrono::duration_cast<std::chrono::milliseconds>(time_diff).count();
+-
+-        if (time_diff_ms > timeout) {
+-            return {-1, Errno::TIMEDOUT};
+-        }
++    // kart-recomp: waits for the packet (it used to spin on yield, a whole CPU core while the game waited).
++    std::unique_lock guard(packets_mutex);
++    if (received_packets.empty() && !blocking) {
++        return {-1, Errno::AGAIN};
+     }
++    if (!packets_cv.wait_until(guard, timestamp + std::chrono::milliseconds(timeout),
++                               [this] { return !received_packets.empty() || closed; }) ||
++        received_packets.empty()) {
++        return {-1, Errno::TIMEDOUT};
++    }
++    return ReceivePacket(flags, message, addr, message.size());
+ }
+ 
+ std::pair<s32, Errno> ProxySocket::ReceivePacket(int flags, std::span<u8> message, SockAddrIn* addr,
+@@ -239,7 +257,11 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
+ 
+ Errno ProxySocket::Close() {
+     fd = INVALID_SOCKET;
+-    closed = true;
++    {
++        std::lock_guard guard(packets_mutex);
++        closed = true;
++    }
++    packets_cv.notify_all(); // a receive waiting on it ends
+ 
+     return Errno::SUCCESS;
+ }
+diff --git a/src/core/internal_network/socket_proxy.h b/src/core/internal_network/socket_proxy.h
+index 0a564fcfff..5e89b66750 100644
+--- a/src/core/internal_network/socket_proxy.h
++++ b/src/core/internal_network/socket_proxy.h
+@@ -5,6 +5,8 @@
+ 
+ #pragma once
+ 
++#include <chrono>
++#include <condition_variable>
+ #include <mutex>
+ #include <span>
+ #include <vector>
+@@ -23,6 +25,11 @@ public:
+ 
+     void HandleProxyPacket(const ProxyPacket& packet) override;
+ 
++    bool IsProxy() const override {
++        return true;
++    }
++    bool ProxyReadable() override;
++
+     Errno Initialize(Domain domain, Type type, Protocol socket_protocol) override;
+ 
+     Errno Close() override;
+@@ -92,6 +99,11 @@ private:
+     Protocol protocol;
+ 
+     std::mutex packets_mutex;
++    std::condition_variable packets_cv; ///< a packet arrived (blocking receives wait on it instead of spinning)
+ };
+ 
++/// kart-recomp: a counter of packets that arrived on any room socket, and a wait for the next one (Poll over room sockets).
++u64 ProxyActivity();
++void WaitProxyActivity(u64 seen, std::chrono::milliseconds at_most);
++
+ } // namespace Network
+diff --git a/src/core/internal_network/sockets.h b/src/core/internal_network/sockets.h
+index 95b0f86c60..8bcfa78115 100644
+--- a/src/core/internal_network/sockets.h
++++ b/src/core/internal_network/sockets.h
+@@ -37,6 +37,15 @@ public:
+     explicit SocketBase(SOCKET fd_) : fd{fd_} {}
+     virtual ~SocketBase() = default;
+ 
++    /// kart-recomp: a socket carried by the multiplayer room (no host socket behind it), and whether it has a packet to read.
++    /// Poll waits for those itself: the host's poll cannot see them.
++    virtual bool IsProxy() const {
++        return false;
++    }
++    virtual bool ProxyReadable() {
++        return false;
++    }
++
+     YUZU_NON_COPYABLE(SocketBase);
+     YUZU_NON_MOVEABLE(SocketBase);
+ 
 diff --git a/src/core/loader/deconstructed_rom_directory.cpp b/src/core/loader/deconstructed_rom_directory.cpp
 index c9ca95710f..04be58fdc4 100644
 --- a/src/core/loader/deconstructed_rom_directory.cpp
@@ -20623,6 +20840,258 @@ index 0000000000..0ee9d49577
 +    TestCancel();
 +    assert(blocks.load() == unblocks.load());
 +    std::printf("sync_arbiter: all tests passed (%d blocks)\n", blocks.load());
++    return 0;
++}
+diff --git a/src/network/CMakeLists.txt b/src/network/CMakeLists.txt
+index 24b752ccc5..39bf543d81 100644
+--- a/src/network/CMakeLists.txt
++++ b/src/network/CMakeLists.txt
+@@ -31,3 +31,7 @@ endif()
+ if (PLATFORM_SUN)
+     target_link_libraries(network PRIVATE socket nsl)
+ endif()
++
++# kart-recomp: round-trip time of game packets through a room (a check for the room's latency).
++add_executable(kartrecomp-room-latency tools/room_latency.cpp)
++target_link_libraries(kartrecomp-room-latency PRIVATE network common enet::enet)
+diff --git a/src/network/room.cpp b/src/network/room.cpp
+index a85414103c..e3a402caf7 100644
+--- a/src/network/room.cpp
++++ b/src/network/room.cpp
+@@ -238,9 +238,13 @@ public:
+ // RoomImpl
+ void Room::RoomImpl::StartLoop() {
+     room_thread.emplace([&](std::stop_token stoken) {
++        // kart-recomp: 1 ms when idle (was 5), none while events keep coming: a relayed packet goes on within about a millisecond.
++        int wait_ms = 1;
+         while (state != State::Closed) {
+             ENetEvent event;
+-            if (enet_host_service(server, &event, 5) > 0) {
++            const int got = enet_host_service(server, &event, wait_ms);
++            wait_ms = got > 0 ? 0 : 1;
++            if (got > 0) {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
+                     switch (event.packet->data[0]) {
+@@ -279,7 +283,11 @@ void Room::RoomImpl::StartLoop() {
+                     HandleClientDisconnection(event.peer);
+                     break;
+                 case ENET_EVENT_TYPE_NONE:
++                    break;
+                 case ENET_EVENT_TYPE_CONNECT:
++                    // kart-recomp: no throttle drops of unreliable game traffic when a member's round trip rises for a moment.
++                    enet_peer_throttle_configure(event.peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
++                                                 ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
+                     break;
+                 }
+             }
+@@ -832,15 +840,19 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+     in_packet.Read(remote_ip);          // IP
+     in_packet.IgnoreBytes(sizeof(u16)); // Port
+ 
+-    in_packet.IgnoreBytes(sizeof(u8)); // Protocol
++    u8 protocol;
++    in_packet.Read(protocol); // Protocol
+ 
+     bool broadcast;
+     in_packet.Read(broadcast); // Broadcast
+ 
+     Packet out_packet;
+     out_packet.Append(event->packet->data, event->packet->dataLength);
+-    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
+-                                                 ENET_PACKET_FLAG_RELIABLE);
++    // kart-recomp: a game's UDP datagrams are relayed unsequenced, whatever the sender used (another emulator's member may send
++    // them reliable): the hop to each receiver - often the slow Wi-Fi one - never stalls behind a resent packet.
++    ENetPacket* enet_packet = enet_packet_create(
++        out_packet.GetData(), out_packet.GetDataSize(),
++        protocol == static_cast<u8>(Protocol::UDP) ? ENET_PACKET_FLAG_UNSEQUENCED : ENET_PACKET_FLAG_RELIABLE);
+ 
+     const auto& destination_address = remote_ip;
+     if (broadcast) { // Send the data to everyone except the sender
+diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
+index 4c3d8f341f..9f228817d5 100644
+--- a/src/network/room_member.cpp
++++ b/src/network/room_member.cpp
+@@ -60,7 +60,9 @@ public:
+     /// Thread that receives and dispatches network packets
+     std::optional<std::jthread> loop_thread;
+     std::mutex send_list_mutex;  ///< Mutex that controls access to the `send_list` variable.
+-    std::vector<Packet> send_list; ///< A list that stores all packets to send the async
++    /// Packets to send from the loop thread, each with its ENet flags (kart-recomp: game traffic over UDP goes unsequenced -
++    /// a lost packet on Wi-Fi no longer holds back every later one until it is resent).
++    std::vector<std::pair<Packet, u32>> send_list;
+ 
+     template <typename T>
+     using CallbackSet = std::set<CallbackHandle<T>>;
+@@ -89,7 +91,7 @@ public:
+      * Sends data to the room. It will be send on channel 0 with flag RELIABLE
+      * @param packet The data to send
+      */
+-    void Send(Packet&& packet);
++    void Send(Packet&& packet, u32 flags = ENET_PACKET_FLAG_RELIABLE);
+ 
+     /**
+      * Sends a request to the server, asking for permission to join a room with the specified
+@@ -161,11 +163,16 @@ public:
+ // RoomMemberImpl
+ void RoomMember::RoomMemberImpl::StartLoop() {
+     loop_thread.emplace([&](std::stop_token stoken) {
+-        // Receive packets while the connection is open
++        // Receive packets while the connection is open.
++        // kart-recomp: wait at most 1 ms (it was 5) when idle and not at all while events keep coming, so a received packet is
++        // handled and a queued one sent within about a millisecond (each hop through the room used to add up to 5 ms).
++        int wait_ms = 1;
+         while (IsConnected()) {
+             std::lock_guard lock(network_mutex);
+             ENetEvent event;
+-            if (enet_host_service(client, &event, 5) > 0) {
++            const int got = enet_host_service(client, &event, wait_ms);
++            wait_ms = got > 0 ? 0 : 1;
++            if (got > 0) {
+                 switch (event.type) {
+                 case ENET_EVENT_TYPE_RECEIVE:
+                     switch (event.packet->data[0]) {
+@@ -256,25 +263,24 @@ void RoomMember::RoomMemberImpl::StartLoop() {
+                     break;
+                 }
+             }
+-            std::vector<Packet> packets;
++            std::vector<std::pair<Packet, u32>> packets;
+             {
+                 std::lock_guard send_lock(send_list_mutex);
+                 packets.swap(send_list);
+             }
+-            for (auto const& packet : packets) {
+-                ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(),
+-                                                            ENET_PACKET_FLAG_RELIABLE);
++            for (auto const& [packet, flags] : packets) {
++                ENetPacket* enetPacket = enet_packet_create(packet.GetData(), packet.GetDataSize(), flags);
+                 enet_peer_send(server, 0, enetPacket);
+             }
+-            enet_host_flush(client);
++            if (!packets.empty()) enet_host_flush(client);
+         }
+         Disconnect();
+     });
+ }
+ 
+-void RoomMember::RoomMemberImpl::Send(Packet&& packet) {
++void RoomMember::RoomMemberImpl::Send(Packet&& packet, u32 flags) {
+     std::lock_guard lock(send_list_mutex);
+-    send_list.push_back(std::move(packet));
++    send_list.emplace_back(std::move(packet), flags);
+ }
+ 
+ void RoomMember::RoomMemberImpl::SendJoinRequest(const std::string& nickname_,
+@@ -605,6 +611,10 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
+     ENetEvent event{};
+     int net = enet_host_service(room_member_impl->client, &event, ConnectionTimeoutMs);
+     if (net > 0 && event.type == ENET_EVENT_TYPE_CONNECT) {
++        // kart-recomp: ENet's packet throttle drops unreliable packets when the round trip rises for a moment; game traffic
++        // should rather arrive late than not at all.
++        enet_peer_throttle_configure(room_member_impl->server, ENET_PEER_PACKET_THROTTLE_INTERVAL,
++                                     ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
+         room_member_impl->nickname = nick;
+         room_member_impl->StartLoop();
+         room_member_impl->SendJoinRequest(nick, preferred_fake_ip, password, token);
+@@ -636,7 +646,10 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
+     packet.Write(proxy_packet.broadcast);
+     packet.Write(proxy_packet.data);
+ 
+-    room_member_impl->Send(std::move(packet));
++    // kart-recomp: a game's UDP datagram is unreliable on the real network too: unsequenced, so it never waits behind a resent
++    // packet. TCP keeps ENet's reliable ordered delivery.
++    room_member_impl->Send(std::move(packet), proxy_packet.protocol == Protocol::UDP ? ENET_PACKET_FLAG_UNSEQUENCED
++                                                                                      : ENET_PACKET_FLAG_RELIABLE);
+ }
+ 
+ void RoomMember::SendLdnPacket(const LDNPacket& ldn_packet) {
+diff --git a/src/network/tools/room_latency.cpp b/src/network/tools/room_latency.cpp
+new file mode 100644
+index 0000000000..7c95a9160f
+--- /dev/null
++++ b/src/network/tools/room_latency.cpp
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: measures the round trip of game-style UDP packets through a multiplayer room (host + two members in one process,
++// over the loopback): member A sends to member B through the room, B answers at once. Usage: kartrecomp-room-latency [pings]
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
++#include <vector>
++
++#include "network/network.h"
++#include "network/room.h"
++#include "network/room_member.h"
++
++using namespace std::chrono;
++
++int main(int argc, char** argv) {
++    const int pings = argc > 1 ? std::atoi(argv[1]) : 300;
++    if (!Network::Init()) return 1;
++    auto room = Network::GetRoom().lock();
++    if (!room->Create("latency", "", "127.0.0.1", 24990, "", 8)) {
++        std::puts("could not open the room");
++        return 1;
++    }
++    Network::RoomMember a, b;
++    a.Join("MemberA", "127.0.0.1", 24990);
++    b.Join("MemberB", "127.0.0.1", 24990);
++    for (int i = 0; i < 300 && !(a.IsConnected() && b.IsConnected()); ++i) std::this_thread::sleep_for(milliseconds(10));
++    if (!a.IsConnected() || !b.IsConnected()) {
++        std::puts("members did not join");
++        return 1;
++    }
++    std::this_thread::sleep_for(milliseconds(200));
++    const auto ip_a = a.GetFakeIpAddress(), ip_b = b.GetFakeIpAddress();
++
++    auto make = [](const Network::IPv4Address& from, const Network::IPv4Address& to, u32 seq) {
++        Network::ProxyPacket p{};
++        p.local_endpoint.family = Network::Domain::INET;
++        p.local_endpoint.ip = from;
++        p.local_endpoint.portno = 4000;
++        p.remote_endpoint.family = Network::Domain::INET;
++        p.remote_endpoint.ip = to;
++        p.remote_endpoint.portno = 4000;
++        p.protocol = Network::Protocol::UDP;
++        p.broadcast = false;
++        p.data.resize(200); // a typical game datagram
++        std::memcpy(p.data.data(), &seq, 4);
++        return p;
++    };
++    // B answers each packet at once.
++    auto hb = b.BindOnProxyPacketReceived([&](const Network::ProxyPacket& p) {
++        u32 seq;
++        std::memcpy(&seq, p.data.data(), 4);
++        b.SendProxyPacket(make(ip_b, ip_a, seq));
++    });
++    std::atomic<u32> got{~0u};
++    auto ha = a.BindOnProxyPacketReceived([&](const Network::ProxyPacket& p) {
++        u32 seq;
++        std::memcpy(&seq, p.data.data(), 4);
++        got = seq;
++    });
++    std::vector<double> rtt;
++    for (int i = 0; i < pings; ++i) {
++        const auto t0 = steady_clock::now();
++        a.SendProxyPacket(make(ip_a, ip_b, static_cast<u32>(i)));
++        while (got.load() != static_cast<u32>(i) && steady_clock::now() - t0 < seconds(1)) std::this_thread::yield();
++        rtt.push_back(duration<double, std::milli>(steady_clock::now() - t0).count());
++        std::this_thread::sleep_for(milliseconds(16)); // one game frame between pings
++    }
++    std::sort(rtt.begin(), rtt.end());
++    const auto at = [&](double q) { return rtt[std::min(rtt.size() - 1, static_cast<size_t>(q * rtt.size()))]; };
++    std::printf("round trip through the room (%d pings): median %.2f ms, 90%% %.2f ms, 99%% %.2f ms, max %.2f ms\n", pings, at(0.5),
++                at(0.9), at(0.99), rtt.back());
++    a.Unbind(ha);
++    b.Unbind(hb);
++    a.Leave();
++    b.Leave();
++    std::this_thread::sleep_for(milliseconds(100));
++    Network::Shutdown();
 +    return 0;
 +}
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
