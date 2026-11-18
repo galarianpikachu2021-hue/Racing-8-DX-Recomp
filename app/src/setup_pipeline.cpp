@@ -65,6 +65,13 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         if (in.decrypted()) args = {"--exefs", layout.decryptedExefs(), "--out", layout.exportDir(), "--progress-fd", "1"};
         for (const QString& p : in.patches) args << "--patch" << p;
         if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond"; // --fast-entry (two functions per block) measured no gain and 9% bigger modules: off
+        // 3.0.4 and 4.0.1 are built with block hooks: CTGP DX's extra cups are host hooks on game blocks
+        // (core/arm/recomp/kart_hook_trace.cpp, per-build addresses); without them the F10 "Extra cup" choice did nothing (issue #28).
+        if (updateName == QLatin1String("3.0.4") || updateName == QLatin1String("4.0.1")) {
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("SUYU_RECOMP_BLOCK_HOOKS"), QStringLiteral("1"));
+            ex.setProcessEnvironment(env);
+        }
         ex.start(paths.exporter, args);
         if (!ex.waitForStarted()) return {false, QCoreApplication::translate("Messages", "Cannot start the exporter (%1).").arg(paths.exporter)};
         while (!ex.waitForFinished(200)) {

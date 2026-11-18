@@ -437,6 +437,27 @@ index 0000000000..7d4a017150
 +}
 +
 +} // namespace KartCodePatches
+diff --git a/src/common/kart_data_path.h b/src/common/kart_data_path.h
+new file mode 100644
+index 0000000000..5d285fee33
+--- /dev/null
++++ b/src/common/kart_data_path.h
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: files the launcher and the engine share (extra_cups.txt, the chosen extra_cup.txt) live in the game's data folder.
++// An installed engine (AppImage) runs in its own, read-only folder, so the working directory is not that folder: the engine
++// publishes it as KARTRECOMP_DATA_DIR at start (suyu_cmd/suyu.cpp); without it (a game folder run), the working directory.
++#pragma once
++#include <cstdlib>
++#include <string>
++
++inline std::string KartDataFile(const char* name) {
++    const char* dir = std::getenv("KARTRECOMP_DATA_DIR");
++    if (!dir || !*dir) return name;
++    std::string out = dir;
++    if (out.back() != '/' && out.back() != '\\') out += '/';
++    return out + name;
++}
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
 index 0000000000..032850d7a5
@@ -1865,11 +1886,12 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..4287c726df
+index 0000000000..5ae317f244
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,519 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
++#include "common/kart_data_path.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
 +
 +#include <atomic>
@@ -2113,22 +2135,36 @@ index 0000000000..4287c726df
 +// Which game build `main` is (first 8 bytes of its NSO build ID): every hook address below belongs to one build.
 +u64 g_main_build = 0;
 +constexpr u64 kBuild304 = 0x2452c49bc26ec159ULL; // update 3.0.4
++constexpr u64 kBuild401 = 0x158c0c7399aabd7bULL; // update 4.0.1
 +
-+// 4.0.1 has no game hooks yet. Calls inside main never come back to the host dispatcher in the 4.0.1 build (direct and indirect
-+// calls are resolved in the generated code), so host hooks there would never run; game changes for 4.0.1 have to be made when the
-+// game is recompiled. See docs/FRAMERATE.md ("60 fps split-screen") for the one worked out so far.
++/// The game addresses the hooks use (offsets in main), per build. Calls inside main only come back to the host when the game was
++/// built with block hooks (SUYU_RECOMP_BLOCK_HOOKS=1 at export: a hook check at each block); Setup does that for the builds listed
++/// here. 4.0.1's were found from 3.0.4's with tools/recomp/port_hooks.py (masked instruction match, 24/24, unique; the struct offsets
++/// the hooks use - the race list at raceinfo+0x143c, the music records - checked identical).
++struct GameAddrs {
++    u64 mods_button, mods_return; ///< main menu Toy-Con case and the handler's return (0: not known for the build)
++    u64 name_getter, name_table_var; ///< course name getter and the static holding the name table
++    u64 cup_screen, gp_list;         ///< cup screen, block after the Grand Prix setup copied the race list
++    u64 set_bgm, bgm_owner, string_pool;
++};
++constexpr GameAddrs kAddrs304{0x4d6234, 0x4d63b4, 0x1acb0, 0x12f5258, 0x4910c8, 0x4f7f7c, 0x7ee84, 0x12f4d98, 0x12f62a8};
++constexpr GameAddrs kAddrs401{0, 0, 0x1b4ac, 0x12fa258, 0x494598, 0x4fb648, 0x7fcb8, 0x12f9d98, 0x12fb2a8};
++GameAddrs g_a{};
 +
 +void InstallModHooks(Core::System& system, u64 load_base) {
-+    if (g_main_build != kBuild304) {
++    if (g_main_build == kBuild304) g_a = kAddrs304;
++    else if (g_main_build == kBuild401) g_a = kAddrs401;
++    else {
 +        LOG_INFO(Core_ARM, "main build {:016x}: no game hooks for it", g_main_build);
 +        return;
 +    }
++    LOG_INFO(Core_ARM, "main build {:016x}: game hooks installed (they run when the game was built with block hooks)", g_main_build);
 +    // Main menu (TitleSelect page, handler main+0x4d5d58): event 0x68 is the Toy-Con button, whose case (main+0x4d6234, reached
 +    // through the handler's jump table, so via the dispatcher) sends a "Labo" telemetry event and switches to the Labo page.
 +    // The button is labelled "Mods" now (core/file_sys/kart_text_patch.cpp): leave the handler as for an ignored event
 +    // (main+0x4d63b4 restores the frame and returns) and open the overlay's Mods page instead.
-+    RecompHooks::Install(load_base + 0x4d6234, [load_base](RecompHooks::HookContext& ctx) {
-+        ctx.pc = load_base + 0x4d63b4;
++    if (g_a.mods_button) RecompHooks::Install(load_base + g_a.mods_button, [load_base](RecompHooks::HookContext& ctx) {
++        ctx.pc = load_base + g_a.mods_return;
 +        KartOverlay::OpenModsPage();
 +        LOG_INFO(Core_ARM, "main menu: Mods button");
 +        return true;
@@ -2138,10 +2174,10 @@ index 0000000000..4287c726df
 +        // as the table exists (it is built lazily by the first call of the name getter, main+0x1acb0), before the startup loops that
 +        // derive picture / course paths from the names.
 +        auto done = std::make_shared<std::atomic<bool>>(false);
-+        RecompHooks::Install(load_base + 0x1acb0, [done, load_base](RecompHooks::HookContext& ctx) {
++        RecompHooks::Install(load_base + g_a.name_getter, [done, load_base](RecompHooks::HookContext& ctx) {
 +            if (done->load()) return false;
 +            auto& mem = ctx.system.ApplicationMemory();
-+            const u64 var = mem.Read64(load_base + 0x12f5258); // address of the static that holds the table pointer
++            const u64 var = mem.Read64(load_base + g_a.name_table_var); // address of the static that holds the table pointer
 +            const u64 table = var ? mem.Read64(var) : 0;
 +            if (table < 0x10000) return false; // not built yet
 +            for (u32 id = 3; id <= 16; ++id) {
@@ -2158,19 +2194,19 @@ index 0000000000..4287c726df
 +    // Extra cup from a file: "extra_cup.txt" in the working directory lists up to 4 track folder names ("CT_00 CT_01 CT_02 CT_03",
 +    // CTGP DX's hex numbering). At the next Grand Prix start the spare ids 3..6 are renamed to those folders in the name table and the
 +    // four race-list entries become course indices 2..5. The file is read each time, so it can be changed between races.
-+    RecompHooks::Install(load_base + 0x4910c8, [&system](RecompHooks::HookContext&) {
-+        if (std::ifstream("extra_cups.txt")) StartUiScan(system); // the cup screen is up: find UI.bin while the player chooses
++    RecompHooks::Install(load_base + g_a.cup_screen, [&system](RecompHooks::HookContext&) {
++        if (std::ifstream(KartDataFile("extra_cups.txt"))) StartUiScan(system); // the cup screen is up: find UI.bin while the player chooses
 +        return false;
 +    });
-+    RecompHooks::Install(load_base + 0x4f7f7c, [load_base](RecompHooks::HookContext& ctx) {
-+        std::ifstream f("extra_cup.txt");
++    RecompHooks::Install(load_base + g_a.gp_list, [load_base](RecompHooks::HookContext& ctx) {
++        std::ifstream f(KartDataFile("extra_cup.txt"));
 +        std::istringstream from_env{std::getenv("KARTRECOMP_EXTRA_CUP") ? std::getenv("KARTRECOMP_EXTRA_CUP") : ""}; // tests
 +        std::istream& in = f ? static_cast<std::istream&>(f) : static_cast<std::istream&>(from_env);
 +        std::vector<std::string> tracks;
 +        for (std::string t; in >> t && tracks.size() < 4;) tracks.push_back(t);
 +        if (tracks.empty()) return false;
 +        auto& mem = ctx.system.ApplicationMemory();
-+        const u64 var = mem.Read64(load_base + 0x12f5258);
++        const u64 var = mem.Read64(load_base + g_a.name_table_var);
 +        const u64 table = var ? mem.Read64(var) : 0;
 +        const u64 raceinfo = mem.Read64(ctx.x[31]);
 +        if (table < 0x10000 || raceinfo < 0x10000) return false;
@@ -2198,7 +2234,7 @@ index 0000000000..4287c726df
 +    // ([db+0x78], pool-relative label offsets: +0 = "_N" label, +0x14 = "_F" (final lap) label). The spare indices 2..5 have empty labels,
 +    // so no race music starts. Before the function reads its record, write the extra cup's labels (pBGM_CT_xx_N / _F, CTGP DX's stream names)
 +    // into the zero bytes inside the spare records (+6..+0x13) and point the record at them.
-+    RecompHooks::Install(load_base + 0x7ee84, [load_base](RecompHooks::HookContext& ctx) {
++    RecompHooks::Install(load_base + g_a.set_bgm, [load_base](RecompHooks::HookContext& ctx) {
 +        const u32 idx = static_cast<u32>(ctx.x[1]);
 +        auto& mem = ctx.system.ApplicationMemory();
 +        if (idx < 2 || idx > 5) {
@@ -2211,11 +2247,11 @@ index 0000000000..4287c726df
 +            if (idx - 2 >= g_cup_tracks.size()) return false;
 +            track = g_cup_tracks[idx - 2];
 +        }
-+        const u64 g = mem.Read64(load_base + 0x12f4d98);
++        const u64 g = mem.Read64(load_base + g_a.bgm_owner);
 +        const u64 o = g ? mem.Read64(g) : 0;
 +        const u64 db = o ? mem.Read64(o + 0xa0) : 0;
 +        const u64 recs = db ? mem.Read64(db + 0x78) : 0;
-+        const u64 pool_var = mem.Read64(load_base + 0x12f62a8);
++        const u64 pool_var = mem.Read64(load_base + g_a.string_pool);
 +        const u64 pool = pool_var ? mem.Read64(pool_var) : 0;
 +        if (!recs || !pool) return false;
 +        // Scratch for the two label strings: the unused spare records 6..15 (320 bytes), 64 bytes per track slot.
@@ -2233,14 +2269,14 @@ index 0000000000..4287c726df
 +        // The per-course BGM database used by main+0x7ee84 (SetBgm(controller, course index)): 32-byte records at [db+0x78], count u16 at
 +        // [db+0xd4], first dword = offset of the label in the string pool [*[GOT 0x12f62a8]]. Log it the first time it is used.
 +        auto once = std::make_shared<std::atomic<bool>>(false);
-+        RecompHooks::Install(load_base + 0x7ee84, [once, load_base](RecompHooks::HookContext& ctx) {
++        RecompHooks::Install(load_base + g_a.set_bgm, [once, load_base](RecompHooks::HookContext& ctx) {
 +            if (once->exchange(true)) return false;
 +            auto& mem = ctx.system.ApplicationMemory();
-+            const u64 g = mem.Read64(load_base + 0x12f4d98);
++            const u64 g = mem.Read64(load_base + g_a.bgm_owner);
 +            const u64 o = g ? mem.Read64(g) : 0;
 +            const u64 db = o ? mem.Read64(o + 0xa0) : 0;
 +            const u64 recs = db ? mem.Read64(db + 0x78) : 0;
-+            const u64 pool_var = mem.Read64(load_base + 0x12f62a8);
++            const u64 pool_var = mem.Read64(load_base + g_a.string_pool);
 +            const u64 pool = pool_var ? mem.Read64(pool_var) : 0;
 +            LOG_INFO(Core_ARM, "bgm probe: db={:#x} recs={:#x} count={} pool={:#x} idx={}", db, recs, db ? mem.Read16(db + 0xd4) : 0, pool,
 +                     static_cast<u32>(ctx.x[1]));
@@ -2263,7 +2299,7 @@ index 0000000000..4287c726df
 +    auto courses = std::make_shared<std::vector<u32>>();
 +    std::istringstream list{spec};
 +    for (std::string item; std::getline(list, item, ',');) courses->push_back(static_cast<u32>(std::strtoul(item.c_str(), nullptr, 0)));
-+    RecompHooks::Install(load_base + 0x4f7f7c, [courses](RecompHooks::HookContext& ctx) {
++    RecompHooks::Install(load_base + g_a.gp_list, [courses](RecompHooks::HookContext& ctx) {
 +        auto& mem = ctx.system.ApplicationMemory();
 +        const u64 raceinfo = mem.Read64(ctx.x[31]);
 +        if (raceinfo < 0x10000) return false;

@@ -14279,12 +14279,13 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..6b5c910cdb
+index 0000000000..8606f3b0d5
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,661 @@
+@@ -0,0 +1,662 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
++#include "common/kart_data_path.h"
 +#include "suyu_cmd/native_gpu/overlay_menu.h"
 +
 +#include <algorithm>
@@ -14366,7 +14367,7 @@ index 0000000000..6b5c910cdb
 +    // Extra cups (CTGP DX's, added without replacing any course): "extra_cups.txt" in the game folder lists them, one per line as
 +    // "Cup name|CT_00 CT_01 CT_02 CT_03". Choosing one writes extra_cup.txt, which the Grand Prix start hook reads (see docs/CTGP.md).
 +    items[kExtraCup] = {"Extra cup (next Grand Prix)", {"Off"}, 0, false, "none installed"};
-+    if (std::ifstream list("extra_cups.txt"); list) {
++    if (std::ifstream list(KartDataFile("extra_cups.txt")); list) {
 +        for (std::string line; std::getline(list, line);) {
 +            const auto bar = line.find('|');
 +            if (bar == std::string::npos || bar == 0) continue;
@@ -14378,7 +14379,7 @@ index 0000000000..6b5c910cdb
 +            items[kExtraCup].note = "press A in the cup screen as usual";
 +        }
 +    }
-+    std::remove("extra_cup.txt"); // never start with an old choice
++    std::remove(KartDataFile("extra_cup.txt").c_str()); // never start with an old choice
 +    items[kControls] = {"Controls", {}, 0, true, "every button of each player; rebind, swap A/B and X/Y"};
 +    items[kMods] = {"Mods", {}, 0, true, ""};
 +    items[kQuit] = {"Quit game", {}, 0, true, "closes the game (progress is saved by the game as usual)"};
@@ -14465,8 +14466,8 @@ index 0000000000..6b5c910cdb
 +    case kFps: live.fps_counter = v != 0; return kChangeOther;
 +    case kExtraCup: {
 +        if (v <= 0 || static_cast<size_t>(v) > extra_cups.size()) {
-+            std::remove("extra_cup.txt");
-+        } else if (std::ofstream out("extra_cup.txt", std::ios::trunc); out) {
++            std::remove(KartDataFile("extra_cup.txt").c_str());
++        } else if (std::ofstream out(KartDataFile("extra_cup.txt"), std::ios::trunc); out) {
 +            out << extra_cups[static_cast<size_t>(v - 1)] << '\n';
 +        }
 +        return 0;
@@ -24811,7 +24812,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..9e5010b1e3 100644
+index 03f738eb63..b49dcd1eec 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -25670,7 +25671,7 @@ index 03f738eb63..9e5010b1e3 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1966,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1966,24 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -25679,6 +25680,14 @@ index 03f738eb63..9e5010b1e3 100644
 +        // KARTRECOMP_MODS_DIR: a different mods folder (tests); KARTRECOMP_NO_MODS: none at all.
 +        const char* app_name = std::getenv("KARTRECOMP_APP_NAME");
 +        const auto mods_base = app_name && *app_name ? KrPlatform::DataDirectory("XDG_DATA_HOME") / app_name : exe_dir;
++        // The data folder for files shared with the launcher (common/kart_data_path.h).
++        if (app_name && *app_name && !std::getenv("KARTRECOMP_DATA_DIR")) {
++#ifdef _WIN32
++            _putenv_s("KARTRECOMP_DATA_DIR", mods_base.string().c_str());
++#else
++            setenv("KARTRECOMP_DATA_DIR", mods_base.string().c_str(), 1);
++#endif
++        }
 +        const auto local_mods = std::getenv("KARTRECOMP_MODS_DIR")
 +                                    ? std::filesystem::path(std::getenv("KARTRECOMP_MODS_DIR"))
 +                                    : mods_base / (std::getenv("KARTRECOMP_NO_MODS") ? "mods-none" : "mods");
@@ -25688,7 +25697,7 @@ index 03f738eb63..9e5010b1e3 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1732,7 +1990,11 @@ int main(int argc, char** argv) {
+@@ -1732,7 +1998,11 @@ int main(int argc, char** argv) {
      // still reports keys that are present but unusable, handled further down.
      const std::filesystem::path suyu_exe =
          installed_nand.empty() ? std::filesystem::path{} : RecordedSuyuExecutable(export_user_root);
@@ -25701,7 +25710,7 @@ index 03f738eb63..9e5010b1e3 100644
          const auto keys_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir);
          std::error_code keys_ec;
          // The same two names KeyManager loads production keys from. There is no
-@@ -1783,7 +2045,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +2053,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -25723,7 +25732,7 @@ index 03f738eb63..9e5010b1e3 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +2072,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2080,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -25752,7 +25761,7 @@ index 03f738eb63..9e5010b1e3 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2122,34 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2130,34 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25787,7 +25796,7 @@ index 03f738eb63..9e5010b1e3 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,8 +2182,45 @@ int main(int argc, char** argv) {
+@@ -1857,8 +2190,45 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25833,7 +25842,7 @@ index 03f738eb63..9e5010b1e3 100644
      if (static_cast<u32>(load_parameters.applet_id)) {
          // code below based off of suyu/main.cpp : GMainWindow::OnHomeMenu()
          // Inline minimal mapping (AppletIdToProgramId is in an anonymous namespace)
-@@ -1925,6 +2287,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2295,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25843,7 +25852,7 @@ index 03f738eb63..9e5010b1e3 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2043,23 +2408,51 @@ int main(int argc, char** argv) {
+@@ -2043,23 +2416,51 @@ int main(int argc, char** argv) {
      };
  #endif
  
@@ -25904,7 +25913,7 @@ index 03f738eb63..9e5010b1e3 100644
      system.GetCpuManager().OnGpuReady();
  
      // A game export is launched over and over by a player, always for the same
-@@ -2075,7 +2468,7 @@ int main(int argc, char** argv) {
+@@ -2075,7 +2476,7 @@ int main(int argc, char** argv) {
          Settings::values.use_disk_shader_cache.SetValue(false);
      }
  
@@ -25913,7 +25922,7 @@ index 03f738eb63..9e5010b1e3 100644
          // Build the cached shaders on their own thread, as the Qt frontend does from its
          // emulation thread. The progress callback runs on the shader workers, so it only
          // records counts; the window belongs to this thread, which keeps it responding and
-@@ -2147,6 +2540,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2548,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25921,7 +25930,7 @@ index 03f738eb63..9e5010b1e3 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2565,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2573,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25952,7 +25961,7 @@ index 03f738eb63..9e5010b1e3 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2606,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2614,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25970,7 +25979,7 @@ index 03f738eb63..9e5010b1e3 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2204,12 +2633,12 @@ int main(int argc, char** argv) {
+@@ -2204,12 +2641,12 @@ int main(int argc, char** argv) {
              }
          }
  #endif
@@ -25986,7 +25995,7 @@ index 03f738eb63..9e5010b1e3 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2665,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2673,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25998,7 +26007,7 @@ index 03f738eb63..9e5010b1e3 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,7 +2677,10 @@ int main(int argc, char** argv) {
+@@ -2243,7 +2685,10 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());
