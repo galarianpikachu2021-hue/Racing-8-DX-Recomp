@@ -24811,7 +24811,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..eda4427649 100644
+index 03f738eb63..9e5010b1e3 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -25056,7 +25056,7 @@ index 03f738eb63..eda4427649 100644
      }
  }
  
-@@ -917,7 +929,274 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +929,276 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -25136,7 +25136,9 @@ index 03f738eb63..eda4427649 100644
 +        }
 +    }
 +    std::fflush(nullptr);
-+    std::exit(0);
++    // _Exit, not exit: every output file is closed by now, and running the static destructors under the game's live threads
++    // crashed (SIGSEGV after the dump of any large file, e.g. a 62 MB course model) - callers then saw a failed dump.
++    std::_Exit(0);
 +}
 +
 +} // namespace
@@ -25331,7 +25333,7 @@ index 03f738eb63..eda4427649 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1257,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1259,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -25349,7 +25351,7 @@ index 03f738eb63..eda4427649 100644
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1292,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1294,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -25365,7 +25367,7 @@ index 03f738eb63..eda4427649 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1316,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1318,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -25383,7 +25385,7 @@ index 03f738eb63..eda4427649 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1039,8 +1333,8 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1335,8 @@ int main(int argc, char** argv) {
                  installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
                  installed_config = installed_root / "config";
  #else
@@ -25394,7 +25396,7 @@ index 03f738eb63..eda4427649 100644
  #endif
              }
              // Coverage gaps are pooled in the installed suyu's user folder, which
-@@ -1091,12 +1385,14 @@ int main(int argc, char** argv) {
+@@ -1091,12 +1387,14 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -25409,7 +25411,7 @@ index 03f738eb63..eda4427649 100644
      bool fullscreen = false;
      bool tas_playback = false;
      std::optional<u32> app_version_override;
-@@ -1116,6 +1412,7 @@ int main(int argc, char** argv) {
+@@ -1116,6 +1414,7 @@ int main(int argc, char** argv) {
          {"game", required_argument, 0, 'g'},
          {"applet-params", optional_argument, 0, 'l'},
          {"multiplayer", required_argument, 0, 'm'},
@@ -25417,7 +25419,7 @@ index 03f738eb63..eda4427649 100644
          {"program", optional_argument, 0, 'p'},
          {"tas", no_argument, 0, 't'},
          {"user", required_argument, 0, 'u'},
-@@ -1126,12 +1423,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1425,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -25432,7 +25434,7 @@ index 03f738eb63..eda4427649 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1456,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1458,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -25442,7 +25444,7 @@ index 03f738eb63..eda4427649 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1195,34 +1496,28 @@ int main(int argc, char** argv) {
+@@ -1195,34 +1498,28 @@ int main(int argc, char** argv) {
                  break;
              }
              case 'm': {
@@ -25493,7 +25495,7 @@ index 03f738eb63..eda4427649 100644
                      return 0;
                  }
                  break;
-@@ -1279,7 +1574,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1576,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -25503,7 +25505,7 @@ index 03f738eb63..eda4427649 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1587,43 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1589,43 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -25548,7 +25550,7 @@ index 03f738eb63..eda4427649 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1709,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1711,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -25565,7 +25567,7 @@ index 03f738eb63..eda4427649 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1763,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1765,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -25660,7 +25662,7 @@ index 03f738eb63..eda4427649 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1930,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1932,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -25668,7 +25670,7 @@ index 03f738eb63..eda4427649 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1964,16 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1966,16 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -25686,7 +25688,7 @@ index 03f738eb63..eda4427649 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1732,7 +1988,11 @@ int main(int argc, char** argv) {
+@@ -1732,7 +1990,11 @@ int main(int argc, char** argv) {
      // still reports keys that are present but unusable, handled further down.
      const std::filesystem::path suyu_exe =
          installed_nand.empty() ? std::filesystem::path{} : RecordedSuyuExecutable(export_user_root);
@@ -25699,7 +25701,7 @@ index 03f738eb63..eda4427649 100644
          const auto keys_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir);
          std::error_code keys_ec;
          // The same two names KeyManager loads production keys from. There is no
-@@ -1783,7 +2043,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +2045,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -25721,7 +25723,7 @@ index 03f738eb63..eda4427649 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +2070,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2072,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -25750,7 +25752,7 @@ index 03f738eb63..eda4427649 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2120,34 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2122,34 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -25785,7 +25787,7 @@ index 03f738eb63..eda4427649 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,8 +2180,45 @@ int main(int argc, char** argv) {
+@@ -1857,8 +2182,45 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -25831,7 +25833,7 @@ index 03f738eb63..eda4427649 100644
      if (static_cast<u32>(load_parameters.applet_id)) {
          // code below based off of suyu/main.cpp : GMainWindow::OnHomeMenu()
          // Inline minimal mapping (AppletIdToProgramId is in an anonymous namespace)
-@@ -1925,6 +2285,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2287,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -25841,7 +25843,7 @@ index 03f738eb63..eda4427649 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2043,23 +2406,51 @@ int main(int argc, char** argv) {
+@@ -2043,23 +2408,51 @@ int main(int argc, char** argv) {
      };
  #endif
  
@@ -25902,7 +25904,7 @@ index 03f738eb63..eda4427649 100644
      system.GetCpuManager().OnGpuReady();
  
      // A game export is launched over and over by a player, always for the same
-@@ -2075,7 +2466,7 @@ int main(int argc, char** argv) {
+@@ -2075,7 +2468,7 @@ int main(int argc, char** argv) {
          Settings::values.use_disk_shader_cache.SetValue(false);
      }
  
@@ -25911,7 +25913,7 @@ index 03f738eb63..eda4427649 100644
          // Build the cached shaders on their own thread, as the Qt frontend does from its
          // emulation thread. The progress callback runs on the shader workers, so it only
          // records counts; the window belongs to this thread, which keeps it responding and
-@@ -2147,6 +2538,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2540,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -25919,7 +25921,7 @@ index 03f738eb63..eda4427649 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2563,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2565,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -25950,7 +25952,7 @@ index 03f738eb63..eda4427649 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2604,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2606,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -25968,7 +25970,7 @@ index 03f738eb63..eda4427649 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2204,12 +2631,12 @@ int main(int argc, char** argv) {
+@@ -2204,12 +2633,12 @@ int main(int argc, char** argv) {
              }
          }
  #endif
@@ -25984,7 +25986,7 @@ index 03f738eb63..eda4427649 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2663,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2665,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -25996,7 +25998,7 @@ index 03f738eb63..eda4427649 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,7 +2675,10 @@ int main(int argc, char** argv) {
+@@ -2243,7 +2677,10 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());

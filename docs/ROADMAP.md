@@ -46,6 +46,13 @@ Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is
   3. **Generation**: an optional Setup step after the build that drives a short scripted pass through every course (as the GP test
      does) to fill both caches before the first real race. Shown with a progress bar; can be skipped.
 
+## Install size (measured 2026-11-18)
+- The game's merged files (4.0.1, update applied) are 12.13 GB = base NSP 7.27 GB + update 4.86 GB: the update replaces almost
+  nothing, so there is no duplicate data to drop. 6.4 GB is `.szs` (already Yaz0-compressed), 1.3 GB audio, 1.1 GB video.
+- zstd (level 12) on a size-weighted sample of 40 files: 1.75 GB -> 1.60 GB (91%). Model files compress well (`.bfres` ~15%),
+  but the big course `.szs` stay at 85-92%. Whole game: about 1.1 GB saved of 12. Not worth a packed format; the useful saving
+  is the Setup option that deletes the build files, and deleting update NSPs that are not the one being played.
+
 ## Later
 - Custom frame rates above 60 (the simulation is tied to 60 Hz; needs game-side patches generated from the user's own game).
 - Mii editor (CharInfo records with correct CRCs in the system save).
