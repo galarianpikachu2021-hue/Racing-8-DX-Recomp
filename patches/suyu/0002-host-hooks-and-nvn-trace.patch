@@ -21017,7 +21017,7 @@ index a85414103c..9f05d7f8b8 100644
      const auto& destination_address = remote_ip;
      if (broadcast) { // Send the data to everyone except the sender
 diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
-index 4c3d8f341f..d1db489282 100644
+index 4c3d8f341f..3d31b75bba 100644
 --- a/src/network/room_member.cpp
 +++ b/src/network/room_member.cpp
 @@ -60,7 +60,9 @@ public:
@@ -21040,7 +21040,28 @@ index 4c3d8f341f..d1db489282 100644
  
      /**
       * Sends a request to the server, asking for permission to join a room with the specified
-@@ -161,11 +163,16 @@ public:
+@@ -158,14 +160,38 @@ public:
+     CallbackHandle<T> Bind(std::function<void(const T&)> callback);
+ };
+ 
++// kart-recomp: game packets through the room, counted and logged every 2 s while there is traffic - to see whether a game stops
++// sending (a long load) when the other side gives up on the connection.
++namespace {
++std::atomic<u64> g_proxy_sent{0}, g_proxy_received{0};
++void LogProxyTraffic() {
++    static auto last = std::chrono::steady_clock::now();
++    static u64 sent_seen = 0, received_seen = 0;
++    const auto now = std::chrono::steady_clock::now();
++    if (now - last < std::chrono::seconds(2)) return;
++    last = now;
++    const u64 s = g_proxy_sent.load(), r = g_proxy_received.load();
++    if (s != sent_seen || r != received_seen || sent_seen + received_seen != 0)
++        LOG_INFO(Network, "room traffic (2 s): {} game packets sent, {} received", s - sent_seen, r - received_seen);
++    sent_seen = s;
++    received_seen = r;
++}
++} // namespace
++
  // RoomMemberImpl
  void RoomMember::RoomMemberImpl::StartLoop() {
      loop_thread.emplace([&](std::stop_token stoken) {
@@ -21055,11 +21076,12 @@ index 4c3d8f341f..d1db489282 100644
 -            if (enet_host_service(client, &event, 5) > 0) {
 +            const int got = enet_host_service(client, &event, wait_ms);
 +            wait_ms = got > 0 ? 0 : 1;
++            LogProxyTraffic();
 +            if (got > 0) {
                  switch (event.type) {
                  case ENET_EVENT_TYPE_RECEIVE:
                      switch (event.packet->data[0]) {
-@@ -256,25 +263,24 @@ void RoomMember::RoomMemberImpl::StartLoop() {
+@@ -256,25 +282,24 @@ void RoomMember::RoomMemberImpl::StartLoop() {
                      break;
                  }
              }
@@ -21091,7 +21113,15 @@ index 4c3d8f341f..d1db489282 100644
  }
  
  void RoomMember::RoomMemberImpl::SendJoinRequest(const std::string& nickname_,
-@@ -605,6 +611,10 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
+@@ -348,6 +373,7 @@ void RoomMember::RoomMemberImpl::HandleJoinPacket(const ENetEvent* event) {
+ }
+ 
+ void RoomMember::RoomMemberImpl::HandleProxyPackets(const ENetEvent* event) {
++    g_proxy_received.fetch_add(1, std::memory_order_relaxed);
+     ProxyPacket proxy_packet{};
+     Packet packet;
+     packet.Append(event->packet->data, event->packet->dataLength);
+@@ -605,6 +631,10 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
      ENetEvent event{};
      int net = enet_host_service(room_member_impl->client, &event, ConnectionTimeoutMs);
      if (net > 0 && event.type == ENET_EVENT_TYPE_CONNECT) {
@@ -21102,11 +21132,12 @@ index 4c3d8f341f..d1db489282 100644
          room_member_impl->nickname = nick;
          room_member_impl->StartLoop();
          room_member_impl->SendJoinRequest(nick, preferred_fake_ip, password, token);
-@@ -636,6 +646,7 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
+@@ -636,6 +666,8 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
      packet.Write(proxy_packet.broadcast);
      packet.Write(proxy_packet.data);
  
 +    // Reliable, as every room client sends it: sending a game's datagrams unsequenced made Eden (Steam Deck) crash on connect.
++    g_proxy_sent.fetch_add(1, std::memory_order_relaxed);
      room_member_impl->Send(std::move(packet));
  }
  
