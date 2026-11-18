@@ -20964,7 +20964,7 @@ index 24b752ccc5..39bf543d81 100644
 +add_executable(kartrecomp-room-latency tools/room_latency.cpp)
 +target_link_libraries(kartrecomp-room-latency PRIVATE network common enet::enet)
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index a85414103c..e3a402caf7 100644
+index a85414103c..9f05d7f8b8 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
 @@ -238,9 +238,13 @@ public:
@@ -20994,7 +20994,7 @@ index a85414103c..e3a402caf7 100644
                      break;
                  }
              }
-@@ -832,15 +840,19 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -832,15 +840,18 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      in_packet.Read(remote_ip);          // IP
      in_packet.IgnoreBytes(sizeof(u16)); // Port
  
@@ -21009,16 +21009,15 @@ index a85414103c..e3a402caf7 100644
      out_packet.Append(event->packet->data, event->packet->dataLength);
 -    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(),
 -                                                 ENET_PACKET_FLAG_RELIABLE);
-+    // kart-recomp: a game's UDP datagrams are relayed unsequenced, whatever the sender used (another emulator's member may send
-+    // them reliable): the hop to each receiver - often the slow Wi-Fi one - never stalls behind a resent packet.
-+    ENetPacket* enet_packet = enet_packet_create(
-+        out_packet.GetData(), out_packet.GetDataSize(),
-+        protocol == static_cast<u8>(Protocol::UDP) ? ENET_PACKET_FLAG_UNSEQUENCED : ENET_PACKET_FLAG_RELIABLE);
++    // Relayed reliable, as every room server does: other emulators' members (Eden on a Steam Deck) crashed when the room sent
++    // them a game's datagrams unsequenced. (`protocol` is kept for diagnostics.)
++    (void)protocol;
++    ENetPacket* enet_packet = enet_packet_create(out_packet.GetData(), out_packet.GetDataSize(), ENET_PACKET_FLAG_RELIABLE);
  
      const auto& destination_address = remote_ip;
      if (broadcast) { // Send the data to everyone except the sender
 diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
-index 4c3d8f341f..9f228817d5 100644
+index 4c3d8f341f..d1db489282 100644
 --- a/src/network/room_member.cpp
 +++ b/src/network/room_member.cpp
 @@ -60,7 +60,9 @@ public:
@@ -21103,18 +21102,14 @@ index 4c3d8f341f..9f228817d5 100644
          room_member_impl->nickname = nick;
          room_member_impl->StartLoop();
          room_member_impl->SendJoinRequest(nick, preferred_fake_ip, password, token);
-@@ -636,7 +646,10 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
+@@ -636,6 +646,7 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
      packet.Write(proxy_packet.broadcast);
      packet.Write(proxy_packet.data);
  
--    room_member_impl->Send(std::move(packet));
-+    // kart-recomp: a game's UDP datagram is unreliable on the real network too: unsequenced, so it never waits behind a resent
-+    // packet. TCP keeps ENet's reliable ordered delivery.
-+    room_member_impl->Send(std::move(packet), proxy_packet.protocol == Protocol::UDP ? ENET_PACKET_FLAG_UNSEQUENCED
-+                                                                                      : ENET_PACKET_FLAG_RELIABLE);
++    // Reliable, as every room client sends it: sending a game's datagrams unsequenced made Eden (Steam Deck) crash on connect.
+     room_member_impl->Send(std::move(packet));
  }
  
- void RoomMember::SendLdnPacket(const LDNPacket& ldn_packet) {
 diff --git a/src/network/tools/room_latency.cpp b/src/network/tools/room_latency.cpp
 new file mode 100644
 index 0000000000..7c95a9160f
