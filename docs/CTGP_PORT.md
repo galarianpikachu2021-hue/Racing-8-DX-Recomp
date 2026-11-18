@@ -105,7 +105,7 @@ Group = the plugin's installer function (nro offset). Site counts include functi
 
 ## Status (2026-11-18)
 
-Working on 3.0.4 (scripted runs; 4.0.1 has every address but is not run yet):
+Working on 3.0.4 and 4.0.1 (scripted runs):
 * Course table, cup table and texts from the user's pack (launcher import, `ctgp_tables.txt` + `CTGPText.msbt`).
 * CTGP's 64 tracks as new course ids 124..187: names, platform tags, pictures, base-course behaviour, music streams
   (`pBGM_CT_xx_*`), course-local MapObj files, per-track SpeedMultiplier, no time limit.
@@ -121,7 +121,7 @@ Known limits / next:
   skips its third page). The other cup pages (VS, Time Trial) have no CTGP paging yet.
 * Menu background / title screen / top menu layouts left out: CTGP's 3.0.3 `mn_Background_00` makes 3.0.4 call
   `nn::os::LockMutex(null)` on a loader thread.
-* Speedometer: `T_SOM_00` is in the HUD (shows the layout's placeholder); needs the local kart pointer (3.0.3 path
-  raceSys+0xf0 -> +0x12c -> +0x68 -> [i] -> +4 -> +0x14; speed field 3.0.3 +0x330 = 64-bit +0x37c, found by matching).
+* Speedometer: done (2026-11-18). Kart = [[[[[raceSys+0x1b0]+0x238]+0xc8]+i*8]+8]+0x28, speed float +0x37c, i = the game's
+  local player byte; set from the lap counter part's update (4.0.1 0x512e1c / 3.0.4 0x50f708) with full-width digits.
 * Music switch / now-playing banner (`L_Sus_00`, `L_MusSwch_00`), CTGP Settings page (title button, page 0x88 in 4.0.1),
   race timer, honk visibility, online (packets, `CTGPDelux010101`): mapped (agent_*.md), not implemented.
