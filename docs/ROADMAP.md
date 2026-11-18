@@ -35,6 +35,16 @@ Status as of v0.2.3 (2026-11). Done items are kept short; open items say what is
 - Windows: frame pacing on some PCs (#14, #20): shader-compile stalls at load, CPU time in the recompiled code.
 - Split-screen with 2+ players drops to about 30 fps on some PCs.
 - Load-time pipeline stalls (about 3 s at startup, 220-400 ms at race load).
+- **Shader preloading and generation** (docket, 2026-11-18; may help load times and the first lap on each course, and keeps a slow load
+  from breaking Wireless Play with a faster player). Today the Vulkan pipeline cache is saved (`vk_pipelines.bin`), but every launch
+  translates the game's shader programs again (~1,750 at load, plus new ones on a course's first frame: a 136 ms frame at a Mount
+  Wario race start). Steps:
+  1. **Translated-shader cache on disk**: NVN program (hash of its code and state) -> SPIR-V plus what the translator recorded, read
+     back at start instead of translating again (per user, made from their own game: nothing ships).
+  2. **Preloading**: remember which programs/pipelines each course used (keys written as you play), and build a course's set in the
+     background while its race loads - or all known ones at start-up.
+  3. **Generation**: an optional Setup step after the build that drives a short scripted pass through every course (as the GP test
+     does) to fill both caches before the first real race. Shown with a progress bar; can be skipped.
 
 ## Later
 - Custom frame rates above 60 (the simulation is tied to 60 Hz; needs game-side patches generated from the user's own game).
