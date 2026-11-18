@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..c0b9402e46
+index 0000000000..cbf8ffa788
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1409 @@
+@@ -0,0 +1,1757 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -1673,6 +1673,8 @@ index 0000000000..c0b9402e46
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
 +#include "core/core.h"
++#include "hid_core/frontend/emulated_controller.h"
++#include "hid_core/hid_core.h"
 +#include "core/hle/kernel/k_process.h"
 +#include "core/hle/kernel/k_process_page_table.h"
 +#include "core/memory.h"
@@ -1720,13 +1722,14 @@ index 0000000000..c0b9402e46
 +            if (c.id != static_cast<int>(courses.size())) return false; // ids must be dense and in order
 +            courses.push_back(std::move(c));
 +        } else if (kind == "music") {
-+            int id = -1, set = -1;
-+            MusicSet m;
-+            ls >> id >> set >> m.song >> m.prefix >> m.artist >> m.unknown >> m.sub;
-+            if (id >= 0 && id < static_cast<int>(courses.size()) && set >= 0 && set < 8) {
++            int id = -1, set = -1, var = -1;
++            MusicRec m;
++            ls >> id >> set >> var >> m.song >> m.prefix >> m.artist >> m.unknown >> m.sub;
++            if (id >= 0 && id < static_cast<int>(courses.size()) && set >= 0 && set < 8 && var >= 0 && var < 3) {
 +                auto& list = courses[static_cast<size_t>(id)].music;
 +                if (list.size() <= static_cast<size_t>(set)) list.resize(static_cast<size_t>(set) + 1);
-+                list[static_cast<size_t>(set)] = m;
++                list[static_cast<size_t>(set)].rec[static_cast<size_t>(var)] = m;
++                list[static_cast<size_t>(set)].has[static_cast<size_t>(var)] = true;
 +            }
 +        } else if (kind == "rows_a_top" || kind == "rows_a_bottom") {
 +            std::string list;
@@ -1955,6 +1958,7 @@ index 0000000000..c0b9402e46
 +
 +/// The music set chosen for a track this session (CTGP's in-race switch, entry + 0x2c), else the F10 default.
 +std::map<int, int> g_music_set;
++void MusicStreamStarted(int variant); // the now-playing banner, below
 +int MusicSetFor(const Course& c) {
 +    if (const auto it = g_music_set.find(c.id); it != g_music_set.end()) return it->second;
 +    const int def = Settings_().music;
@@ -2168,6 +2172,11 @@ index 0000000000..c0b9402e46
 +                suffix = s;
 +                break;
 +            }
++        // the now-playing banner shows the lap variant's record (plugin S[5]+0: 0 _N, 1 _LAP2, 2 _F)
++        if (std::getenv("KARTRECOMP_CTGP_MUSIC_LOG")) LOG_INFO(Core_ARM, "CTGP: course stream {} (set {})", name, MusicSetFor(*c));
++        if (suffix == "_N.bfstm") MusicStreamStarted(0);
++        else if (suffix == "_LAP2.bfstm") MusicStreamStarted(1);
++        else if (suffix == "_F.bfstm") MusicStreamStarted(2);
 +        // Author's Pick: the track's _B stream when it has one (plugin: entry + 0x2c == 1)
 +        if (MusicSetFor(*c) == 1 && HostFileExists("Audio/Resource/Stream/pBGM_" + c->folder + "_B" + suffix))
 +            alt = kStream + "pBGM_" + c->folder + "_B" + suffix;
@@ -2227,10 +2236,15 @@ index 0000000000..c0b9402e46
 +    if (Settings_().music == 2) ctx.x[1] = 0;
 +    return false;
 +}
++bool MusicPartsCreate(RecompHooks::HookContext& ctx, bool timer); // music switch and banner, below
++
 +bool H_RaceTimer(RecompHooks::HookContext& ctx, const Site&) {
 +    // Race HUD builder, on "cmp w8, #2" (race mode 2 = time trial gets the timer part): with CTGP's Race Timer on, every race but
 +    // the modes the game already excludes here gets it (plugin FUN_15c44 at 0x57ee90; its solo check is not ported yet).
-+    if (Settings_().timer != 1) return false;
++    // CTGP's two HUD parts (music switch, now-playing banner) are created here first (plugin FUN_15a2c).
++    const bool timer = Settings_().timer == 1;
++    if (MusicPartsCreate(ctx, timer)) return true;
++    if (!timer) return false;
 +    ctx.pc += 8; // skip the compare and its "b.ne": create the timer
 +    return true;
 +}
@@ -2728,8 +2742,12 @@ index 0000000000..c0b9402e46
 +    return speed;
 +}
 +
++bool MusicTick(RecompHooks::HookContext& ctx);
++
 +bool H_SpeedoUpdate(RecompHooks::HookContext& ctx, const Site&) {
-+    // Entry of the lap-counter part update (plugin FUN_15c94 at 0x55d32c): T_SOM_00 = int(|speed| * 10).
++    // Entry of the lap-counter part update (plugin FUN_15c94 at 0x55d32c): T_SOM_00 = int(|speed| * 10). It runs every race frame,
++    // so CTGP's music switch and banner are driven from here too (one of the two per frame).
++    if (MusicTick(ctx)) return true;
 +    Speedo sp;
 +    {
 +        std::scoped_lock lk{g_speedo_lock};
@@ -2890,6 +2908,336 @@ index 0000000000..c0b9402e46
 +    const char* name;
 +    Handler fn;
 +};
++// ---- music switch and now-playing banner (plugin classes FUN_36d1c "L_MusSwch_00" and FUN_3746c "L_Sus_00") ---------------------
++// CTGP's race view layout has two parts the game does not know. They are created here as plain game parts (base part + layout
++// object, the classes every HUD part derives from; the plugin's own classes only add an init and an update, which are done from the
++// hooks): the switch shows the music set ("CTGPDX OST" / "Author's Pick") during the race intro and L / R changes it; the banner
++// shows the song (prefix, name, author, sub name, lap variant) when a course stream starts.
++struct MusicHud {
++    u64 sw = 0, banner = 0;     ///< part objects (+0x30 = layout object)
++    u64 sw_all = 0, sw_text = 0;
++    u64 b_all = 0;
++    std::array<u64, 5> b_text{}; ///< T_SongPrefix_00, T_SongName_00, T_SongAuthor_00, T_SubName_00, T_LapVariant_00
++    std::array<u64, 3> sw_group{}, b_group{};
++    int sw_state = 0;            ///< 0 waiting for the intro, 1 shown, 2 done
++    int pending_variant = -1;    ///< a course stream just started (set by the music path hook)
++    bool banner_shown = false;
++    bool prev_lr = false;
++    int huds = 0;                ///< race views built in this burst (more than one: split-screen, no music parts driven)
++    std::chrono::steady_clock::time_point built{}, banner_at{};
++};
++std::mutex g_mh_lock;
++MusicHud g_mh;
++
++struct MusicFns {
++    u64 base_ctor, layout_init, make_group, message, se, anim_bind, timer_vt_got, ret;
++};
++constexpr MusicFns kMusic304{0x730a98, 0x8b9e28, 0x8bae28, 0x8ba128, 0x8b6b0, 0x8b96f8, 0x1304e48, 0x730ab8};
++constexpr MusicFns kMusic401{0x723cf4, 0x8ad888, 0x8ae888, 0x8adb88, 0x8c608, 0x8ad158, 0x1309e70, 0x723d14};
++const MusicFns& Mf() {
++    return g_is304 ? kMusic304 : kMusic401;
++}
++
++void MusicStreamStarted(int variant) {
++    std::scoped_lock lk{g_mh_lock};
++    g_mh.pending_variant = variant;
++}
++
++/// Race phase (plugin FUN_36d80: [[[[raceSys+0xf0]+0x11c]+0x2c]+0x1c]; 64-bit [[[mgr4+0x218]+0x50]+0x38]): 3 = intro, 6 = racing.
++int RacePhase(Core::System& system) {
++    auto& mem = system.ApplicationMemory();
++    auto rd = [&mem](u64 a) { return a ? mem.Read64(a) : 0; };
++    const u64 base = KartHookTrace::MainBase();
++    const u64 holder = rd(rd(rd(base + Ui().race_sys_got)) + 0x20);
++    const u64 rs = rd(holder ? holder + 8 : 0);
++    if (!rs || !(mem.Read8(rs + 0x180) & 4)) return -1;
++    const u64 mgr = rd(rs + 0x190 + 4 * 8);
++    const u64 a = rd(mgr ? mgr + 0x218 : 0);
++    const u64 b = rd(a ? a + 0x50 : 0);
++    return b ? static_cast<int>(mem.Read32(b + 0x38)) : -1;
++}
++
++/// The parts' vtables: a copy of the game's race timer part's (a plain HUD part like CTGP's) with the timer's own functions (show,
++/// init, update and their layout-object thunks) replaced by a function that only returns, as CTGP's classes stub them. The
++/// timer's deleting destructor is generic (base destructor + delete) and stays. Built once per game start.
++u64 PartVtable(Core::System& system) {
++    static u64 copy = 0;
++    if (copy) return copy;
++    auto& mem = system.ApplicationMemory();
++    const u64 base = KartHookTrace::MainBase();
++    const MusicFns& mf = Mf();
++    const u64 vt = mem.Read64(base + mf.timer_vt_got);
++    if (!vt) return 0;
++    const u64 c = g_arena.Alloc(system, 0x100, 16);
++    if (!c) return 0;
++    for (u64 o = 0; o < 0x100; o += 8) mem.Write64(c + o, mem.Read64(vt + o));
++    // primary at +0x10 (slots 8..11: show, init, update, teardown); layout object at +0x80 (slots 6, 8, 9: init/update thunks)
++    for (const u64 o : {0x50ull, 0x58ull, 0x60ull, 0x68ull, 0xb0ull, 0xc0ull, 0xc8ull}) mem.Write64(c + o, base + mf.ret);
++    copy = c;
++    return copy;
++}
++
++bool MusicPartsCreate(RecompHooks::HookContext& ctx, bool timer) {
++    if (!Enabled() || Settings_().music == 2) return false; // "None": no race music, no switch or banner (plugin FUN_37154)
++    auto& mem = ctx.system.ApplicationMemory();
++    const u64 hud = ctx.x[19];
++    const u64 parent_obj = mem.Read64(hud + 0x320);
++    if (!parent_obj) return false;
++    const u64 parent = parent_obj + 0x30;
++    {
++        std::scoped_lock lk{g_mh_lock};
++        const auto now = std::chrono::steady_clock::now();
++        const bool burst = g_mh.huds > 0 && now - g_mh.built < std::chrono::seconds(3);
++        const int huds = burst ? g_mh.huds + 1 : 1;
++        if (huds > 1) { // split-screen: CTGP shows these with at most two players; here only solo races drive them
++            g_mh.huds = huds;
++            g_mh.built = now;
++            return false;
++        }
++        const int pending = g_mh.pending_variant; // the course stream is often opened while the race loads, before this view
++        g_mh = MusicHud{};
++        g_mh.pending_variant = pending;
++        g_mh.huds = 1;
++        g_mh.built = now;
++    }
++    const UiFns ui = Ui();
++    const MusicFns mf = Mf();
++    auto* sys = &ctx.system;
++    // Each op is one game call; results land in the script.
++    enum Kind { Alloc, Ctor, LInit, PInit, Group, Bind, Pane, Hide };
++    struct Op {
++        Kind k;
++        int part; ///< 0 switch, 1 banner
++        int a = 0, b = 0;
++        u64 name = 0;
++    };
++    struct Script {
++        std::vector<Op> ops;
++        size_t at = 0;
++        std::array<u64, 2> obj{};
++        std::array<std::array<u64, 3>, 2> group{};
++        std::array<std::array<u64, 8>, 2> pane{};
++        u64 zero = 0;
++    };
++    const u64 vt = PartVtable(ctx.system);
++    if (!vt) return false;
++    auto sc = std::make_shared<Script>();
++    sc->zero = g_arena.Alloc(ctx.system, 8, 8);
++    const char* part_names[2] = {"L_MusSwch_00", "L_Sus_00"};
++    const std::vector<std::vector<const char*>> groups[2] = {{{"In", "Out"}, {"Loop"}, {"Select"}}, {{"In", "Out"}, {"Loop"}}};
++    const std::vector<const char*> panes[2] = {{"N_All_00", "T_Coin_00"},
++                                               {"N_All_00", "T_SongPrefix_00", "T_SongName_00", "T_SongAuthor_00", "T_SubName_00",
++                                                "T_LapVariant_00"}};
++    for (int p = 0; p < 2; ++p) {
++        sc->ops.push_back({Alloc, p});
++        sc->ops.push_back({Ctor, p});
++        sc->ops.push_back({LInit, p});
++        sc->ops.push_back({PInit, p, 0, 0, GuestSafeString(ctx.system, part_names[p])});
++        for (size_t g = 0; g < groups[p].size(); ++g) {
++            sc->ops.push_back({Group, p, static_cast<int>(g), static_cast<int>(groups[p][g].size())});
++            for (size_t i = 0; i < groups[p][g].size(); ++i)
++                sc->ops.push_back({Bind, p, static_cast<int>(g), static_cast<int>(i), GuestSafeString(ctx.system, groups[p][g][i])});
++        }
++        for (size_t i = 0; i < panes[p].size(); ++i) sc->ops.push_back({Pane, p, static_cast<int>(i), 0, GuestSafeString(ctx.system, panes[p][i])});
++        sc->ops.push_back({Hide, p});
++    }
++    for (const Op& o : sc->ops)
++        if ((o.k == PInit || o.k == Bind || o.k == Pane) && !o.name) return false;
++    if (!sc->zero) return false;
++    auto done = [sc, timer](RecompHooks::HookContext& r) {
++        {
++            std::scoped_lock lk{g_mh_lock};
++            if (sc->obj[0] && sc->obj[1]) {
++                g_mh.sw = sc->obj[0];
++                g_mh.banner = sc->obj[1];
++                g_mh.sw_all = sc->pane[0][0];
++                g_mh.sw_text = sc->pane[0][1];
++                g_mh.b_all = sc->pane[1][0];
++                for (size_t i = 0; i < 5; ++i) g_mh.b_text[i] = sc->pane[1][i + 1];
++                g_mh.sw_group = sc->group[0];
++                g_mh.b_group = sc->group[1];
++            }
++            LOG_INFO(Core_ARM, "CTGP: music switch {:#x} / banner {:#x} created", g_mh.sw, g_mh.banner);
++        }
++        if (timer) r.pc += 8; // the race timer decision (H_RaceTimer)
++    };
++    return CallGuestSeq(ctx, [sc, sys, ui, mf, hud, parent, vt](u64 r, GuestCall& next) {
++        auto& m = sys->ApplicationMemory();
++        if (sc->at > 0) { // the result of the previous op
++            const Op& prev = sc->ops[sc->at - 1];
++            switch (prev.k) {
++            case Alloc:
++                sc->obj[prev.part] = r;
++                if (!r) return false; // out of memory: no parts
++                break;
++            case LInit: { // the fields the game's own parts set after these two constructors (4.0.1 0x531de8..)
++                const u64 o = sc->obj[prev.part];
++                m.Write64(o + 0x28, o + 0x30);
++                m.Write64(o + 0x38, o);
++                m.Write64(o, vt + 0x10);        // the parts' own vtables (PartVtable)
++                m.Write64(o + 0x30, vt + 0x80);
++                break;
++            }
++            case Group: sc->group[prev.part][prev.a] = r; break;
++            case Pane: sc->pane[prev.part][prev.a] = r; break;
++            default: break;
++            }
++        }
++        while (sc->at < sc->ops.size()) {
++            const Op o = sc->ops[sc->at++];
++            const u64 obj = sc->obj[o.part];
++            switch (o.k) {
++            case Alloc: next = {Fn(ui.alloc), {0xe0, 8}}; return true;
++            case Ctor: next = {Fn(mf.base_ctor), {obj}}; return true;
++            case LInit: next = {Fn(mf.layout_init), {obj + 0x30}}; return true;
++            case PInit: next = {Fn(ui.part_init), {hud, obj + 0x30, parent, o.name, sc->zero}}; return true;
++            case Group: next = {Fn(mf.make_group), {obj + 0x30, static_cast<u64>(o.a), static_cast<u64>(o.b)}}; return true;
++            case Bind:
++                if (!sc->group[o.part][o.a]) continue;
++                next = {Fn(mf.anim_bind), {sc->group[o.part][o.a], static_cast<u64>(o.b), o.name}};
++                return true;
++            case Pane: next = {Fn(ui.find_pane), {obj + 0x30, o.name}}; return true;
++            case Hide:
++                if (!sc->pane[o.part][0]) continue;
++                next = {Fn(ui.set_visible), {sc->pane[o.part][0], 0}};
++                return true;
++            }
++        }
++        return false;
++    }, done);
++}
++
++/// Player 1's L / R (nn::hid button bits 6, 7), from the controller the game reads.
++bool PlayerLR(Core::System& system) {
++    auto& hid = system.HIDCore();
++    for (const auto id : {Core::HID::NpadIdType::Player1, Core::HID::NpadIdType::Handheld}) {
++        const auto* c = hid.GetEmulatedController(id);
++        if (c && c->IsConnected() && (static_cast<u64>(c->GetNpadButtons().raw) & 0xc0)) return true;
++    }
++    return false;
++}
++
++u64 EmptyText(Core::System& system) {
++    static u64 at = 0;
++    if (!at) at = g_arena.Alloc(system, 8, 8);
++    return at;
++}
++
++bool MusicTick(RecompHooks::HookContext& ctx) {
++    MusicHud mh;
++    {
++        std::scoped_lock lk{g_mh_lock};
++        mh = g_mh;
++    }
++    if (!mh.sw || !mh.banner || mh.huds != 1) return false;
++    const int index = CurrentIndex(ctx.system);
++    const Course* c = index >= 0 ? CtgpCourseByIndex(static_cast<u32>(index)) : nullptr;
++    if (!c) return false;
++    const UiFns ui = Ui();
++    const MusicFns mf = Mf();
++    const u64 play = Fn(ui.anim_play);
++    std::vector<GuestCall> calls;
++    // text calls: a label's text (game message) or an empty string
++    struct TextOp { u64 pane; int label; };
++    std::vector<TextOp> texts;
++    const int phase = RacePhase(ctx.system);
++    const bool lr = PlayerLR(ctx.system);
++    if (std::getenv("KARTRECOMP_CTGP_MUSIC_LOG")) {
++        static int last = -2;
++        if (phase != last) LOG_INFO(Core_ARM, "CTGP: race phase {} (sets {}, pending banner {})", phase, c->music.size(), mh.pending_variant);
++        last = phase;
++    }
++    bool changed = false;
++    {
++        std::scoped_lock lk{g_mh_lock};
++        // the switch: only for tracks with two music sets (plugin: FUN_34444 count >= 2)
++        if (c->music.size() >= 2 && mh.sw_text) {
++            const int set = MusicSetFor(*c);
++            if (g_mh.sw_state == 0 && phase == 3) {
++                g_mh.sw_state = 1;
++                texts.push_back({mh.sw_text, 800000 + set});
++                calls.push_back({Fn(ui.set_visible), {mh.sw_all, 1}});
++                if (mh.sw_group[0]) calls.push_back({play, {mh.sw_group[0], 0}, true, 1.0f});
++                if (mh.sw_group[1]) calls.push_back({play, {mh.sw_group[1], 0}, true, 1.0f});
++                changed = true;
++            } else if (g_mh.sw_state == 1 && (phase >= 6 || phase < 3)) { // the race starts (plugin: phase 6)
++                g_mh.sw_state = 2;
++                if (mh.sw_group[0]) calls.push_back({play, {mh.sw_group[0], 1}, true, 1.0f});
++                changed = true;
++            } else if (g_mh.sw_state == 1 && lr && !g_mh.prev_lr) {
++                const int to = set == 0 ? 1 : 0;
++                g_music_set[c->id] = to;
++                texts.push_back({mh.sw_text, 800000 + to});
++                if (mh.sw_group[2]) calls.push_back({play, {mh.sw_group[2], 0}, true, 1.0f});
++                const u64 se = Str(ctx.system, to == 1 ? "SE_SYS_SOUNDTEST_CHANGE_2" : "SE_SYS_SOUNDTEST_CHANGE_1");
++                const u64 cat = Str(ctx.system, "SE_SYS_MENU_UI");
++                if (se && cat) calls.push_back({Fn(mf.se), {se, cat}});
++                LOG_INFO(Core_ARM, "CTGP: music set {} for {}", to == 1 ? "Author's Pick" : "CTGPDX OST", c->folder);
++                changed = true;
++            }
++        }
++        g_mh.prev_lr = lr;
++        // the banner
++        if (!changed && g_mh.pending_variant >= 0 && mh.b_all) {
++            const int v = g_mh.pending_variant;
++            g_mh.pending_variant = -1;
++            const int set = MusicSetFor(*c);
++            MusicRec r{};
++            if (set < static_cast<int>(c->music.size()) && c->music[static_cast<size_t>(set)].has[static_cast<size_t>(v)])
++                r = c->music[static_cast<size_t>(set)].rec[static_cast<size_t>(v)];
++            texts.push_back({mh.b_text[0], r.song == -1 ? c->platform : r.prefix});
++            texts.push_back({mh.b_text[1], r.song == -1 ? c->name : r.song});
++            texts.push_back({mh.b_text[2], r.artist == -1 ? 600001 : r.artist});
++            texts.push_back({mh.b_text[3], r.sub});
++            texts.push_back({mh.b_text[4], 610000 + v});
++            calls.push_back({Fn(ui.set_visible), {mh.b_all, 1}});
++            if (mh.b_group[0]) calls.push_back({play, {mh.b_group[0], 0}, true, 1.0f});
++            if (mh.b_group[1]) calls.push_back({play, {mh.b_group[1], 0}, true, 1.0f});
++            g_mh.banner_shown = true;
++            g_mh.banner_at = std::chrono::steady_clock::now();
++            changed = true;
++        } else if (!changed && g_mh.banner_shown && std::chrono::steady_clock::now() - g_mh.banner_at > std::chrono::seconds(6)) {
++            g_mh.banner_shown = false;
++            if (mh.b_group[0]) calls.push_back({play, {mh.b_group[0], 1}, true, 1.0f});
++            changed = true;
++        }
++    }
++    if (!changed) return false;
++    // texts first (message lookups need the previous result), then the fixed calls
++    auto list = std::make_shared<std::vector<GuestCall>>(std::move(calls));
++    auto tx = std::make_shared<std::vector<TextOp>>(std::move(texts));
++    auto st = std::make_shared<std::pair<size_t, int>>(0, 0); // text index, phase within it (0 message, 1 set text)
++    auto k = std::make_shared<size_t>(0);
++    const u64 empty = EmptyText(ctx.system);
++    const u64 set_text = Fn(ui.set_text), message = Fn(mf.message);
++    return CallGuestSeq(ctx, [list, tx, st, k, empty, set_text, message](u64 r, GuestCall& next) {
++        while (st->first < tx->size()) {
++            const TextOp& t = (*tx)[st->first];
++            if (!t.pane) { ++st->first; continue; }
++            if (st->second == 0) {
++                if (t.label < 0) { // no text: an empty string
++                    next = {set_text, {t.pane, empty}};
++                    ++st->first;
++                    return true;
++                }
++                st->second = 1;
++                next = {message, {static_cast<u64>(static_cast<u32>(t.label))}};
++                return true;
++            }
++            st->second = 0;
++            ++st->first;
++            next = {set_text, {t.pane, r ? r : empty}};
++            return true;
++        }
++        if (*k < list->size()) {
++            next = (*list)[(*k)++];
++            return true;
++        }
++        return false;
++    });
++}
++
++
 +constexpr NamedHandler kHandlers[] = {
 +    {"name_getter", H_NameGetter}, {"scene_labels", H_SceneLabels}, {"cup_label", H_CupLabel},   {"cup_select", H_CupSelect},
 +    {"gp_slot", H_GpSlot},         {"gp_labels", H_GpLabels},       {"bgm_index", H_BgmIndex},   {"music_path", H_MusicPath},
@@ -3056,10 +3404,10 @@ index 0000000000..c0b9402e46
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_dx.h b/src/core/arm/recomp/ctgp_dx.h
 new file mode 100644
-index 0000000000..9ef2bc0702
+index 0000000000..042efbc79a
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,73 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: CTGP Deluxe recreated for the 64-bit game builds (3.0.4, 4.0.1).
 +//
@@ -3069,6 +3417,7 @@ index 0000000000..9ef2bc0702
 +// (ctgp_tables.txt). See docs/CTGP_PORT.md.
 +#pragma once
 +
++#include <array>
 +#include <cstdint>
 +#include <string>
 +#include <vector>
@@ -3081,13 +3430,18 @@ index 0000000000..9ef2bc0702
 +
 +namespace Core::CtgpDx {
 +
-+/// One music set of a track (plugin record, 0x18 bytes): labels in CTGPText / Common (-1 = none).
-+struct MusicSet {
++/// One music record (plugin, 0x18 bytes): labels in CTGPText / Common (-1 = none).
++struct MusicRec {
 +    int song = -1;     ///< song name (630000..; -1 = the track's own name)
-+    int prefix = -1;   ///< prefix / platform
-+    int artist = -1;   ///< 620000.. / 600001
++    int prefix = -1;   ///< prefix / platform (-1 with no song: the track's platform)
++    int artist = -1;   ///< 620000.. / 600001 (-1: 600001)
 +    int unknown = -1;
 +    int sub = -1;      ///< sub name ("(Remix)", seasons: 610100..)
++};
++/// One music set of a track (0 CTGPDX OST, 1 Author's Pick): a record per lap variant (normal, second, final).
++struct MusicSet {
++    std::array<MusicRec, 3> rec{};
++    std::array<bool, 3> has{};
 +};
 +
 +/// One course id of the extended course table (the game's 0..123, CTGP's 124..187).

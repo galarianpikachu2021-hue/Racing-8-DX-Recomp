@@ -24,7 +24,7 @@ constexpr uint32_t kCupAddB = 0x3c04;       ///< cupdb->add_booster(id, cup*, to
 constexpr uint32_t kCupCtor = 0x3254;       ///< Cup(cup*, icon name, label): {0, label, icon, 0, {}} (NEON zeroing: stubbed)
 constexpr uint32_t kMusicBuilder = 0x9c24;  ///< void(db*): the music sets of the tracks that have their own (after the course builder)
 constexpr uint32_t kDbLookup = 0x9bf4;      ///< db->entry(&out, id)
-constexpr uint32_t kAddMusicSet = 0x246d4;  ///< entry->music_sets.push(set*); set = {record*, 0, record*}, record 0x18 bytes
+constexpr uint32_t kAddMusicSet = 0x246d4;  ///< entry->music_sets.push(set*); set = record*[3] by lap variant, record 0x18 bytes
 struct Expect {
     uint32_t at, word;
 };
@@ -414,10 +414,14 @@ CtgpTablesResult ReadCtgpTables(const QByteArray& nro) {
     {
         std::map<int, int> next_set;
         for (const MusicRec& r : music) {
-            const uint32_t rec = m.Rd32(r.set);
-            std::string line = "music " + std::to_string(r.course) + " " + std::to_string(next_set[r.course]++);
-            for (int k = 0; k < 6; ++k) line += " " + std::to_string(sx(m.Rd32(rec + 4 * k)));
-            out += line + "\n";
+            const int set = next_set[r.course]++;
+            for (int var = 0; var < 3; ++var) { // one record per lap variant (normal, second, final); 0 = none
+                const uint32_t rec = m.Rd32(r.set + 4 * var);
+                if (!rec) continue;
+                std::string line = "music " + std::to_string(r.course) + " " + std::to_string(set) + " " + std::to_string(var);
+                for (int k = 0; k < 6; ++k) line += " " + std::to_string(sx(m.Rd32(rec + 4 * k)));
+                out += line + "\n";
+            }
         }
     }
     // A cup's courses are the entries whose cup byte is that cup, in slot order (the plugin links them the same way at start-up).

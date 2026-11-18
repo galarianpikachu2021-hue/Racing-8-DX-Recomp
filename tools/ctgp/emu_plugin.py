@@ -293,8 +293,10 @@ def main():
                 b0, e0 = p.u32(v), p.u32(v + 4)
                 for k in range((e0 - b0) // 4):
                     r = p.u32(b0 + 4 * k)
-                    rec = p.u32(r)  # each set: {record*, ?, record*}; the record is 0x18 bytes
-                    lines.append(f"music {i} {k} " + " ".join(str(sx(p.u32(rec + 4 * j))) for j in range(6)))
+                    for var in range(3):  # each set: one record* per lap variant (normal, second, final), 0 = none
+                        rec = p.u32(r + 4 * var)
+                        if rec:
+                            lines.append(f"music {i} {k} {var} " + " ".join(str(sx(p.u32(rec + 4 * j))) for j in range(6)))
         cdb = p.u32(S + 8)
         out = p.malloc(4)
         for cup in range(0, 64):

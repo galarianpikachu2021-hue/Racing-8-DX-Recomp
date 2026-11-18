@@ -123,5 +123,9 @@ Known limits / next:
   `nn::os::LockMutex(null)` on a loader thread.
 * Speedometer: done (2026-11-18). Kart = [[[[[raceSys+0x1b0]+0x238]+0xc8]+i*8]+8]+0x28, speed float +0x37c, i = the game's
   local player byte; set from the lap counter part's update (4.0.1 0x512e1c / 3.0.4 0x50f708) with full-width digits.
-* Music switch / now-playing banner (`L_Sus_00`, `L_MusSwch_00`), CTGP Settings page (title button, page 0x88 in 4.0.1),
+* Music switch and now-playing banner: done (2026-11-18). `L_MusSwch_00` (switch: "CTGPDX OST" / "Author's Pick", L/R during the
+  race intro, phases 3..5) and `L_Sus_00` (banner: prefix, song, author, sub name, lap variant per music record; shown when a course
+  stream opens) are created as plain game HUD parts at the race-timer site, with vtables copied from the game's timer part and its own
+  slots stubbed (as CTGP's classes do); driven from the lap-counter update hook. Music records are per set and per lap variant.
+* CTGP Settings page (title button, page 0x88 in 4.0.1),
   race timer, honk visibility, online (packets, `CTGPDelux010101`): mapped (agent_*.md), not implemented.

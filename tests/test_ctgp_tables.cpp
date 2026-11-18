@@ -32,8 +32,8 @@ private slots:
         QVERIFY(t.contains(QStringLiteral("rows_a_top 0,1,2,3,8,10,24,26,28,30,32,34,36,38")));
         QVERIFY(t.contains(QStringLiteral("rows_b_bottom 18,19,20,21,22,23")));
         // music sets: Vanilla Lake 1 (CTGPDX OST: "Vanilla Lake" (Remix), SNES, CTGP Deluxe Team); CT_09 has an Author's Pick set
-        QVERIFY(t.contains(QStringLiteral("music 125 0 630021 1466 620000 -1 610100 1")));
-        QVERIFY(t.contains(QStringLiteral("music 133 1 -1 -1 600001 -1 -1 1")));
+        QVERIFY(t.contains(QStringLiteral("music 125 0 0 630021 1466 620000 -1 610100 1")));
+        QVERIFY(t.contains(QStringLiteral("music 133 1 0 -1 -1 600001 -1 -1 1")));
     }
 };
 
