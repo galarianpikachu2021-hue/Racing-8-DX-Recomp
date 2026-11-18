@@ -41,6 +41,8 @@ struct Msbt {
 
 struct Options {
     QString cups_list_path; ///< where to write the cup list the in-game "Extra cup" menu reads (extra_cups.txt); empty = not written
+    QString vanilla_cmn_dir; ///< the game's own UI/cmn archives (menu.sarc, common.sarc, race.sarc; no mods); empty = no UI layouts
+    QString baseline_path;   ///< data/mk8d-3.0.4/ui_cmn_hashes.txt: which archive members CTGP changed (vs the 3.0.4 game)
 };
 
 using Progress = std::function<bool(int done, int total, const QString& what)>;

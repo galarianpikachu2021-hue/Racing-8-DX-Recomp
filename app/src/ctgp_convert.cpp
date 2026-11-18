@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctgp_convert.h"
 #include "ctgp_tables.h"
+#include "menu_merge.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -332,6 +334,46 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
         QFile t(QDir(out_dir).filePath(QStringLiteral("ctgp_tables.txt")));
         if (!t.open(QIODevice::WriteOnly) || t.write(tables.text) != tables.text.size())
             return fail(QCoreApplication::translate("Messages", "Cannot write %1").arg(t.fileName()));
+    }
+    // 1c. CTGP's layouts: the cup screen with its two extra icon columns and line scroll (mn_GrprCupSlct_00, mn_L_CupSlctBtn_00),
+    //     the race HUD (speedometer, music switch, author line) and its other changes, applied member by member onto the game's own
+    //     archives of the installed update (a member counts as CTGP's when it differs from the 3.0.4 game: the shipped hashes).
+    //     Left out: the title screen, top menu and menu background layouts (the background stops the 3.0.4 game; the title menu's
+    //     Settings button has no page yet).
+    if (!options.vanilla_cmn_dir.isEmpty()) {
+        MenuMerge::Baseline base;
+        if (!base.load(options.baseline_path)) return fail(QCoreApplication::translate("Messages", "The menu merge data (%1) is missing.").arg(options.baseline_path));
+        static const QStringList kSkip{QStringLiteral("mn_Background_00.szs"), QStringLiteral("mn_TitleScene_00.szs"), QStringLiteral("mn_TopMenuNX_00.szs")};
+        for (const QString name : {QStringLiteral("menu.sarc"), QStringLiteral("common.sarc"), QStringLiteral("race.sarc")}) {
+            const ZipEntry* e = names.value(QStringLiteral("UI/cmn/") + name, nullptr);
+            if (!e) continue;
+            const QString tmp = QDir(out_dir).filePath(name + QStringLiteral(".pack"));
+            if (!zip.extract(*e, tmp, error)) return false;
+            QFile pf(tmp), vf(QDir(options.vanilla_cmn_dir).filePath(name));
+            const QByteArray pack_bytes = pf.open(QIODevice::ReadOnly) ? pf.readAll() : QByteArray();
+            pf.close();
+            QFile::remove(tmp);
+            MenuMerge::Archive pack, game;
+            if (!vf.open(QIODevice::ReadOnly) || !game.read(vf.readAll()) || !pack.read(pack_bytes))
+                return fail(QCoreApplication::translate("Messages", "Cannot read %1").arg(name));
+            int taken = 0;
+            for (const auto& m : pack.members) {
+                if (kSkip.contains(m.name)) continue;
+                const QByteArray sha = QCryptographicHash::hash(m.data, QCryptographicHash::Sha1).toHex();
+                const auto known = base.sha1.constFind(name + QLatin1Char('/') + m.name);
+                if (known != base.sha1.constEnd() && known.value() == sha) continue; // the game's own member
+                const int at = game.find(m.name);
+                if (at >= 0) game.members[at].data = m.data;
+                else game.members.append(m);
+                ++taken;
+            }
+            if (taken == 0) continue;
+            const QString target = QDir(out_dir).filePath(QStringLiteral("romfs/UI/cmn/") + name);
+            QDir().mkpath(QFileInfo(target).absolutePath());
+            QFile out(target);
+            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(game.write()) < 0)
+                return fail(QCoreApplication::translate("Messages", "Cannot write %1").arg(target));
+        }
     }
     // 2. Track names as new labels in the game's own message files (every language the game has).
     const auto read_member = [&](const QString& member, Sarc& out) {

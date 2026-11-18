@@ -1382,6 +1382,10 @@ void MainWindow::importCtgp() {
         if (!DumpVanillaUi(exe, workDir, args, env, tmp, error)) return false;
         CtgpConvert::Options options;
         options.cups_list_path = QDir(root).filePath(QStringLiteral("extra_cups.txt"));
+        // The game's own menu archives, for CTGP's cup screen and race HUD layouts (merged member by member).
+        if (!QFileInfo::exists(QDir(tmp).filePath(QStringLiteral("UI/cmn/menu.sarc"))) && !DumpVanillaMenus(exe, workDir, args, env, tmp, error)) return false;
+        options.vanilla_cmn_dir = QDir(tmp).filePath(QStringLiteral("UI/cmn"));
+        options.baseline_path = MenuBaseline();
         QString old_error;
         ModAddon::SetModEnabled(root, QStringLiteral("CTGP DX (tracks)"), false, &old_error); // the old slot-replacing conversion must not stay on
         return CtgpConvert::Convert(zip, tmp, out, options, error, progress);
