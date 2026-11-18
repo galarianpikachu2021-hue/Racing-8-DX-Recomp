@@ -1894,10 +1894,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..f1d4ebeea8
+index 0000000000..d5998f4bf0
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,536 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_data_path.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
@@ -2260,6 +2260,8 @@ index 0000000000..f1d4ebeea8
 +    RecompHooks::Install(load_base + g_a.set_bgm, [load_base](RecompHooks::HookContext& ctx) {
 +        const u32 idx = static_cast<u32>(ctx.x[1]);
 +        auto& mem = ctx.system.ApplicationMemory();
++        static const bool no_music = std::getenv("KARTRECOMP_CT_NO_MUSIC") != nullptr; // test: leave the race music alone
++        if (no_music) return false;
 +        if (idx < 2 || idx > 5) {
 +            RestoreBgmFiles(mem); // a normal race: the stand-in labels get their own streams back
 +            return false;
