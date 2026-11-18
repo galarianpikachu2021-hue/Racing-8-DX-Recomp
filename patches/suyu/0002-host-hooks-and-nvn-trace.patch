@@ -698,6 +698,30 @@ index 0000000000..9839ebcc04
 +}
 +
 +} // namespace KartRe
+diff --git a/src/common/kart_room_fast.h b/src/common/kart_room_fast.h
+new file mode 100644
+index 0000000000..b99dd7f8ce
+--- /dev/null
++++ b/src/common/kart_room_fast.h
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the room latency changes, each behind a bit of KARTRECOMP_ROOM_FAST (default 0 = suyu's original behaviour).
++// Wireless Play with Eden on a Steam Deck worked before these changes and dropped mid-race after them, so they are opt-in until
++// the culprit is known. Bits: 1 = Poll sees room sockets, 2 = room receives wait instead of spinning, 4 = 1 ms room loops,
++// 8 = no ENet packet throttle.
++#pragma once
++#include <cstdlib>
++
++namespace KartRoomFast {
++enum : unsigned { Poll = 1, RecvWait = 2, FastLoop = 4, NoThrottle = 8 };
++inline bool On(unsigned bit) {
++    static const unsigned bits = [] {
++        const char* e = std::getenv("KARTRECOMP_ROOM_FAST");
++        return e ? static_cast<unsigned>(std::strtoul(e, nullptr, 0)) : 0u;
++    }();
++    return (bits & bit) != 0;
++}
++} // namespace KartRoomFast
 diff --git a/src/common/kart_tune_sites.h b/src/common/kart_tune_sites.h
 new file mode 100644
 index 0000000000..53119f50fd
@@ -11540,25 +11564,27 @@ index cf43a50363..decb91b0f7 100644
      f32 m_compose_speed_scale = 1.0f;
  };
 diff --git a/src/core/internal_network/network.cpp b/src/core/internal_network/network.cpp
-index a1a8f8c104..b1b6644457 100644
+index a1a8f8c104..df7a62b0fd 100644
 --- a/src/core/internal_network/network.cpp
 +++ b/src/core/internal_network/network.cpp
-@@ -31,6 +31,7 @@
+@@ -31,6 +31,8 @@
  #include "common/logging.h"
  #include "common/settings.h"
  #include "core/internal_network/network.h"
 +#include "core/internal_network/socket_proxy.h"
++#include "common/kart_room_fast.h"
  #include "core/internal_network/network_interface.h"
  #include "core/internal_network/sockets.h"
  #include "network/network.h"
-@@ -765,6 +766,44 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
+@@ -765,6 +767,45 @@ std::variant<std::vector<AddrInfo>, GetAddrInfoError> GetAddressInfo(
  std::pair<s32, Errno> Poll(std::vector<PollFD>& pollfds, s32 timeout) {
      const size_t num = pollfds.size();
  
 +    // kart-recomp: room (proxy) sockets have no host socket, so the host's poll never saw their packets and every poll on them
 +    // slept its whole timeout - added to each packet's way in Wireless Play over a room. Poll them here: ready at once when a
 +    // packet is waiting, otherwise wait for the next room packet (or a host socket) until the timeout.
-+    if (std::any_of(pollfds.begin(), pollfds.end(), [](const PollFD& p) { return p.socket && p.socket->IsProxy(); })) {
++    if (KartRoomFast::On(KartRoomFast::Poll) &&
++        std::any_of(pollfds.begin(), pollfds.end(), [](const PollFD& p) { return p.socket && p.socket->IsProxy(); })) {
 +        const auto start = std::chrono::steady_clock::now();
 +        for (;;) {
 +            const u64 seen = ProxyActivity();
@@ -11597,10 +11623,18 @@ index a1a8f8c104..b1b6644457 100644
      std::transform(pollfds.begin(), pollfds.end(), host_pollfds.begin(), [](PollFD fd) {
          WSAPOLLFD result;
 diff --git a/src/core/internal_network/socket_proxy.cpp b/src/core/internal_network/socket_proxy.cpp
-index 3f0a21bf59..abc941f736 100644
+index 3f0a21bf59..67fa4bc0b3 100644
 --- a/src/core/internal_network/socket_proxy.cpp
 +++ b/src/core/internal_network/socket_proxy.cpp
-@@ -29,6 +29,27 @@ ProxySocket::~ProxySocket() {
+@@ -12,6 +12,7 @@
+ #include "core/internal_network/network.h"
+ #include "core/internal_network/network_interface.h"
+ #include "core/internal_network/socket_proxy.h"
++#include "common/kart_room_fast.h"
+ #include "network/network.h"
+ 
+ #ifdef __unix__
+@@ -29,6 +30,27 @@ ProxySocket::~ProxySocket() {
      fd = INVALID_SOCKET;
  }
  
@@ -11628,7 +11662,7 @@ index 3f0a21bf59..abc941f736 100644
  void ProxySocket::HandleProxyPacket(const ProxyPacket& packet) {
      if (protocol != packet.protocol || local_endpoint.portno != packet.remote_endpoint.portno ||
          closed) {
-@@ -43,8 +64,16 @@ void ProxySocket::HandleProxyPacket(const ProxyPacket& packet) {
+@@ -43,8 +65,16 @@ void ProxySocket::HandleProxyPacket(const ProxyPacket& packet) {
      auto decompressed = packet;
      decompressed.data = Common::Compression::DecompressDataZSTD(packet.data);
  
@@ -11647,7 +11681,7 @@ index 3f0a21bf59..abc941f736 100644
  }
  
  template <typename T>
-@@ -119,28 +148,17 @@ std::pair<s32, Errno> ProxySocket::RecvFrom(int flags, std::span<u8> message, So
+@@ -119,28 +149,36 @@ std::pair<s32, Errno> ProxySocket::RecvFrom(int flags, std::span<u8> message, So
      // packet arrives. In order to prevent lost packets from hanging the emulation thread, we set
      // the timeout to 5s instead
      const auto timeout = receive_timeout == 0 ? 5000 : receive_timeout;
@@ -11656,8 +11690,24 @@ index 3f0a21bf59..abc941f736 100644
 -            std::lock_guard guard(packets_mutex);
 -            if (received_packets.size() > 0) {
 -                return ReceivePacket(flags, message, addr, message.size());
--            }
--        }
++    if (!KartRoomFast::On(KartRoomFast::RecvWait)) { // suyu's original loop
++        while (true) {
++            {
++                std::lock_guard guard(packets_mutex);
++                if (received_packets.size() > 0) {
++                    return ReceivePacket(flags, message, addr, message.size());
++                }
++            }
++            if (!blocking) {
++                return {-1, Errno::AGAIN};
++            }
++            std::this_thread::yield();
++            const auto time_diff_ms =
++                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - timestamp).count();
++            if (time_diff_ms > timeout) {
++                return {-1, Errno::TIMEDOUT};
+             }
+         }
 -
 -        if (!blocking) {
 -            return {-1, Errno::AGAIN};
@@ -11672,11 +11722,12 @@ index 3f0a21bf59..abc941f736 100644
 -        if (time_diff_ms > timeout) {
 -            return {-1, Errno::TIMEDOUT};
 -        }
+     }
 +    // kart-recomp: waits for the packet (it used to spin on yield, a whole CPU core while the game waited).
 +    std::unique_lock guard(packets_mutex);
 +    if (received_packets.empty() && !blocking) {
 +        return {-1, Errno::AGAIN};
-     }
++    }
 +    if (!packets_cv.wait_until(guard, timestamp + std::chrono::milliseconds(timeout),
 +                               [this] { return !received_packets.empty() || closed; }) ||
 +        received_packets.empty()) {
@@ -11686,7 +11737,7 @@ index 3f0a21bf59..abc941f736 100644
  }
  
  std::pair<s32, Errno> ProxySocket::ReceivePacket(int flags, std::span<u8> message, SockAddrIn* addr,
-@@ -239,7 +257,11 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
+@@ -239,7 +277,11 @@ std::pair<s32, Errno> ProxySocket::SendTo(u32 flags, std::span<const u8> message
  
  Errno ProxySocket::Close() {
      fd = INVALID_SOCKET;
@@ -20964,37 +21015,46 @@ index 24b752ccc5..39bf543d81 100644
 +add_executable(kartrecomp-room-latency tools/room_latency.cpp)
 +target_link_libraries(kartrecomp-room-latency PRIVATE network common enet::enet)
 diff --git a/src/network/room.cpp b/src/network/room.cpp
-index a85414103c..9f05d7f8b8 100644
+index a85414103c..b0b4e7b37d 100644
 --- a/src/network/room.cpp
 +++ b/src/network/room.cpp
-@@ -238,9 +238,13 @@ public:
+@@ -15,6 +15,7 @@
+ #include "common/polyfill_thread.h"
+ #include "common/logging.h"
+ #include "enet/enet.h"
++#include "common/kart_room_fast.h"
+ #include "network/packet.h"
+ #include "network/room.h"
+ #include "network/verify_user.h"
+@@ -238,9 +239,13 @@ public:
  // RoomImpl
  void Room::RoomImpl::StartLoop() {
      room_thread.emplace([&](std::stop_token stoken) {
 +        // kart-recomp: 1 ms when idle (was 5), none while events keep coming: a relayed packet goes on within about a millisecond.
-+        int wait_ms = 1;
++        int wait_ms = KartRoomFast::On(KartRoomFast::FastLoop) ? 1 : 5;
          while (state != State::Closed) {
              ENetEvent event;
 -            if (enet_host_service(server, &event, 5) > 0) {
 +            const int got = enet_host_service(server, &event, wait_ms);
-+            wait_ms = got > 0 ? 0 : 1;
++            wait_ms = !KartRoomFast::On(KartRoomFast::FastLoop) ? 5 : got > 0 ? 0 : 1;
 +            if (got > 0) {
                  switch (event.type) {
                  case ENET_EVENT_TYPE_RECEIVE:
                      switch (event.packet->data[0]) {
-@@ -279,7 +283,11 @@ void Room::RoomImpl::StartLoop() {
+@@ -279,7 +284,12 @@ void Room::RoomImpl::StartLoop() {
                      HandleClientDisconnection(event.peer);
                      break;
                  case ENET_EVENT_TYPE_NONE:
 +                    break;
                  case ENET_EVENT_TYPE_CONNECT:
 +                    // kart-recomp: no throttle drops of unreliable game traffic when a member's round trip rises for a moment.
-+                    enet_peer_throttle_configure(event.peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
++                    if (KartRoomFast::On(KartRoomFast::NoThrottle))
++                        enet_peer_throttle_configure(event.peer, ENET_PEER_PACKET_THROTTLE_INTERVAL,
 +                                                 ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
                      break;
                  }
              }
-@@ -832,15 +840,18 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
+@@ -832,15 +842,18 @@ void Room::RoomImpl::HandleProxyPacket(const ENetEvent* event) {
      in_packet.Read(remote_ip);          // IP
      in_packet.IgnoreBytes(sizeof(u16)); // Port
  
@@ -21017,10 +21077,18 @@ index a85414103c..9f05d7f8b8 100644
      const auto& destination_address = remote_ip;
      if (broadcast) { // Send the data to everyone except the sender
 diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
-index 4c3d8f341f..d3d1d43316 100644
+index 4c3d8f341f..86f1ea66f2 100644
 --- a/src/network/room_member.cpp
 +++ b/src/network/room_member.cpp
-@@ -60,7 +60,9 @@ public:
+@@ -12,6 +12,7 @@
+ #include "common/polyfill_thread.h"
+ #include "common/socket_types.h"
+ #include "enet/enet.h"
++#include "common/kart_room_fast.h"
+ #include "network/packet.h"
+ #include "network/room_member.h"
+ 
+@@ -60,7 +61,9 @@ public:
      /// Thread that receives and dispatches network packets
      std::optional<std::jthread> loop_thread;
      std::mutex send_list_mutex;  ///< Mutex that controls access to the `send_list` variable.
@@ -21031,7 +21099,7 @@ index 4c3d8f341f..d3d1d43316 100644
  
      template <typename T>
      using CallbackSet = std::set<CallbackHandle<T>>;
-@@ -89,7 +91,7 @@ public:
+@@ -89,7 +92,7 @@ public:
       * Sends data to the room. It will be send on channel 0 with flag RELIABLE
       * @param packet The data to send
       */
@@ -21040,7 +21108,7 @@ index 4c3d8f341f..d3d1d43316 100644
  
      /**
       * Sends a request to the server, asking for permission to join a room with the specified
-@@ -158,14 +160,40 @@ public:
+@@ -158,14 +161,40 @@ public:
      CallbackHandle<T> Bind(std::function<void(const T&)> callback);
  };
  
@@ -21071,19 +21139,19 @@ index 4c3d8f341f..d3d1d43316 100644
 +        // Receive packets while the connection is open.
 +        // kart-recomp: wait at most 1 ms (it was 5) when idle and not at all while events keep coming, so a received packet is
 +        // handled and a queued one sent within about a millisecond (each hop through the room used to add up to 5 ms).
-+        int wait_ms = 1;
++        int wait_ms = KartRoomFast::On(KartRoomFast::FastLoop) ? 1 : 5;
          while (IsConnected()) {
              std::lock_guard lock(network_mutex);
              ENetEvent event;
 -            if (enet_host_service(client, &event, 5) > 0) {
 +            const int got = enet_host_service(client, &event, wait_ms);
-+            wait_ms = got > 0 ? 0 : 1;
++            wait_ms = !KartRoomFast::On(KartRoomFast::FastLoop) ? 5 : got > 0 ? 0 : 1;
 +            LogProxyTraffic();
 +            if (got > 0) {
                  switch (event.type) {
                  case ENET_EVENT_TYPE_RECEIVE:
                      switch (event.packet->data[0]) {
-@@ -256,25 +284,24 @@ void RoomMember::RoomMemberImpl::StartLoop() {
+@@ -256,25 +285,24 @@ void RoomMember::RoomMemberImpl::StartLoop() {
                      break;
                  }
              }
@@ -21115,7 +21183,7 @@ index 4c3d8f341f..d3d1d43316 100644
  }
  
  void RoomMember::RoomMemberImpl::SendJoinRequest(const std::string& nickname_,
-@@ -348,6 +375,7 @@ void RoomMember::RoomMemberImpl::HandleJoinPacket(const ENetEvent* event) {
+@@ -348,6 +376,7 @@ void RoomMember::RoomMemberImpl::HandleJoinPacket(const ENetEvent* event) {
  }
  
  void RoomMember::RoomMemberImpl::HandleProxyPackets(const ENetEvent* event) {
@@ -21123,18 +21191,19 @@ index 4c3d8f341f..d3d1d43316 100644
      ProxyPacket proxy_packet{};
      Packet packet;
      packet.Append(event->packet->data, event->packet->dataLength);
-@@ -605,6 +633,10 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
+@@ -605,6 +634,11 @@ void RoomMember::Join(const std::string& nick, const char* server_addr, u16 serv
      ENetEvent event{};
      int net = enet_host_service(room_member_impl->client, &event, ConnectionTimeoutMs);
      if (net > 0 && event.type == ENET_EVENT_TYPE_CONNECT) {
 +        // kart-recomp: ENet's packet throttle drops unreliable packets when the round trip rises for a moment; game traffic
 +        // should rather arrive late than not at all.
-+        enet_peer_throttle_configure(room_member_impl->server, ENET_PEER_PACKET_THROTTLE_INTERVAL,
++        if (KartRoomFast::On(KartRoomFast::NoThrottle))
++            enet_peer_throttle_configure(room_member_impl->server, ENET_PEER_PACKET_THROTTLE_INTERVAL,
 +                                     ENET_PEER_PACKET_THROTTLE_ACCELERATION, 0);
          room_member_impl->nickname = nick;
          room_member_impl->StartLoop();
          room_member_impl->SendJoinRequest(nick, preferred_fake_ip, password, token);
-@@ -636,6 +668,8 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
+@@ -636,6 +670,8 @@ void RoomMember::SendProxyPacket(const ProxyPacket& proxy_packet) {
      packet.Write(proxy_packet.broadcast);
      packet.Write(proxy_packet.data);
  
