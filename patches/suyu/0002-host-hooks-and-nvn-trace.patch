@@ -972,15 +972,18 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..8e01c564cd 100644
+index 408daa6839..77726fe1bb 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,24 @@ add_library(core STATIC
+@@ -12,6 +12,27 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
 +    arm/recomp/host_hooks.cpp
 +    arm/recomp/host_hooks.h
++    arm/recomp/ctgp_dx.cpp
++    arm/recomp/ctgp_dx.h
++    arm/recomp/ctgp_sites.inc
 +    arm/recomp/kart_hook_trace.cpp
 +    arm/recomp/kart_hook_trace.h
 +    arm/recomp/nvn_trace.cpp
@@ -1000,7 +1003,7 @@ index 408daa6839..8e01c564cd 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +154,8 @@ add_library(core STATIC
+@@ -136,6 +157,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -1009,7 +1012,7 @@ index 408daa6839..8e01c564cd 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +359,23 @@ add_library(core STATIC
+@@ -339,6 +362,23 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
@@ -1033,7 +1036,7 @@ index 408daa6839..8e01c564cd 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1088,8 @@ add_library(core STATIC
+@@ -1051,6 +1091,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -1042,7 +1045,7 @@ index 408daa6839..8e01c564cd 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1082,6 +1121,8 @@ add_library(core STATIC
+@@ -1082,6 +1124,8 @@ add_library(core STATIC
      hle/service/sm/sm_controller.cpp
      hle/service/sm/sm_controller.h
      hle/service/sockets/bsd.cpp
@@ -1051,7 +1054,7 @@ index 408daa6839..8e01c564cd 100644
      hle/service/sockets/bsd.h
      hle/service/sockets/nsd.cpp
      hle/service/sockets/nsd.h
-@@ -1187,6 +1228,7 @@ add_library(core STATIC
+@@ -1187,6 +1231,7 @@ add_library(core STATIC
      tools/renderdoc.cpp
      tools/renderdoc.h)
  
@@ -1059,7 +1062,7 @@ index 408daa6839..8e01c564cd 100644
  if (ENABLE_WIFI_SCAN)
      target_sources(core PRIVATE internal_network/wifi_scanner.cpp)
      if (PLATFORM_LINUX)
-@@ -1226,7 +1268,7 @@ else()
+@@ -1226,7 +1271,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -1068,7 +1071,7 @@ index 408daa6839..8e01c564cd 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1377,31 @@ endif()
+@@ -1335,3 +1380,31 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -1101,7 +1104,7 @@ index 408daa6839..8e01c564cd 100644
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..b24a0e167d 100644
+index 67a55424e9..ee42c54a1b 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -1440,7 +1443,7 @@ index 67a55424e9..b24a0e167d 100644
 +        // kart-recomp: host hooks (NVN tracing now, native subsystems later).
 +        if (RecompHooks::Active()) {
 +            RecompHooks::HookContext hook_ctx{impl->ctx.x, impl->ctx.pc, impl->system,
-+                                              impl->ctx.vreg};
++                                              impl->ctx.vreg, &impl->ctx.n};
 +            if (RecompHooks::Dispatch(hook_ctx)) {
 +                fp_check = true;
 +                continue;
@@ -1590,7 +1593,7 @@ index 67a55424e9..b24a0e167d 100644
 +    if (!Core::RecompHooks::Active()) {
 +        return 0;
 +    }
-+    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg};
++    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg, &c->n};
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
@@ -1636,6 +1639,864 @@ index a1671ea1e7..3a27d2427e 100644
      HaltReason StepThread(Kernel::KThread* thread) override;
  
      void ClearInstructionCache() override;
+diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
+new file mode 100644
+index 0000000000..21902d8fdb
+--- /dev/null
++++ b/src/core/arm/recomp/ctgp_dx.cpp
+@@ -0,0 +1,652 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/arm/recomp/ctgp_dx.h"
++
++#include <array>
++#include <cstdlib>
++#include <functional>
++#include <memory>
++#include <filesystem>
++#include <map>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <sstream>
++
++#include <algorithm>
++
++#include "common/fs/path_util.h"
++#include "common/kart_data_path.h"
++#include "common/settings.h"
++#include "common/logging/log.h"
++#include "core/arm/recomp/host_hooks.h"
++#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_process_page_table.h"
++#include "core/memory.h"
++
++namespace Core::CtgpDx {
++namespace {
++
++std::vector<Course> g_courses;
++std::vector<Cup> g_cups;
++std::vector<int> g_row_top, g_row_bottom; ///< cup screen columns (game + CTGP cups): rows_a_top / rows_a_bottom
++bool g_is304 = false;
++bool g_enabled = false;
++
++int IntField(const std::string& tok, const char* key, int fallback = -1) {
++    const std::string k = std::string(key) + "=";
++    return tok.rfind(k, 0) == 0 ? std::atoi(tok.c_str() + k.size()) : fallback;
++}
++
++/// ctgp_tables.txt (written by the launcher's CTGP import): "course <id> <folder> <picture> key=value..." and
++/// "cup <id> label=<n> icon=<name> courses=<id>,<id>,...".
++bool LoadTables(const std::string& path) {
++    std::ifstream in(path);
++    if (!in) return false;
++    std::vector<Course> courses;
++    std::vector<Cup> cups;
++    for (std::string line; std::getline(in, line);) {
++        if (line.empty() || line[0] == '#') continue;
++        std::istringstream ls(line);
++        std::string kind;
++        ls >> kind;
++        if (kind == "course") {
++            Course c;
++            ls >> c.id >> c.folder >> c.picture;
++            for (std::string t; ls >> t;) {
++                c.index = IntField(t, "index", c.index);
++                c.base = IntField(t, "base", c.base);
++                c.name = IntField(t, "name", c.name);
++                c.platform = IntField(t, "platform", c.platform);
++                c.slot = IntField(t, "slot", c.slot);
++                c.author = IntField(t, "author", c.author);
++                c.bgm = IntField(t, "bgm", c.bgm);
++                c.cup = IntField(t, "cup", c.cup);
++                c.flag = IntField(t, "flag", c.flag);
++            }
++            if (c.id != static_cast<int>(courses.size())) return false; // ids must be dense and in order
++            courses.push_back(std::move(c));
++        } else if (kind == "rows_a_top" || kind == "rows_a_bottom") {
++            std::string list;
++            ls >> list;
++            std::istringstream cs(list);
++            auto& row = kind == "rows_a_top" ? g_row_top : g_row_bottom;
++            row.clear();
++            for (std::string id; std::getline(cs, id, ',');) row.push_back(std::atoi(id.c_str()));
++        } else if (kind == "cup") {
++            Cup c;
++            ls >> c.id;
++            for (std::string t; ls >> t;) {
++                if (t.rfind("label=", 0) == 0) c.label = std::atoi(t.c_str() + 6);
++                else if (t.rfind("icon=", 0) == 0) c.icon = t.substr(5);
++                else if (t.rfind("courses=", 0) == 0) {
++                    std::istringstream cs(t.substr(8));
++                    for (std::string id; std::getline(cs, id, ',');) c.courses.push_back(std::atoi(id.c_str()));
++                }
++            }
++            cups.push_back(std::move(c));
++        }
++    }
++    if (courses.size() < 124) return false;
++    g_courses = std::move(courses);
++    g_cups = std::move(cups);
++    return true;
++}
++
++/// Guest memory for strings and tables the game reads (course names, the extended name table): pages mapped into the game
++/// process once, then a bump allocator. Never freed (lives as long as the game).
++struct GuestArena {
++    std::mutex lock;
++    u64 base = 0, size = 0, used = 0;
++    u64 Alloc(Core::System& system, u64 bytes, u64 align = 16) {
++        std::scoped_lock lk{lock};
++        if (base == 0) {
++            constexpr size_t kPages = 64; // 256 KiB
++            Kernel::KProcessAddress addr{};
++            auto* process = system.ApplicationProcess();
++            if (!process || process->GetPageTable().MapPages(std::addressof(addr), kPages, Kernel::KMemoryState::Normal,
++                                                             Kernel::KMemoryPermission::UserReadWrite).IsError()) {
++                LOG_ERROR(Core_ARM, "CTGP: cannot map guest memory");
++                return 0;
++            }
++            base = GetInteger(addr);
++            size = kPages * 0x1000;
++            LOG_INFO(Core_ARM, "CTGP: guest arena at {:#x} ({} KiB)", base, size / 1024);
++        }
++        used = (used + align - 1) & ~(align - 1);
++        if (used + bytes > size) return 0;
++        const u64 at = base + used;
++        used += bytes;
++        return at;
++    }
++};
++GuestArena g_arena;
++
++u64 GuestString(Core::System& system, const std::string& s) {
++    const u64 at = g_arena.Alloc(system, s.size() + 1);
++    if (at) system.ApplicationMemory().WriteBlock(at, s.c_str(), s.size() + 1);
++    return at;
++}
++
++// ---- per-site actions -------------------------------------------------------------------------------------------------------
++//
++// Each site is the 64-bit equivalent of one place the plugin patches in 3.0.3 (tools/ctgp/sites_401.txt, generated into
++// ctgp_sites.inc with the 3.0.4 addresses). Actions (see tools/ctgp/gen_sites.py):
++//   Base / Clamp  value transforms of a course index in w<reg>
++//   Set / Cmp     instruction replaced by "x<reg> = arg" / "compare w<reg> with arg", then the next instruction
++//   Branch        continue at arg2 (3.0.4) / arg (4.0.1)
++//   Nop           skip the instruction
++//   Field         w/x<reg> = a course table field (arg = source, arg2 = field), for CTGP's course ids only
++//   Save          remember x<reg> for "saved+off" sources
++//   Call          custom handler (arg = index into the generated handler names, reg = optional register)
++enum class Act : u8 { Base, Clamp, Set, Cmp, Branch, Nop, Field, Save, Call };
++enum Field : u32 { kName, kPlatform, kAuthor, kCup, kFlag, kBase, kBaseBcp, kPicture, kFolder, kIcon };
++
++struct Site {
++    u32 off304, off401;
++    Act act;
++    u8 reg;
++    u32 arg, arg2;
++    const char* handler;
++    const char* what; ///< the 3.0.3 site, for logs
++};
++
++#define CTGP_SITE(o304, o401, act, reg, arg, arg2, handler, what) {o304, o401, Act::act, reg, arg, arg2, handler, what},
++constexpr Site kSites[] = {
++#include "core/arm/recomp/ctgp_sites.inc"
++};
++#undef CTGP_SITE
++
++void SetCmpFlags(u8* nzcv, u32 a, u32 b) {
++    const u32 r = a - b;
++    nzcv[0] = (r >> 31) & 1;
++    nzcv[1] = r == 0;
++    nzcv[2] = a >= b;
++    nzcv[3] = (((a ^ b) & (a ^ r)) >> 31) & 1;
++}
++
++constexpr int kFirstCtgpId = 124; ///< course ids from here on are CTGP's (the game's end at 123)
++
++const Course* CourseById(int id) {
++    return id >= 0 && id < static_cast<int>(g_courses.size()) ? &g_courses[id] : nullptr;
++}
++const Course* CtgpCourseByIndex(u32 index) {
++    const int id = static_cast<int>(index) + 1;
++    return id >= kFirstCtgpId ? CourseById(id) : nullptr;
++}
++const Cup* CupById(int id) {
++    for (const Cup& c : g_cups)
++        if (c.id == id) return &c;
++    return nullptr;
++}
++bool IsCtgpCup(int id) {
++    const Cup* c = CupById(id);
++    return c && !c->courses.empty() && c->courses[0] >= kFirstCtgpId;
++}
++
++std::mutex g_state_lock;
++std::map<std::string, u64> g_strings; ///< guest copies of names (built once each)
++u64 g_singleton = 0;                  ///< race-info object ([+0x1a0] = current course index), seen by the hooks
++u64 g_saved = 0;                      ///< pointer kept by a Save site
++float g_speed_multiplier = 1.0f;      ///< per-course "SpeedMultiplier" of the running CTGP track
++std::string g_mod_root;               ///< host folder of the CTGP mod's romfs
++
++u64 Str(Core::System& system, const std::string& s) {
++    std::scoped_lock lk{g_state_lock};
++    if (auto it = g_strings.find(s); it != g_strings.end()) return it->second;
++    const u64 at = GuestString(system, s);
++    if (at) g_strings.emplace(s, at);
++    return at;
++}
++
++/// Current course index from the race-info object, or -1 before one was seen.
++int CurrentIndex(Core::System& system) {
++    if (!g_singleton) return -1;
++    return static_cast<int>(system.ApplicationMemory().Read32(g_singleton + 0x1a0));
++}
++
++bool HostFileExists(const std::string& romfs_path) {
++    std::error_code ec;
++    return !g_mod_root.empty() && std::filesystem::is_regular_file(std::filesystem::path(g_mod_root) / romfs_path, ec);
++}
++
++/// "SpeedMultiplier" (float) in the root dictionary of a BYAML file (the plugin reads it from the course map, course_muunt.byaml).
++float ByamlRootFloat(const std::string& path, const char* key, float fallback) {
++    std::ifstream in(path, std::ios::binary);
++    std::vector<u8> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++    auto u16at = [&](size_t o) { return o + 2 <= d.size() ? static_cast<u32>(d[o] | d[o + 1] << 8) : 0u; };
++    auto u24at = [&](size_t o) { return o + 3 <= d.size() ? static_cast<u32>(d[o] | d[o + 1] << 8 | d[o + 2] << 16) : 0u; };
++    auto u32at = [&](size_t o) { return o + 4 <= d.size() ? static_cast<u32>(d[o] | d[o + 1] << 8 | d[o + 2] << 16 | d[o + 3] << 24) : 0u; };
++    if (d.size() < 16 || d[0] != 'Y' || d[1] != 'B') return fallback; // little-endian BYAML only (Switch)
++    (void)u16at;
++    const u32 keys = u32at(4), root = u32at(12);
++    if (keys + 4 > d.size() || d[keys] != 0xC2 || root + 4 > d.size() || d[root] != 0xC1) return fallback;
++    const u32 nkeys = u24at(keys + 1);
++    int key_index = -1;
++    for (u32 k = 0; k < nkeys; ++k) {
++        const u32 so = keys + u32at(keys + 4 + 4 * k);
++        if (so < d.size() && std::strncmp(reinterpret_cast<const char*>(d.data() + so), key, d.size() - so) == 0) {
++            key_index = static_cast<int>(k);
++            break;
++        }
++    }
++    if (key_index < 0) return fallback;
++    const u32 n = u24at(root + 1);
++    for (u32 e = 0; e < n; ++e) {
++        const size_t at = root + 4 + 8 * e;
++        if (u24at(at) == static_cast<u32>(key_index) && at + 8 <= d.size() && d[at + 3] == 0xD2) {
++            const u32 bits = u32at(at + 4);
++            float f;
++            std::memcpy(&f, &bits, 4);
++            return f;
++        }
++    }
++    return fallback;
++}
++
++u64 FieldValue(Core::System& system, const Course& c, u32 field, bool* ok) {
++    *ok = true;
++    switch (field) {
++    case kName: return static_cast<u32>(c.name);
++    case kPlatform: return static_cast<u32>(c.platform);
++    case kAuthor: return static_cast<u32>(c.author);
++    case kCup: return static_cast<u32>(c.cup);
++    case kFlag: *ok = c.flag != -1; return static_cast<u32>(c.flag);
++    case kBase: return static_cast<u32>(c.base);
++    case kBaseBcp: return static_cast<u32>(c.base > 0x4a ? 0x10 : c.base);
++    case kPicture: return Str(system, c.picture);
++    case kFolder: return Str(system, c.folder);
++    case kIcon: {
++        const Cup* cup = CupById(c.cup);
++        return cup ? Str(system, cup->icon) : 0;
++    }
++    }
++    *ok = false;
++    return 0;
++}
++
++int TestCup() {
++    static const int cup = [] { const char* v = std::getenv("KARTRECOMP_CTGP_TEST_CUP"); return v && *v ? std::atoi(v) : -1; }();
++    return cup;
++}
++
++// ---- calling game functions from a hook -------------------------------------------------------------------------------------
++// A hook runs between two guest instructions. To call game code from there (UI helpers the plugin uses), the full register
++// state is saved, the function runs with a trap as its return address (RecompHooks::TrapReturn), and when the last call returned
++// the registers are put back and execution continues at the hooked instruction, whose hook is skipped once.
++struct GuestState {
++    u64 x[32];
++    u64 v[32][2];
++    u8 nzcv[4];
++};
++thread_local u64 t_resume_pc = 0; ///< the hook at this pc is being resumed after its guest calls: do not run it again
++
++struct GuestCall {
++    u64 fn;
++    std::array<u64, 8> args;
++};
++
++/// Runs `calls` in order (args fixed up front), then `done` (registers already restored). Returns true: the hook must return
++/// true too, since pc now points at the first function.
++bool CallGuest(RecompHooks::HookContext& ctx, std::vector<GuestCall> calls, std::function<void(RecompHooks::HookContext&)> done = {}) {
++    if (calls.empty()) return false;
++    auto state = std::make_shared<GuestState>();
++    std::memcpy(state->x, ctx.x, sizeof state->x);
++    std::memcpy(state->v, ctx.v, sizeof state->v);
++    if (ctx.nzcv) std::memcpy(state->nzcv, ctx.nzcv, 4);
++    const u64 resume = ctx.pc;
++    auto list = std::make_shared<std::vector<GuestCall>>(std::move(calls));
++    auto step = std::make_shared<std::function<void(RecompHooks::HookContext&, size_t)>>();
++    *step = [state, resume, list, step, done](RecompHooks::HookContext& c, size_t k) {
++        // set up call k; its return lands in a trap that sets up k + 1 or restores everything
++        const GuestCall& g = (*list)[k];
++        for (size_t a = 0; a < 8; ++a) c.x[a] = g.args[a];
++        const bool last = k + 1 == list->size();
++        c.x[30] = last ? resume : (*list)[k + 1].fn; // where the trap sends execution next (Dispatch sets pc = this)
++        std::weak_ptr<std::function<void(RecompHooks::HookContext&, size_t)>> weak = step;
++        RecompHooks::TrapReturn(c, [state, resume, last, k, weak, done](RecompHooks::HookContext& r) {
++            if (!last) {
++                if (auto s = weak.lock()) (*s)(r, k + 1);
++                return;
++            }
++            std::memcpy(r.x, state->x, sizeof state->x);
++            std::memcpy(r.v, state->v, sizeof state->v);
++            if (r.nzcv) std::memcpy(r.nzcv, state->nzcv, 4);
++            // Dispatch continues at the trap's saved return address, which was set to `resume` above.
++            t_resume_pc = resume;
++            if (done) done(r);
++        });
++        c.pc = g.fn;
++    };
++    (*step)(ctx, 0);
++    return true;
++}
++
++using Handler = bool (*)(RecompHooks::HookContext&, const Site&);
++
++bool H_NameGetter(RecompHooks::HookContext& ctx, const Site&) {
++    // Function entry, w0 = course id: CTGP's ids answer their folder name; the game's ids run the game's function.
++    const int id = static_cast<int>(ctx.x[0]);
++    const Course* c = id >= kFirstCtgpId ? CourseById(id) : nullptr;
++    if (!c) return false;
++    ctx.x[0] = Str(ctx.system, c->folder);
++    ctx.pc = ctx.x[30];
++    return true;
++}
++bool H_SceneLabels(RecompHooks::HookContext& ctx, const Site&) {
++    // x0 = {u32 course index, u32 platform label, u32 name label} about to be shown on the course screen.
++    auto& mem = ctx.system.ApplicationMemory();
++    if (const Course* c = CtgpCourseByIndex(mem.Read32(ctx.x[0]))) {
++        mem.Write32(ctx.x[0] + 4, static_cast<u32>(c->platform));
++        mem.Write32(ctx.x[0] + 8, static_cast<u32>(c->name));
++    }
++    return false;
++}
++bool H_CupLabel(RecompHooks::HookContext& ctx, const Site&) {
++    // Function entry: x0 -> cup id; returns the cup's name label.
++    const int cup = static_cast<s8>(ctx.system.ApplicationMemory().Read8(ctx.x[0]));
++    if (!IsCtgpCup(cup)) return false;
++    ctx.x[0] = static_cast<u32>(CupById(cup)->label);
++    ctx.pc = ctx.x[30];
++    return true;
++}
++bool H_CupSelect(RecompHooks::HookContext& ctx, const Site&) {
++    // Before "str w10, [x9, #course]": w24 = cup, w25 = slot; w10 = the slot's course index.
++    const int cup = static_cast<int>(static_cast<u32>(ctx.x[24])), slot = static_cast<int>(static_cast<u32>(ctx.x[25]));
++    if (!IsCtgpCup(cup)) return false;
++    const Cup* c = CupById(cup);
++    if (slot >= 0 && slot < static_cast<int>(c->courses.size())) ctx.x[10] = static_cast<u32>(c->courses[slot] - 1);
++    return false;
++}
++bool H_GpSlot(RecompHooks::HookContext& ctx, const Site&) {
++    // Grand Prix start, after "ldr w9, [cup table record + slot]": w23 = cup, x22 = slot * 0x10; w9 = course index.
++    int cup = static_cast<int>(static_cast<u32>(ctx.x[23]));
++    if (TestCup() >= 0) cup = TestCup();
++    if (!IsCtgpCup(cup)) return false;
++    const Cup* c = CupById(cup);
++    const u64 slot = ctx.x[22] >> 4;
++    if (slot < c->courses.size()) ctx.x[9] = static_cast<u32>(c->courses[slot] - 1);
++    if (slot == 0) LOG_INFO(Core_ARM, "CTGP: Grand Prix of cup {} ({})", cup, CourseById(c->courses[0])->folder);
++    return false;
++}
++bool H_GpLabels(RecompHooks::HookContext& ctx, const Site&) {
++    // After "ldur x8, [record, #4]" (platform | name << 32), before it is stored next to the course index at [x9 - 4].
++    if (const Course* c = CtgpCourseByIndex(ctx.system.ApplicationMemory().Read32(ctx.x[9] - 4)))
++        ctx.x[8] = static_cast<u64>(static_cast<u32>(c->platform)) | (static_cast<u64>(static_cast<u32>(c->name)) << 32);
++    return false;
++}
++bool H_BgmIndex(RecompHooks::HookContext& ctx, const Site&) {
++    // Race music controller start, after "ldr w8, [race info, #0x1a0]" (x0 = race info): the track's music settings course.
++    g_singleton = ctx.x[0];
++    if (const Course* c = CtgpCourseByIndex(static_cast<u32>(ctx.x[8]))) ctx.x[8] = static_cast<u32>(c->bgm);
++    return false;
++}
++bool H_MusicPath(RecompHooks::HookContext& ctx, const Site&) {
++    // File open, x1 = path. On a CTGP track: the course music (pBGM_*) becomes the track's own stream (pBGM_CT_xx<suffix>), and
++    // other streams come from the track's own Resource/Stream folder when it has them (plugin FUN_16c98 / FUN_116b0).
++    const int index = CurrentIndex(ctx.system);
++    const Course* c = index >= 0 ? CtgpCourseByIndex(static_cast<u32>(index)) : nullptr;
++    if (!c) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const std::string path = mem.ReadCString(ctx.x[1], 512);
++    static const std::string kStream = "content://Audio/Resource/Stream/";
++    if (path.rfind(kStream, 0) != 0) return false;
++    const std::string name = path.substr(kStream.size());
++    std::string alt;
++    if (name.rfind("pBGM_", 0) == 0) {
++        std::string suffix = ".bfstm";
++        for (const char* s : {"_GOAL.bfstm", "_RESULT.bfstm", "_START_GRID.bfstm", "_REPLAY.bfstm", "_N.bfstm", "_LAP2.bfstm", "_F.bfstm"})
++            if (name.find(s) != std::string::npos) {
++                suffix = s;
++                break;
++            }
++        const std::string file = "pBGM_" + c->folder + suffix;
++        if (HostFileExists("Audio/Resource/Stream/" + file)) alt = kStream + file;
++    } else if (HostFileExists("Course/" + c->folder + "/Resource/Stream/" + name)) {
++        alt = "content://Course/" + c->folder + "/Resource/Stream/" + name;
++    }
++    if (alt.empty()) return false;
++    if (const u64 g = Str(ctx.system, alt)) ctx.x[1] = g;
++    return false;
++}
++bool H_MapObjPath(RecompHooks::HookContext& ctx, const Site&) {
++    // Archive/resource load, x2 = SafeString* (char* at +8). On a CTGP track a MapObj/ file the track ships itself is loaded from
++    // Course/<folder>/ instead (plugin FUN_17cc8).
++    const int index = CurrentIndex(ctx.system);
++    const Course* c = index >= 0 ? CtgpCourseByIndex(static_cast<u32>(index)) : nullptr;
++    if (!c || !ctx.x[2]) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const u64 str = mem.Read64(ctx.x[2] + 8);
++    if (!str) return false;
++    std::string path = mem.ReadCString(str, 512);
++    static const std::string kContent = "content://";
++    std::string rel = path.rfind(kContent, 0) == 0 ? path.substr(kContent.size()) : path;
++    const auto at = rel.find("MapObj/");
++    if (at != 0 && (at == std::string::npos || rel.compare(0, 11, "RaceCommon/") != 0)) return false;
++    const std::string local = "Course/" + c->folder + "/" + rel.substr(at);
++    if (!HostFileExists(local)) return false;
++    if (const u64 g = Str(ctx.system, (path.rfind(kContent, 0) == 0 ? kContent : std::string()) + local)) mem.Write64(ctx.x[2] + 8, g);
++    return false;
++}
++bool H_SpeedLoad(RecompHooks::HookContext& ctx, const Site&) {
++    // End of the course load: the track's SpeedMultiplier (default 1).
++    g_speed_multiplier = 1.0f;
++    const int index = CurrentIndex(ctx.system);
++    if (const Course* c = index >= 0 ? CtgpCourseByIndex(static_cast<u32>(index)) : nullptr) {
++        g_speed_multiplier = ByamlRootFloat((std::filesystem::path(g_mod_root) / "Course" / c->folder / "course_muunt.byaml").string(),
++                                            "SpeedMultiplier", 1.0f);
++        if (g_speed_multiplier != 1.0f) LOG_INFO(Core_ARM, "CTGP: {} speed multiplier {}", c->folder, g_speed_multiplier);
++    }
++    return false;
++}
++bool H_SpeedScale(RecompHooks::HookContext& ctx, const Site& site) {
++    // s<reg> *= SpeedMultiplier (kart physics normalisations and limits).
++    if (g_speed_multiplier == 1.0f) return false;
++    float f;
++    std::memcpy(&f, &ctx.v[site.reg][0], 4);
++    f *= g_speed_multiplier;
++    u32 bits;
++    std::memcpy(&bits, &f, 4);
++    ctx.v[site.reg][0] = (ctx.v[site.reg][0] & ~0xffffffffULL) | bits;
++    return false;
++}
++bool H_TimerLimit(RecompHooks::HookContext& ctx, const Site&) {
++    // Race time limit (5:00.000 in w1): none on CTGP's tracks.
++    const int index = CurrentIndex(ctx.system);
++    if (index > 0x7a) ctx.x[1] = 0;
++    return false;
++}
++
++// ---- cup screen: CTGP's paging (plugin FUN_166bc remap, FUN_17190 input) -------------------------------------------------------
++// The game's 12 cup icons show the columns line .. line+5 of CTGP's two cup rows (game cups and CTGP cups, 14 columns); L / R
++// move the line. The game's own line toggle (base / Booster cups) moves to the button bit 9, as in the plugin.
++int g_line = 0;
++constexpr int kCupSlot[12] = {0, 1, 2, 3, 6, 7, 8, 9, 4, 10, 5, 11}; ///< game cup id -> screen slot (0..5 top, 6..11 bottom)
++
++int RemapCup(int cup) {
++    const int count = static_cast<int>(g_row_top.size());
++    if (count == 0 || g_row_bottom.size() != g_row_top.size()) return cup;
++    if (cup < 0 || cup >= 12) return cup; // Booster cups (their own line) and anything else unchanged
++    const int slot = kCupSlot[cup];
++    const auto& row = slot > 5 ? g_row_bottom : g_row_top;
++    return row[static_cast<size_t>((g_line + slot % 6) % count)];
++}
++
++u64 GameFn(u64 off304, u64 off401) {
++    return KartHookTrace::MainBase() + (g_is304 ? off304 : off401);
++}
++
++bool H_CupIconSet(RecompHooks::HookContext& ctx, const Site&) {
++    // CupIcon::set(icon, &cup, &state), after "str w8, [icon, #0x3d0]": the icon shows the cup of its column on the current line.
++    const int cup = static_cast<int>(static_cast<u32>(ctx.x[8]));
++    const int shown = RemapCup(cup);
++    if (shown != cup) ctx.system.ApplicationMemory().Write32(ctx.x[20], static_cast<u32>(shown));
++    return false;
++}
++bool H_CupDecided(RecompHooks::HookContext& ctx, const Site&) {
++    // Cup chosen on the cup screen, after "ldr w8, [x19]" (the icon's cup id): the cup of that column.
++    ctx.x[8] = static_cast<u32>(RemapCup(static_cast<int>(static_cast<u32>(ctx.x[8]))));
++    return false;
++}
++bool H_CupInput(RecompHooks::HookContext& ctx, const Site&) {
++    // Cup screen update, after the trigger bits (w20) and the cursor (w9) are loaded; x19 = page, [x19 + 0x124] = state.
++    auto& mem = ctx.system.ApplicationMemory();
++    const u32 trig = static_cast<u32>(ctx.x[20]);
++    const u32 state = mem.Read32(ctx.x[19] + 0x124);
++    const u32 cursor = static_cast<u32>(ctx.x[9]);
++    const int count = static_cast<int>(g_row_top.size());
++    // the game's own line toggle: bit 9 instead of L / R
++    ctx.x[20] = (trig & ~0x1800u) | ((trig & 0x200u) ? 0x800u : 0u);
++    if (state != 0 || cursor >= 12 || count == 0 || !(trig & 0x1800u)) return false;
++    g_line = (g_line + ((trig & 0x1000u) ? 1 : count - 1)) % count;
++    LOG_INFO(Core_ARM, "CTGP: cup line {}", g_line);
++    // redraw the icons for the new line: the game's cup icon set-up (page, 1)
++    return CallGuest(ctx, {GuestCall{GameFn(0x491674, 0x494b44), {ctx.x[19], 1}}});
++}
++
++struct NamedHandler {
++    const char* name;
++    Handler fn;
++};
++constexpr NamedHandler kHandlers[] = {
++    {"name_getter", H_NameGetter}, {"scene_labels", H_SceneLabels}, {"cup_label", H_CupLabel},   {"cup_select", H_CupSelect},
++    {"gp_slot", H_GpSlot},         {"gp_labels", H_GpLabels},       {"bgm_index", H_BgmIndex},   {"music_path", H_MusicPath},
++    {"mapobj_path", H_MapObjPath}, {"speed_load", H_SpeedLoad},     {"speed_scale", H_SpeedScale}, {"timer_limit", H_TimerLimit},
++    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_input", H_CupInput},
++};
++
++bool RunSite(RecompHooks::HookContext& ctx, const Site& site, bool is304, Handler handler) {
++    if (t_resume_pc && t_resume_pc == ctx.pc) { // back from guest calls this hook made: let the instruction run
++        t_resume_pc = 0;
++        return false;
++    }
++    u64* x = ctx.x;
++    switch (site.act) {
++    case Act::Base: {
++        const u32 v = static_cast<u32>(x[site.reg]);
++        if (v < 0x1000) x[site.reg] = static_cast<u32>(BaseIndex(static_cast<int>(v)));
++        return false;
++    }
++    case Act::Clamp: {
++        const u32 v = static_cast<u32>(x[site.reg]);
++        if (v >= 0x7b && v < 0x1000) x[site.reg] = 0x10;
++        return false;
++    }
++    case Act::Set:
++        x[site.reg] = site.arg;
++        ctx.pc += 4;
++        return true;
++    case Act::Cmp:
++        if (!ctx.nzcv) return false;
++        SetCmpFlags(ctx.nzcv, static_cast<u32>(x[site.reg]), site.arg);
++        ctx.pc += 4;
++        return true;
++    case Act::Branch:
++        ctx.pc = KartHookTrace::MainBase() + (is304 ? site.arg2 : site.arg);
++        return true;
++    case Act::Nop:
++        ctx.pc += 4;
++        return true;
++    case Act::Save:
++        g_saved = x[site.reg];
++        return false;
++    case Act::Field: {
++        const u32 kind = (site.arg >> 8) & 0xff, src = site.arg & 0xff, off = site.arg >> 16;
++        u32 index;
++        auto& mem = ctx.system.ApplicationMemory();
++        if (kind == 0) {
++            index = static_cast<u32>(x[src]);
++        } else {
++            const u64 base = kind == 1 ? x[src] : g_saved;
++            if (!base) return false;
++            if (kind == 1 && off == 0x1a0) g_singleton = base;
++            index = mem.Read32(base + off);
++        }
++        const Course* c = CtgpCourseByIndex(index);
++        if (!c) return false;
++        bool ok = false;
++        const u64 value = FieldValue(ctx.system, *c, site.arg2, &ok);
++        if (ok && value) x[site.reg] = value;
++        return false;
++    }
++    case Act::Call:
++        return handler ? handler(ctx, site) : false;
++    }
++    return false;
++}
++
++} // namespace
++
++bool Enabled() {
++    return g_enabled;
++}
++const std::vector<Course>& Courses() {
++    return g_courses;
++}
++const std::vector<Cup>& Cups() {
++    return g_cups;
++}
++int CourseCount() {
++    return static_cast<int>(g_courses.size());
++}
++int BaseIndex(int course_index) {
++    const int id = course_index + 1;
++    if (id <= 0 || id >= static_cast<int>(g_courses.size())) return course_index;
++    return g_courses[id].base;
++}
++
++void Install(Core::System& system, u64 main_base, u64 build_id) {
++    // The launcher's CTGP import writes the tables into the mod folder ("CTGP DX Cups"); a mod turned off in the launcher is in the
++    // config's disabled add-on list, and then CTGP stays off. KARTRECOMP_CTGP_TABLES points at a tables file directly (tests).
++    const char* env = std::getenv("KARTRECOMP_CTGP_TABLES");
++    std::string path;
++    if (env && *env) {
++        path = env;
++    } else {
++        constexpr u64 kTitleId = 0x0100152000022000ULL;
++        const auto& disabled = Settings::values.disabled_addons[kTitleId];
++        if (std::find(disabled.begin(), disabled.end(), "CTGP DX Cups") != disabled.end()) {
++            LOG_INFO(Core_ARM, "CTGP: turned off in the launcher");
++            return;
++        }
++        path = Common::FS::PathToUTF8String(Common::FS::GetSuyuPath(Common::FS::SuyuPath::LoadDir) / "0100152000022000" /
++                                            "CTGP DX Cups" / "ctgp_tables.txt");
++    }
++    g_enabled = LoadTables(path);
++    if (!g_enabled) {
++        LOG_INFO(Core_ARM, "CTGP: no tables at {} (CTGP DX not installed)", path);
++        return;
++    }
++    const bool is304 = KartHookTrace::BuildIs304(build_id), is401 = KartHookTrace::BuildIs401(build_id);
++    g_is304 = is304;
++    if (!is304 && !is401) {
++        LOG_WARNING(Core_ARM, "CTGP: tables loaded but this game build is not 3.0.4 or 4.0.1");
++        g_enabled = false;
++        return;
++    }
++    g_mod_root = Common::FS::PathToUTF8String(std::filesystem::path(path).parent_path() / "romfs");
++    int installed = 0;
++    for (const Site& s : kSites) {
++        const u32 off = is304 ? s.off304 : s.off401;
++        if (!off) continue;
++        const Site* site = &s;
++        Handler handler = nullptr;
++        if (site->act == Act::Call) {
++            for (const NamedHandler& h : kHandlers)
++                if (std::strcmp(h.name, site->handler) == 0) handler = h.fn;
++            if (!handler) {
++                LOG_WARNING(Core_ARM, "CTGP: no handler {} (site {})", site->handler, site->what);
++                continue;
++            }
++        }
++        RecompHooks::Install(main_base + off,
++                             [site, is304, handler](RecompHooks::HookContext& ctx) { return RunSite(ctx, *site, is304, handler); });
++        ++installed;
++    }
++    LOG_INFO(Core_ARM, "CTGP: {} courses, {} cups, {} hooks for {}", g_courses.size(), g_cups.size(), installed,
++             is304 ? "3.0.4" : "4.0.1");
++    (void)system;
++}
++
++} // namespace Core::CtgpDx
+diff --git a/src/core/arm/recomp/ctgp_dx.h b/src/core/arm/recomp/ctgp_dx.h
+new file mode 100644
+index 0000000000..1dedb70831
+--- /dev/null
++++ b/src/core/arm/recomp/ctgp_dx.h
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: CTGP Deluxe recreated for the 64-bit game builds (3.0.4, 4.0.1).
++//
++// The original mod is a Skyline plugin for the 32-bit 3.0.3 build that patches ~230 places in the game's code. Here the same changes
++// are host hooks (block hooks on exact instructions; the exporter starts a block at every site, data/mk8d-<version>/ctgp_roots.txt),
++// driven by the plugin's own course and cup tables, which the launcher reads from the user's CTGPDX.nro at import
++// (ctgp_tables.txt). See docs/CTGP_PORT.md.
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::CtgpDx {
++
++/// One course id of the extended course table (the game's 0..123, CTGP's 124..187).
++struct Course {
++    int id = 0;
++    std::string folder;  ///< romfs folder under Course/ ("CT_00")
++    std::string picture; ///< picture name ("CT_00_00")
++    int index = -1;      ///< course index = id - 1
++    int base = -1;       ///< index of the original course whose behaviour this track uses
++    int name = -1;       ///< name label (Common.msbt / CTGPText.msbt)
++    int platform = -1;   ///< platform label, -1 = none
++    int slot = -1;       ///< position in its cup (0..3)
++    int author = -1;     ///< author label
++    int bgm = -1;        ///< course index whose music settings are used
++    int cup = -1;        ///< cup id (0..39)
++    int flag = -1;
++};
++
++struct Cup {
++    int id = 0;
++    int label = 0;              ///< cup name label
++    std::string icon;           ///< icon name ("Boo" -> UI/cmn/race/ym_CupIconBoo_*.bntx)
++    std::vector<int> courses;   ///< course ids
++};
++
++/// True when CTGP's tables were found (the mod is installed and enabled).
++bool Enabled();
++const std::vector<Course>& Courses();
++const std::vector<Cup>& Cups();
++/// Number of course ids in the extended table (188 with CTGP's 64 tracks).
++int CourseCount();
++/// Base course index for a course index (identity for the game's own courses).
++int BaseIndex(int course_index);
++
++/// Installs the CTGP hooks for this main build (build id from the NSO header). Called from KartHookTrace::InstallModHooks.
++void Install(Core::System& system, u64 main_base, u64 build_id);
++
++} // namespace Core::CtgpDx
+diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
+new file mode 100644
+index 0000000000..071baa2ad8
+--- /dev/null
++++ b/src/core/arm/recomp/ctgp_sites.inc
+@@ -0,0 +1,131 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
++// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
++CTGP_SITE(0x4a71d0, 0x4aa554, Clamp, 8, 0x0, 0x0, "", "0x4e73e8")
++CTGP_SITE(0x4a727c, 0x4aa600, Clamp, 8, 0x0, 0x0, "", "0x4e74a4")
++CTGP_SITE(0x4a7328, 0x4aa6ac, Clamp, 8, 0x0, 0x0, "", "0x4e7560")
++CTGP_SITE(0x3dd428, 0x3df5a4, Clamp, 8, 0x0, 0x0, "", "0x40d8d8")
++CTGP_SITE(0x4a54c4, 0x4a8848, Clamp, 22, 0x0, 0x0, "", "0x4e53ac")
++CTGP_SITE(0x52f88c, 0x533150, Base, 8, 0x0, 0x0, "", "0x5805d0")
++CTGP_SITE(0x5490a4, 0x54cae0, Base, 10, 0x0, 0x0, "", "0x59d25c")
++CTGP_SITE(0x52fb48, 0x53340c, Base, 10, 0x0, 0x0, "", "0x58092c")
++CTGP_SITE(0x8dc94, 0x8ebec, Base, 8, 0x0, 0x0, "", "0x965b8")
++CTGP_SITE(0x114b4, 0x11cb0, Base, 8, 0x0, 0x0, "", "0x12558")
++CTGP_SITE(0x13bd4, 0x143d0, Base, 8, 0x0, 0x0, "", "0x14e50")
++CTGP_SITE(0x15cec, 0x164e8, Base, 8, 0x0, 0x0, "", "0x1701c")
++CTGP_SITE(0x17b00, 0x182fc, Base, 8, 0x0, 0x0, "", "0x19054")
++CTGP_SITE(0x3177c, 0x32054, Base, 8, 0x0, 0x0, "", "0x3405c")
++CTGP_SITE(0x32c54, 0x3352c, Base, 8, 0x0, 0x0, "", "0x35568")
++CTGP_SITE(0x52cc0, 0x53adc, Base, 8, 0x0, 0x0, "", "0x57480")
++CTGP_SITE(0x53e40, 0x548b0, Base, 8, 0x0, 0x0, "", "0x57edc")
++CTGP_SITE(0x6b240, 0x6c074, Base, 8, 0x0, 0x0, "", "0x71300")
++CTGP_SITE(0x7e3e4, 0x7f218, Base, 8, 0x0, 0x0, "", "0x85a7c")
++CTGP_SITE(0xa42ac, 0xa5204, Base, 8, 0x0, 0x0, "", "0xae588")
++CTGP_SITE(0xab518, 0xac4d8, Base, 8, 0x0, 0x0, "", "0xb5e50")
++CTGP_SITE(0xb7ef4, 0xb8f10, Base, 9, 0x0, 0x0, "", "0xc3788")
++CTGP_SITE(0xb9214, 0xba230, Base, 8, 0x0, 0x0, "", "0xc4a70")
++CTGP_SITE(0xcb5ac, 0xcc5c8, Base, 8, 0x0, 0x0, "", "0xd8f08")
++CTGP_SITE(0xd042c, 0xd1448, Base, 9, 0x0, 0x0, "", "0xde108")
++CTGP_SITE(0xd04cc, 0xd14e8, Base, 8, 0x0, 0x0, "", "0xde190")
++CTGP_SITE(0xd7578, 0xd863c, Base, 8, 0x0, 0x0, "", "0xe698c")
++CTGP_SITE(0xd7f8c, 0xd9060, Base, 8, 0x0, 0x0, "", "0xe7470")
++CTGP_SITE(0x1049b0, 0x105be0, Base, 8, 0x0, 0x0, "", "0x119d44")
++CTGP_SITE(0x105eb0, 0x1073cc, Base, 8, 0x0, 0x0, "", "0x11b2b8 (plugin read the wrong register; intent kept)")
++CTGP_SITE(0x105f74, 0x107490, Base, 8, 0x0, 0x0, "", "0x11b2cc (plugin read the wrong register; intent kept)")
++CTGP_SITE(0x127d00, 0x1291fc, Base, 8, 0x0, 0x0, "", "0x13e914")
++CTGP_SITE(0x13cb84, 0x13e09c, Base, 8, 0x0, 0x0, "", "0x1542fc")
++CTGP_SITE(0x14d7a0, 0x14ecd4, Base, 8, 0x0, 0x0, "", "0x166c6c")
++CTGP_SITE(0x14d7b0, 0x14ece4, Base, 8, 0x0, 0x0, "", "0x166c7c")
++CTGP_SITE(0x1656e8, 0x166c1c, Base, 8, 0x0, 0x0, "", "0x17fb2c")
++CTGP_SITE(0x16ab98, 0x16c0cc, Base, 8, 0x0, 0x0, "", "0x184ad8")
++CTGP_SITE(0x7ead84, 0x7ddfd8, Base, 8, 0x0, 0x0, "", "0x870180 (plugin read the wrong register; intent kept)")
++CTGP_SITE(0x2638c8, 0x264d90, Base, 8, 0x0, 0x0, "", "0x28629c")
++CTGP_SITE(0x125998, 0x126e94, Base, 22, 0x0, 0x0, "", "0x13c28c")
++CTGP_SITE(0x8d6f8c, 0x8caa74, Base, 8, 0x0, 0x0, "", "0x965910")
++CTGP_SITE(0x114d8, 0x11cd4, Set, 2, 0xbc, 0x0, "", "0x12580")
++CTGP_SITE(0x11518, 0x11d14, Cmp, 23, 0xba, 0x0, "", "0x125c4")
++CTGP_SITE(0x114f8, 0x11cf4, Set, 24, 0xbb, 0x0, "", "0x125c8")
++CTGP_SITE(0x11520, 0x11d1c, Cmp, 23, 0xbb, 0x0, "", "0x125cc")
++CTGP_SITE(0x104c64, 0x105e90, Set, 2, 0xbc, 0x0, "", "0x11a028")
++CTGP_SITE(0x104ca0, 0x105ed0, Cmp, 24, 0xba, 0x0, "", "0x11a068")
++CTGP_SITE(0x104c80, 0x105eb0, Set, 25, 0xbb, 0x0, "", "0x11a06c")
++CTGP_SITE(0x104ca8, 0x105ed8, Cmp, 24, 0xbb, 0x0, "", "0x11a070")
++CTGP_SITE(0x127d24, 0x129220, Set, 2, 0xbc, 0x0, "", "0x13e93c")
++CTGP_SITE(0x127d64, 0x129260, Cmp, 20, 0xba, 0x0, "", "0x13e980")
++CTGP_SITE(0x127d44, 0x129240, Set, 28, 0xbb, 0x0, "", "0x13e984")
++CTGP_SITE(0x127d6c, 0x129268, Cmp, 20, 0xbb, 0x0, "", "0x13e988")
++CTGP_SITE(0x1c4140, 0x1c5648, Set, 2, 0xbc, 0x0, "", "0x1e3388")
++CTGP_SITE(0x1c4180, 0x1c5688, Cmp, 23, 0xba, 0x0, "", "0x1e33c8")
++CTGP_SITE(0x1c4160, 0x1c5668, Set, 24, 0xbb, 0x0, "", "0x1e33cc")
++CTGP_SITE(0x1c4188, 0x1c5690, Cmp, 23, 0xbb, 0x0, "", "0x1e33d0")
++CTGP_SITE(0x1c6aa0, 0x1c7fa8, Set, 2, 0xbc, 0x0, "", "0x1e5c18")
++CTGP_SITE(0x1c6ae0, 0x1c7fe8, Cmp, 23, 0xba, 0x0, "", "0x1e5c58")
++CTGP_SITE(0x1c6ac0, 0x1c7fc8, Set, 24, 0xbb, 0x0, "", "0x1e5c5c")
++CTGP_SITE(0x1c6ae8, 0x1c7ff0, Cmp, 23, 0xbb, 0x0, "", "0x1e5c60")
++CTGP_SITE(0x1efccc, 0x1f11d8, Set, 2, 0xbc, 0x0, "", "0x20ff2c")
++CTGP_SITE(0x1efd0c, 0x1f1218, Cmp, 23, 0xba, 0x0, "", "0x20ff6c")
++CTGP_SITE(0x1efcec, 0x1f11f8, Set, 24, 0xbb, 0x0, "", "0x20ff70")
++CTGP_SITE(0x1efd14, 0x1f1220, Cmp, 23, 0xbb, 0x0, "", "0x20ff74")
++CTGP_SITE(0x28ea40, 0x28ff08, Set, 2, 0xbc, 0x0, "", "0x2b2390")
++CTGP_SITE(0x28ea80, 0x28ff48, Cmp, 23, 0xba, 0x0, "", "0x2b23d0")
++CTGP_SITE(0x28ea60, 0x28ff28, Set, 24, 0xbb, 0x0, "", "0x2b23d4")
++CTGP_SITE(0x28ea88, 0x28ff50, Cmp, 23, 0xbb, 0x0, "", "0x2b23d8")
++CTGP_SITE(0x355150, 0x3565c0, Set, 2, 0xbc, 0x0, "", "0x37afe4")
++CTGP_SITE(0x355190, 0x356600, Cmp, 23, 0xba, 0x0, "", "0x37b024")
++CTGP_SITE(0x355170, 0x3565e0, Set, 24, 0xbb, 0x0, "", "0x37b028")
++CTGP_SITE(0x355198, 0x356608, Cmp, 23, 0xbb, 0x0, "", "0x37b02c")
++CTGP_SITE(0xe2fb0, 0xe4344, Set, 2, 0xbc, 0x0, "", "0xf2df0")
++CTGP_SITE(0xe2ff4, 0xe4388, Cmp, 24, 0xba, 0x0, "", "0xf2e34")
++CTGP_SITE(0xe2fd4, 0xe4368, Set, 25, 0xbb, 0x0, "", "0xf2e38")
++CTGP_SITE(0xe2ffc, 0xe4390, Cmp, 24, 0xbb, 0x0, "", "0xf2e3c")
++CTGP_SITE(0x4170f0, 0x418ea0, Cmp, 20, 0xbb, 0x0, "", "0x44ae78")
++CTGP_SITE(0x415b84, 0x417934, Set, 1, 0xbb, 0x0, "", "0x449914")
++CTGP_SITE(0x415b90, 0x417940, Set, 20, 0xbb, 0x0, "", "0x44991c")
++CTGP_SITE(0x8b5e34, 0x8a9864, Cmp, 8, 0xbb, 0x0, "", "0x94424c")
++CTGP_SITE(0x415bb4, 0x417964, Set, 0, 0x5e0, 0x0, "", "allocation 0x3e0 -> 0xbc * 8")
++CTGP_SITE(0x415c1c, 0x4179cc, Cmp, 8, 0xbc, 0x0, "", "fill loop (steps of 2) up to 0xbc")
++CTGP_SITE(0x1acb0, 0x1b4ac, Call, 0, 0x0, 0x0, "name_getter", "0x1b4ac")
++CTGP_SITE(0x4a37f0, 0x4a6b74, Clamp, 8, 0x0, 0x0, "", "0x4e40dc")
++CTGP_SITE(0x4a0730, 0x4a3ab4, Call, 0, 0x1, 0x0, "scene_labels", "0x4e1454 (plugin swapped name/platform and skipped +1; intent kept)")
++CTGP_SITE(0x443cc4, 0x446158, Field, 0, 0xb40113, 0x0, "", "0x47aaf0")
++CTGP_SITE(0x443cd8, 0x44616c, Field, 8, 0xb40113, 0x1, "", "0x47ab04")
++CTGP_SITE(0x443cec, 0x446180, Field, 0, 0xb40113, 0x1, "", "0x47ab1c")
++CTGP_SITE(0x41dd40, 0x41fd6c, Call, 0, 0x2, 0x0, "cup_label", "0x451f38 (function: cup name label)")
++CTGP_SITE(0x494f38, 0x498408, Call, 0, 0x3, 0x0, "cup_select", "0x4d460c")
++CTGP_SITE(0x439ea8, 0x43c33c, Field, 8, 0x114, 0x1, "", "0x470208")
++CTGP_SITE(0x439ebc, 0x43c350, Field, 0, 0x114, 0x1, "", "0x470224")
++CTGP_SITE(0x439ef4, 0x43c388, Field, 8, 0x114, 0x0, "", "0x47025c")
++CTGP_SITE(0x4f7f58, 0x4fb624, Call, 0, 0x4, 0x0, "gp_slot", "0x5432f8 (Grand Prix course list; after the load of the course index)")
++CTGP_SITE(0x4f7f74, 0x4fb640, Call, 0, 0x5, 0x0, "gp_labels", "0x543310 / 0x543314 (after the load of both labels)")
++CTGP_SITE(0x417714, 0x4194c4, Field, 20, 0x15, 0x7, "", "0x44b4d0")
++CTGP_SITE(0x4172b8, 0x419068, Field, 20, 0x115, 0x7, "", "0x44b040")
++CTGP_SITE(0x49e358, 0x4a16dc, Field, 21, 0x1a00114, 0x0, "", "0x4de824")
++CTGP_SITE(0x49e328, 0x4a16ac, Field, 21, 0x1a00114, 0x1, "", "0x4de7ec")
++CTGP_SITE(0x50985c, 0x50cf70, Field, 25, 0x1a00114, 0x0, "", "0x556c90")
++CTGP_SITE(0x509890, 0x50cfa4, Field, 25, 0x1a00114, 0x1, "", "0x556cc8")
++CTGP_SITE(0x509c1c, 0x50d330, Field, 2, 0x1a00114, 0x9, "", "0x557194")
++CTGP_SITE(0x509fe8, 0x50d6fc, Field, 8, 0x1a00114, 0x3, "", "0x5575cc")
++CTGP_SITE(0x50aeec, 0x50e600, Save, 8, 0x0, 0x0, "", "scene pointer for the next two")
++CTGP_SITE(0x50af3c, 0x50e650, Field, 2, 0x143c0200, 0x9, "", "0x558750")
++CTGP_SITE(0x50af58, 0x50e66c, Field, 8, 0x143c0200, 0x3, "", "0x558780")
++CTGP_SITE(0x87c0a8, 0x86f610, Field, 8, 0x1a00114, 0x4, "", "0x906df8")
++CTGP_SITE(0x384850, 0x385cb4, Field, 8, 0x8, 0x6, "", "0x3ac31c")
++CTGP_SITE(0x9b124, 0x9c07c, Call, 0, 0x6, 0x0, "bgm_index", "0xa4a4c (after the load of the course index: music settings course)")
++CTGP_SITE(0x605c44, 0x5f8ea0, Call, 0, 0x7, 0x0, "music_path", "0x669480 (file open: track music and per-track streams)")
++CTGP_SITE(0x62ff64, 0x6231c0, Call, 0, 0x8, 0x0, "mapobj_path", "0x6953e4 (course-local MapObj files)")
++CTGP_SITE(0x10a49c, 0x10b95c, Call, 0, 0x9, 0x0, "speed_load", "0x11f830 (SpeedMultiplier from the course map)")
++CTGP_SITE(0x39981c, 0x39b978, Call, 0, 0xa, 0x0, "timer_limit", "0x3c45bc (no time limit on CTGP tracks)")
++CTGP_SITE(0x259cc, 0x261c8, Call, 2, 0xb, 0x0, "speed_scale", "0x278e8")
++CTGP_SITE(0x20dac, 0x215a8, Call, 1, 0xc, 0x0, "speed_scale", "0x226f8")
++CTGP_SITE(0x20f8c, 0x21788, Call, 0, 0xd, 0x0, "speed_scale", "0x227f8")
++CTGP_SITE(0x2102c, 0x21828, Call, 1, 0xe, 0x0, "speed_scale", "0x22898")
++CTGP_SITE(0x32bdc, 0x334b4, Call, 1, 0xf, 0x0, "speed_scale", "0x354f8")
++CTGP_SITE(0x3796c, 0x38248, Call, 1, 0x10, 0x0, "speed_scale", "0x3a558")
++CTGP_SITE(0x1818ac, 0x182e2c, Call, 1, 0x11, 0x0, "speed_scale", "0x19d648 (3.0.4 field 0x428, checked by hand)")
++CTGP_SITE(0x0, 0x182e40, Call, 0, 0x12, 0x0, "speed_scale", "0x19d690 (path only in 4.0.1)")
++CTGP_SITE(0x1818f4, 0x182e7c, Call, 0, 0x13, 0x0, "speed_scale", "0x19d690 (3.0.4 field 0x428, checked by hand)")
++CTGP_SITE(0x4396f0, 0x43bb84, Call, 0, 0x14, 0x0, "cup_icon_set", "0x46fa74 (CupIcon::set, after the cup id is stored in the icon)")
++CTGP_SITE(0x491b20, 0x494ff0, Call, 0, 0x15, 0x0, "cup_decided", "0x4d0b48 (cup chosen)")
++CTGP_SITE(0x493238, 0x496708, Call, 0, 0x16, 0x0, "cup_input", "0x4d268c / 0x4d27fc.. (L/R paging; the game's line toggle moves to bit 9)")
++CTGP_SITE(0x403f54, 0x405fa4, Set, 3, 0x300, 0x0, "", "0x436928 (0x96 -> 0x300)")
++CTGP_SITE(0x404740, 0x406794, Set, 3, 0x150, 0x0, "", "0x437144 (0x46 -> 0x150)")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..11a0a8b666
@@ -1829,10 +2690,10 @@ index 0000000000..11a0a8b666
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/host_hooks.h b/src/core/arm/recomp/host_hooks.h
 new file mode 100644
-index 0000000000..5887608b55
+index 0000000000..062b669ceb
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,60 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: host hooks for the static recompiler's dispatcher.
 +//
@@ -1862,6 +2723,7 @@ index 0000000000..5887608b55
 +    u64& pc;
 +    Core::System& system;
 +    u64 (*v)[2]; ///< v0..v31, low half first (floating-point arguments live in v0..v7)
++    u8* nzcv = nullptr; ///< condition flags N, Z, C, V (one byte each, 0/1); set for block hooks, which may replace a compare
 +};
 +
 +/// True when the hook fully handled the call and set pc itself.
@@ -1894,10 +2756,10 @@ index 0000000000..5887608b55
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..d5998f4bf0
+index 0000000000..d7c0e38126
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,547 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_data_path.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
@@ -1918,6 +2780,7 @@ index 0000000000..d5998f4bf0
 +#include "common/fs/path_util.h"
 +#include "common/kart_overlay.h"
 +#include "common/logging/log.h"
++#include "core/arm/recomp/ctgp_dx.h"
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/core.h"
 +#include "core/memory.h"
@@ -2158,6 +3021,14 @@ index 0000000000..d5998f4bf0
 +u64 g_main_build = 0;
 +constexpr u64 kBuild304 = 0x2452c49bc26ec159ULL; // update 3.0.4
 +constexpr u64 kBuild401 = 0x158c0c7399aabd7bULL; // update 4.0.1
++} // namespace
++bool BuildIs304(u64 build_id) {
++    return build_id == kBuild304;
++}
++bool BuildIs401(u64 build_id) {
++    return build_id == kBuild401;
++}
++namespace {
 +
 +/// The game addresses the hooks use (offsets in main), per build. Calls inside main only come back to the host when the game was
 +/// built with block hooks (SUYU_RECOMP_BLOCK_HOOKS=1 at export: a hook check at each block); Setup does that for the builds listed
@@ -2182,6 +3053,8 @@ index 0000000000..d5998f4bf0
 +        return;
 +    }
 +    LOG_INFO(Core_ARM, "main build {:016x}: game hooks installed (they run when the game was built with block hooks)", g_main_build);
++    // CTGP DX recreated (core/arm/recomp/ctgp_dx.cpp): when its tables are installed it replaces the extra-cup prototype below.
++    CtgpDx::Install(system, load_base, g_main_build);
 +    // Main menu (TitleSelect page, handler main+0x4d5d58): event 0x68 is the Toy-Con button, whose case (main+0x4d6234, reached
 +    // through the handler's jump table, so via the dispatcher) sends a "Labo" telemetry event and switches to the Labo page.
 +    // The button is labelled "Mods" now (core/file_sys/kart_text_patch.cpp): leave the handler as for an ignored event
@@ -2436,10 +3309,10 @@ index 0000000000..d5998f4bf0
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/kart_hook_trace.h b/src/core/arm/recomp/kart_hook_trace.h
 new file mode 100644
-index 0000000000..72d2411ca3
+index 0000000000..5530fbab86
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,46 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: reverse-engineering aid. KARTRECOMP_HOOK_TRACE="1acb0,4910c8" logs every entry of those blocks of the `main` module
 +// (offsets from its load base) with x0..x7, the caller and any readable text the arguments point at. Blocks only reach the host
@@ -2478,6 +3351,9 @@ index 0000000000..72d2411ca3
 +
 +/// Called for each module as it is loaded, before NoteModule: the NSO build ID, so hooks go only into the game build they were found in.
 +void NoteBuildId(std::string_view name, const u8* build_id);
++/// The main module's build id (first 8 bytes, as noted by NoteBuildId) is update 3.0.4 / 4.0.1.
++bool BuildIs304(u64 build_id);
++bool BuildIs401(u64 build_id);
 +
 +/// Called for each module as it is loaded.
 +void NoteModule(Core::System& system, std::string_view name, u64 load_base);
@@ -2485,10 +3361,10 @@ index 0000000000..72d2411ca3
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/native_fs.cpp b/src/core/arm/recomp/native_fs.cpp
 new file mode 100644
-index 0000000000..90dfcba6fa
+index 0000000000..13a4bf15f1
 --- /dev/null
 +++ b/src/core/arm/recomp/native_fs.cpp
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,262 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_fs.h"
 +
@@ -2524,6 +3400,10 @@ index 0000000000..90dfcba6fa
 +
 +    int64_t OpenFile(const std::string& path) override {
 +        FileSys::VirtualFile f = path.empty() ? nullptr : root->GetFileRelative(path);
++        // KARTRECOMP_FS_LOG=<text>: log every open whose path contains <text> (e.g. "Course/CT_") and whether it was found.
++        static const char* watch = std::getenv("KARTRECOMP_FS_LOG");
++        if (watch && *watch && path.find(watch) != std::string::npos)
++            LOG_INFO(Core_ARM, "native fs: open {} -> {}", path, f ? "found" : "missing");
 +        if (!f) return -1;
 +        std::scoped_lock lk{lock};
 +        open[next] = std::move(f);

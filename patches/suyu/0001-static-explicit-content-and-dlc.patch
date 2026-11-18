@@ -1985,10 +1985,10 @@ index 0000000000..c7738e3737
 +} // namespace KartMultiplayer
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..0140a63937
+index 0000000000..86274ed1f0
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,474 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -2005,6 +2005,7 @@ index 0000000000..0140a63937
 +#include <cstring>
 +#include <filesystem>
 +#include <fstream>
++#include <sstream>
 +#include <string>
 +#include <vector>
 +
@@ -2250,6 +2251,9 @@ index 0000000000..0140a63937
 +int main(int argc, char** argv) {
 +    fs::path base, update, keys, out, info, exefs_dir; // --exefs <folder>: decrypted files (main, rtld, sdk, subsdk0, main.npdm), no keys
 +    std::vector<std::string> patches; // --patch <name>: optional game changes (common/kart_code_patches.h)
++    // --roots <file>: extra block starts, lines "<module> <hex offset in the module's text>" ('#' comments). Host hooks
++    // (block hooks) can then sit on those exact instructions, e.g. the CTGP DX sites (data/mk8d-<version>/ctgp_roots.txt).
++    std::vector<fs::path> root_files;
 +    for (int i = 1; i < argc; ++i) {
 +        const std::string a = argv[i];
 +        const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string{}; };
@@ -2264,6 +2268,7 @@ index 0000000000..0140a63937
 +        else if (a == "--chain-cond") suyu::recomp::g_chain_cond = true;
 +        else if (a == "--fast-entry") suyu::recomp::g_fast_entry = true;
 +        else if (a == "--patch") patches.push_back(next());
++        else if (a == "--roots") root_files.push_back(next());
 +        else return Fail(2, "unknown argument: " + a);
 +    }
 +    if (!info.empty()) {
@@ -2421,6 +2426,15 @@ index 0000000000..0140a63937
 +        std::vector<u64> roots = CollectExportedSymbolAddresses(m);
 +        for (auto r : ScanDataForCodePointers(m)) roots.push_back(r);
 +        for (auto r : ScanRelocationsForCodePointers(m)) roots.push_back(r);
++        for (const auto& rf : root_files) {
++            std::ifstream in(rf);
++            std::string mod, off;
++            for (std::string line; std::getline(in, line);) {
++                if (line.empty() || line[0] == '#') continue;
++                std::istringstream ls(line);
++                if (ls >> mod >> off && mod == m.name) roots.push_back(m.text_vaddr + std::stoull(off, nullptr, 16));
++            }
++        }
 +        std::sort(roots.begin(), roots.end());
 +        roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
 +        const fs::path dir = out / m.name;

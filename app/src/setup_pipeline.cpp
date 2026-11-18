@@ -71,6 +71,10 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
             QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
             env.insert(QStringLiteral("SUYU_RECOMP_BLOCK_HOOKS"), QStringLiteral("1"));
             ex.setProcessEnvironment(env);
+            // CTGP DX (docs/CTGP_PORT.md): its hooks sit on exact instructions, so the build starts a block at each of them
+            // (data/mk8d-<version>/ctgp_roots.txt, next to the hot block list). Harmless without CTGP: unused hooks cost nothing.
+            const QString roots = QFileInfo(HotListFor(paths.hotList, updateName)).dir().filePath(QStringLiteral("ctgp_roots.txt"));
+            if (QFileInfo::exists(roots)) args << "--roots" << roots;
         }
         ex.start(paths.exporter, args);
         if (!ex.waitForStarted()) return {false, QCoreApplication::translate("Messages", "Cannot start the exporter (%1).").arg(paths.exporter)};

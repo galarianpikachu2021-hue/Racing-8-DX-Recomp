@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ctgp_convert.h"
+#include "ctgp_tables.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -317,6 +318,21 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
         if (!zip.extract(*names.value(rel), QDir(out_dir).filePath(QStringLiteral("romfs/") + rel), error)) return false;
         if (!step(rel)) return fail(QStringLiteral("Cancelled"));
     }
+    // 1b. CTGP DX's course and cup tables, read from the pack's own plugin (app/src/ctgp_tables.cpp): the engine's CTGP code
+    //     (core/arm/recomp/ctgp_dx.cpp) uses them for the extra course ids, cups and the cup screen.
+    if (const ZipEntry* plugin = names.value(QStringLiteral("skyline/plugins/CTGPDX.nro"), nullptr)) {
+        const QString tmp = QDir(out_dir).filePath(QStringLiteral("CTGPDX.nro.tmp"));
+        if (!zip.extract(*plugin, tmp, error)) return false;
+        QFile f(tmp);
+        const QByteArray nro = f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        f.close();
+        QFile::remove(tmp);
+        const CtgpTablesResult tables = ReadCtgpTables(nro);
+        if (!tables.ok) return fail(tables.error);
+        QFile t(QDir(out_dir).filePath(QStringLiteral("ctgp_tables.txt")));
+        if (!t.open(QIODevice::WriteOnly) || t.write(tables.text) != tables.text.size())
+            return fail(QCoreApplication::translate("Messages", "Cannot write %1").arg(t.fileName()));
+    }
     // 2. Track names as new labels in the game's own message files (every language the game has).
     const auto read_member = [&](const QString& member, Sarc& out) {
         const ZipEntry* e = names.value(member, nullptr);
@@ -399,6 +415,9 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
             common.add_label(QString::number(21100 + j), tagged);
         }
         van.files[QStringLiteral("Common.msbt")] = common.write();
+        // CTGP's own text table (track/cup/author/platform names by its labels 500000.., read by the engine's CTGP code through the
+        // course table): the game finds a label in any message table of the archive.
+        van.files[QStringLiteral("CTGPText.msbt")] = pack.files.value(QStringLiteral("CTGPText.msbt"));
         const QString target = QDir(out_dir).filePath(QStringLiteral("romfs/UI/%1/message.sarc").arg(lang));
         QDir().mkpath(QFileInfo(target).absolutePath());
         QFile out(target);
