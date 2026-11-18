@@ -305,7 +305,7 @@ index c6e62fd2a4..465a651c28 100644
      [[nodiscard]] MotionMapping GetMotionMappingForDevice(const Common::ParamPackage& device) const;
  
 diff --git a/src/suyu_cmd/CMakeLists.txt b/src/suyu_cmd/CMakeLists.txt
-index 5fbe66c62b..81b7e6d0e8 100644
+index 5fbe66c62b..2031584a90 100644
 --- a/src/suyu_cmd/CMakeLists.txt
 +++ b/src/suyu_cmd/CMakeLists.txt
 @@ -24,8 +24,24 @@ if (SUYU_CMD OR YUZU_CMD)
@@ -526,7 +526,7 @@ index 5fbe66c62b..81b7e6d0e8 100644
 -            message(WARNING "SUYU_CMD_RECOMP_DIR set but no recompiled modules found in it")
 +        if (WIN32)
 +            target_link_libraries(mk8d-engine PRIVATE iphlpapi ws2_32)
-+        endif()
+         endif()
 +        if (MSVC)
 +            # The Windows heap is slow for this workload: per-draw containers, cross-thread frees, and large per-frame buffers that
 +            # go to the OS and fault in fresh pages every frame. mimalloc is to this build what tcmalloc is to the Linux one
@@ -548,13 +548,22 @@ index 5fbe66c62b..81b7e6d0e8 100644
 +            target_sources(mk8d-engine PRIVATE kart_mimalloc.cpp)
 +            set_source_files_properties(kart_mimalloc.cpp PROPERTIES COMPILE_OPTIONS "/W0")
 +            target_link_libraries(mk8d-engine PRIVATE mimalloc-static)
-         endif()
++        endif()
 +        list(APPEND SUYU_CMD_TARGETS mk8d-engine)
      endif()
  
      create_resource("../../dist/suyu.bmp" "suyu_cmd/suyu_icon.h" "suyu_icon")
+@@ -272,3 +178,8 @@ if (SUYU_CMD OR YUZU_CMD)
+         install(TARGETS suyu-cmd)
+     endif()
+ endif()
++
++# kart-recomp: test of the controller order (Player 1, 2, 3... in arrival order).
++add_executable(kartrecomp-assign-order-test tests/assign_order_test.cpp)
++target_include_directories(kartrecomp-assign-order-test PRIVATE ${CMAKE_SOURCE_DIR}/src)
++target_link_libraries(kartrecomp-assign-order-test PRIVATE common)
 diff --git a/src/suyu_cmd/controller_assign.h b/src/suyu_cmd/controller_assign.h
-index d8e34913ba..87250fa51f 100644
+index d8e34913ba..ccd3e85bb0 100644
 --- a/src/suyu_cmd/controller_assign.h
 +++ b/src/suyu_cmd/controller_assign.h
 @@ -140,6 +140,16 @@ struct Slots {
@@ -588,6 +597,79 @@ index d8e34913ba..87250fa51f 100644
          }
          return std::none_of(devices.begin(), devices.end(),
                              [&](const auto& device) { return SameDevice(device, mapping); });
+@@ -486,4 +498,72 @@ inline std::optional<std::size_t> SplitJoycons(
+     return std::nullopt;
+ }
+ 
++/// kart-recomp: the controllers fill Player 1, 2, 3, ... in the order they were plugged in (`order`: their "guid:port" keys,
++/// kept across calls). One unplugged: the later ones move up a slot, so there are never gaps. No controller: Player 1 is the
++/// keyboard (restore_keyboard). Players set to the keyboard other than Player 1 are left alone. Returns whether anything changed.
++inline bool AssignInOrder(std::array<Settings::PlayerInput, 10>& players, const std::vector<Common::ParamPackage>& devices,
++                          const std::vector<Common::ParamPackage>& pads, std::vector<PadBinding>& bindings,
++                          std::vector<std::string>& order,
++                          const std::array<int, Settings::NativeButton::NumButtons>& stock_keys, const PadMapper& map_pad,
++                          const std::function<void(Settings::PlayerInput&)>& restore_keyboard) {
++    using namespace detail;
++    const Slots slots{players, devices, stock_keys};
++    const auto key_of = [](const Common::ParamPackage& pad) { return pad.Get("guid", "") + ":" + std::to_string(pad.Get("port", 0)); };
++    // A Joy-Con pair is listed both whole and as its two halves: the pair counts once.
++    std::vector<const Common::ParamPackage*> usable;
++    for (const auto& pad : pads) {
++        const bool half_of_pair = !IsPair(pad) && std::any_of(pads.begin(), pads.end(), [&](const auto& pair) {
++            return IsPair(pair) && MapsHalfOf(pad, pair);
++        });
++        if (!half_of_pair) usable.push_back(&pad);
++    }
++    // Arrival order: gone controllers leave it, new ones join at the end.
++    std::erase_if(order, [&](const std::string& k) {
++        return std::none_of(usable.begin(), usable.end(), [&](const auto* p) { return key_of(*p) == k; });
++    });
++    for (const auto* p : usable)
++        if (std::find(order.begin(), order.end(), key_of(*p)) == order.end()) order.push_back(key_of(*p));
++
++    bool changed = false;
++    std::vector<PadBinding> next;
++    std::size_t slot = 0;
++    for (const auto& k : order) {
++        if (slot >= kSlots) break;
++        const auto* pad = *std::find_if(usable.begin(), usable.end(), [&](const auto* p) { return key_of(*p) == k; });
++        const auto mapping = slots.Mapping(slot);
++        const bool has_it = SameDevice(mapping, *pad) || (IsPair(*pad) && MapsHalfOf(mapping, *pad));
++        if (!has_it || !players[slot].connected) {
++            Give(players[slot], *pad, TypeFor(*pad), map_pad);
++            changed = true;
++        }
++        next.push_back({pad->Get("guid", ""), pad->Get("port", 0), slot});
++        ++slot;
++    }
++    // The slots after the last controller: a controller's slot (now empty) is switched off; Player 1 goes back to the keyboard.
++    for (std::size_t s = slot; s < kSlots; ++s) {
++        const std::string engine = slots.Mapping(s).Get("engine", "");
++        const bool controller = !engine.empty() && engine != "keyboard" && engine != "mouse";
++        if (s == 0) {
++            if (controller || !players[0].connected) {
++                restore_keyboard(players[0]);
++                players[0].controller_type = Settings::ControllerType::ProController;
++                players[0].connected = true;
++                changed = true;
++            }
++        } else if (controller) {
++            Clear(players[s]);
++            players[s].connected = false;
++            changed = true;
++        }
++    }
++    if (next.size() != bindings.size() ||
++        !std::equal(next.begin(), next.end(), bindings.begin(), [](const auto& a, const auto& b) {
++            return a.guid == b.guid && a.port == b.port && a.player == b.player;
++        })) {
++        bindings = std::move(next);
++        changed = true;
++    }
++    return changed;
++}
++
+ } // namespace SuyuCmd
 diff --git a/src/suyu_cmd/controller_profiles.h b/src/suyu_cmd/controller_profiles.h
 new file mode 100644
 index 0000000000..739a5389ef
@@ -913,7 +995,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..d7e66f87a0 100644
+index bca83ab630..ff138bf26e 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,7 +1,17 @@
@@ -1174,7 +1256,7 @@ index bca83ab630..d7e66f87a0 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,18 +1449,24 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,23 +1449,32 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
@@ -1210,7 +1292,17 @@ index bca83ab630..d7e66f87a0 100644
          }
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
-@@ -1298,6 +1485,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+-    if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
+-                                    SdlConfig::default_buttons, map_pad, restore_keyboard)) {
++    // Controllers fill Player 1, 2, 3, 4 in the order they were plugged in (kart-recomp; the old rule remembered each controller's
++    // player, so a controller once on Player 2 came back there even with nobody on Player 1's controller).
++    static std::vector<std::string> arrival_order;
++    if (!SuyuCmd::AssignInOrder(players, devices, pads, bindings, arrival_order, SdlConfig::default_buttons, map_pad,
++                                restore_keyboard)) {
+         return;
+     }
+     SdlConfig::auto_assigned_pads = SuyuCmd::SerializePadBindings(bindings);
+@@ -1298,6 +1488,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
@@ -25900,3 +25992,71 @@ index 03f738eb63..eda4427649 100644
  
  #ifdef __unix__
      Common::Linux::StopGamemode();
+diff --git a/src/suyu_cmd/tests/assign_order_test.cpp b/src/suyu_cmd/tests/assign_order_test.cpp
+new file mode 100644
+index 0000000000..818e7ea5c7
+--- /dev/null
++++ b/src/suyu_cmd/tests/assign_order_test.cpp
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: controllers fill Player 1, 2, 3... in arrival order (SuyuCmd::AssignInOrder).
++#include <cstdio>
++#include <cstdlib>
++#include "suyu_cmd/controller_assign.h"
++
++#define CHECK(x) do { if (!(x)) { std::printf("FAILED line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
++
++static Common::ParamPackage Pad(const char* guid) {
++    Common::ParamPackage p;
++    p.Set("engine", "sdl");
++    p.Set("guid", guid);
++    p.Set("port", 0);
++    p.Set("display", guid);
++    return p;
++}
++static std::string GuidOf(const Settings::PlayerInput& pl) { return Common::ParamPackage{pl.buttons[0]}.Get("guid", ""); }
++
++int main() {
++    std::array<Settings::PlayerInput, 10> players{};
++    std::array<int, Settings::NativeButton::NumButtons> stock{};
++    for (std::size_t i = 0; i < stock.size(); ++i) stock[i] = static_cast<int>(100 + i);
++    // Player 1 starts on a custom keyboard layout (A and B on the same key); Player 2 holds an old mapping to pad "X".
++    for (auto& b : players[0].buttons) b = "engine:keyboard,code:22";
++    players[0].connected = true;
++    for (auto& b : players[1].buttons) b = "engine:sdl,guid:X,port:0";
++    players[1].connected = true;
++    std::vector<SuyuCmd::PadBinding> bindings{{"X", 0, 1}};
++    std::vector<std::string> order;
++    const SuyuCmd::PadMapper map = [](const Common::ParamPackage& pad, Settings::PlayerInput& pl) {
++        for (auto& b : pl.buttons) b = "engine:sdl,guid:" + pad.Get("guid", "") + ",port:0";
++    };
++    int restored = 0;
++    const auto keyboard = [&](Settings::PlayerInput& pl) {
++        ++restored;
++        for (auto& b : pl.buttons) b = "engine:keyboard,code:22";
++    };
++    // X is plugged in: Player 1 (not Player 2, where it was before).
++    std::vector<Common::ParamPackage> pads{Pad("X")};
++    SuyuCmd::AssignInOrder(players, pads, pads, bindings, order, stock, map, keyboard);
++    CHECK(GuidOf(players[0]) == "X" && players[0].connected);
++    CHECK(!players[1].connected);
++    // Y arrives: Player 2.
++    pads = {Pad("X"), Pad("Y")};
++    SuyuCmd::AssignInOrder(players, pads, pads, bindings, order, stock, map, keyboard);
++    CHECK(GuidOf(players[0]) == "X" && GuidOf(players[1]) == "Y" && players[1].connected);
++    // Z arrives, listed first by SDL: still Player 3 (arrival order, not list order).
++    pads = {Pad("Z"), Pad("X"), Pad("Y")};
++    SuyuCmd::AssignInOrder(players, pads, pads, bindings, order, stock, map, keyboard);
++    CHECK(GuidOf(players[2]) == "Z" && players[2].connected);
++    // X leaves: Y becomes Player 1, Z Player 2, Player 3 is off.
++    pads = {Pad("Z"), Pad("Y")};
++    SuyuCmd::AssignInOrder(players, pads, pads, bindings, order, stock, map, keyboard);
++    CHECK(GuidOf(players[0]) == "Y" && GuidOf(players[1]) == "Z" && !players[2].connected);
++    // All gone: Player 1 is the keyboard again.
++    pads = {};
++    SuyuCmd::AssignInOrder(players, pads, pads, bindings, order, stock, map, keyboard);
++    CHECK(restored == 1 && Common::ParamPackage{players[0].buttons[0]}.Get("engine", "") == "keyboard" && players[0].connected);
++    CHECK(!players[1].connected && bindings.empty());
++    std::puts("assign_order: all tests passed");
++    return 0;
++}
