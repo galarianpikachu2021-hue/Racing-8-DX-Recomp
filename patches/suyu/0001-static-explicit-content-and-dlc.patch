@@ -1541,10 +1541,10 @@ index 257b06d5e7..7a2f3dbd78 100644
      /// Last progress seen while running. The driver rewinds its counter to zero
      /// when the script ends, so the final status cannot report how far it got.
 diff --git a/src/suyu_cmd/explicit_update.h b/src/suyu_cmd/explicit_update.h
-index ea309dd691..d450f5d8cc 100644
+index ea309dd691..0d564edae5 100644
 --- a/src/suyu_cmd/explicit_update.h
 +++ b/src/suyu_cmd/explicit_update.h
-@@ -6,6 +6,7 @@
+@@ -6,11 +6,13 @@
  #include <map>
  #include <optional>
  #include <string>
@@ -1552,7 +1552,13 @@ index ea309dd691..d450f5d8cc 100644
  
  #include "common/hex_util.h"
  #include "common/logging/log.h"
-@@ -38,7 +39,8 @@ public:
+ #include "common/settings.h"
+ #include "core/core.h"
++#include "core/file_sys/submission_package.h"
+ #include "core/file_sys/content_archive.h"
+ #include "core/file_sys/common_funcs.h"
+ #include "core/file_sys/patch_manager.h"
+@@ -38,7 +40,8 @@ public:
  inline bool ConfigureExplicitUpdate(Core::System& system, ExplicitUpdateProvider& provider,
                                      const std::string& base_path,
                                      const std::string& update_path,
@@ -1562,7 +1568,7 @@ index ea309dd691..d450f5d8cc 100644
      using FileSys::ContentRecordType;
      using FileSys::TitleType;
      const auto fail = [](const char* message) {
-@@ -123,9 +125,35 @@ inline bool ConfigureExplicitUpdate(Core::System& system, ExplicitUpdateProvider
+@@ -123,9 +126,47 @@ inline bool ConfigureExplicitUpdate(Core::System& system, ExplicitUpdateProvider
          return fail("updated main executable is missing");
      }
      if (!npdm || metadata.Load(npdm) != Loader::ResultStatus::Success ||
@@ -1579,7 +1585,18 @@ index ea309dd691..d450f5d8cc 100644
 +        const auto dlc_file = vfs.OpenFile(dlc_path, FileSys::OpenMode::Read);
 +        FileSys::ManualContentProvider dlc_entries;
 +        if (!dlc_file || !dlc_entries.AddEntriesFromContainer(dlc_file, false, title_id)) {
-+            return fail("DLC container could not be opened or read with the local keys");
++            // kart-recomp (GitHub #32): a DLC file that cannot be read no longer stops the game - it is left out, with the
++            // reason (most often: the keys file lacks the newer key generation that later DLC waves use).
++            std::string why = "the file could not be opened";
++            if (dlc_file) {
++                const FileSys::NSP probe{dlc_file};
++                why = probe.GetStatus() == Loader::ResultStatus::Success
++                          ? std::string{"it holds no readable content"}
++                          : std::string{Loader::GetResultStatusString(probe.GetStatus())};
++            }
++            LOG_WARNING(Frontend, "DLC left out: {} ({}). If this DLC works elsewhere, update prod.keys/title.keys (newer DLC "
++                                  "waves need keys from a newer firmware).", dlc_path, why);
++            continue;
 +        }
 +        size_t added = 0;
 +        for (const auto& entry : dlc_entries.ListEntriesFilter(TitleType::AOC, {}, {})) {
@@ -1592,7 +1609,8 @@ index ea309dd691..d450f5d8cc 100644
 +            }
 +        }
 +        if (added == 0) {
-+            return fail("DLC container has no add-on content for this title");
++            LOG_WARNING(Frontend, "DLC left out: {} holds no add-on content for this game", dlc_path);
++            continue;
 +        }
 +        LOG_INFO(Frontend, "CLI DLC registered path={} records={}", dlc_path, added);
 +    }

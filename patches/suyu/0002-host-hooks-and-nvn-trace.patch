@@ -6823,10 +6823,10 @@ index 0000000000..a43679a38f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..cb48b26788
+index 0000000000..c924ac02de
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,431 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -6835,6 +6835,9 @@ index 0000000000..cb48b26788
 +#include <atomic>
 +#include <map>
 +#include <thread>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
 +
 +#include "common/settings.h"
 +#include "core/core.h"
@@ -6898,7 +6901,38 @@ index 0000000000..cb48b26788
 +    return cfg;
 +}
 +
++/// KARTRECOMP_PROFILE_NAME (the launcher's "Profile name"): the playing user's console profile is renamed, and the name saved in
++/// the console's profile file, so the game shows it everywhere - Wireless Play's lobby too, where friends see it. The console
++/// allows 10 characters; a cut never splits a UTF-8 character.
++void ApplyProfileName(Core::System& system) {
++    static std::once_flag once;
++    std::call_once(once, [&system] {
++        const char* v = std::getenv("KARTRECOMP_PROFILE_NAME");
++        if (!v || !*v) return;
++        std::string name;
++        size_t chars = 0;
++        for (const char* p = v; *p && chars < 10;) {
++            const auto c = static_cast<unsigned char>(*p);
++            const size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
++            if (name.size() + len > Service::Account::profile_username_size) break;
++            for (size_t i = 0; i < len && p[i]; ++i) name.push_back(p[i]);
++            p += len;
++            ++chars;
++        }
++        auto& pm = system.GetProfileManager();
++        const auto uuid = pm.GetLastOpenedUser();
++        Service::Account::ProfileBase base{};
++        if (!pm.GetProfileBase(uuid, base)) return;
++        const std::string old(reinterpret_cast<const char*>(base.username.data()), strnlen(reinterpret_cast<const char*>(base.username.data()), base.username.size()));
++        if (old == name) return;
++        base.username.fill(0);
++        std::memcpy(base.username.data(), name.data(), name.size());
++        if (pm.SetProfileBase(uuid, base)) LOG_INFO(Service_ACC, "profile name: '{}' -> '{}'", old, name);
++    });
++}
++
 +AccountConfig MakeAccountConfig(Core::System& system) {
++    ApplyProfileName(system);
 +    AccountConfig cfg;
 +    const auto& pm = system.GetProfileManager();
 +    const auto last = pm.GetLastOpenedUser();

@@ -80,6 +80,22 @@ private slots:
         page.apply(env);
         QCOMPARE(env.value(QStringLiteral("KARTRECOMP_ROOM")), QStringLiteral("Racer One@10.0.0.2:24872"));
     }
+    void profileName() {
+        // The profile name is passed whether or not online play is on; the room nickname falls back to it.
+        Set(false, Join, {}, QStringLiteral("x"), 24872, {});
+        { QSettings st; st.setValue(QStringLiteral("profile/name"), QStringLiteral("Carter")); }
+        MultiplayerPage off_page;
+        QProcessEnvironment env;
+        off_page.apply(env);
+        QCOMPARE(env.value(QStringLiteral("KARTRECOMP_PROFILE_NAME")), QStringLiteral("Carter"));
+        QVERIFY(!env.contains(QStringLiteral("KARTRECOMP_ROOM")));
+        Set(true, Join, {}, QStringLiteral("10.0.0.2"), 24872, {});
+        { QSettings st; st.setValue(QStringLiteral("profile/name"), QStringLiteral("Carter")); }
+        MultiplayerPage on_page;
+        QProcessEnvironment env2;
+        on_page.apply(env2);
+        QCOMPARE(env2.value(QStringLiteral("KARTRECOMP_ROOM")), QStringLiteral("Carter@10.0.0.2:24872"));
+    }
     void invalid() {
         Set(true, Join, QStringLiteral("ab"), QStringLiteral("x"), 24872, {}); // nickname too short
         MultiplayerPage page;

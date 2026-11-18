@@ -32,6 +32,10 @@ private:
     /// What the others type in to join (address:port of this computer).
     QString joinDetails() const;
 
+    /// The room nickname: the field, or the profile name when it is empty.
+    QString roomNickname() const;
+
+    QLineEdit* profile_name = nullptr;
     QCheckBox* enabled = nullptr;
     QGroupBox* settings = nullptr;
     QButtonGroup* modes = nullptr;

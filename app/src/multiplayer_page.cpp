@@ -42,6 +42,18 @@ MultiplayerPage::MultiplayerPage(QWidget* parent) : QWidget(parent) {
     intro->setWordWrap(true);
     layout->addWidget(intro);
 
+    // The console profile's name: what the game shows for you (Wireless Play's lobby, so what friends see).
+    auto* profile_row = new QWidget;
+    auto* profile_layout = new QFormLayout(profile_row);
+    profile_layout->setContentsMargins(0, 0, 0, 0);
+    profile_name = new QLineEdit;
+    profile_name->setMaxLength(10);
+    profile_name->setPlaceholderText(tr("leave empty to keep the current name"));
+    profile_name->setToolTip(tr("Your console profile's name (up to 10 characters). The game shows it for you, and friends see it in "
+                                "Wireless Play. It is saved in the game's profile when the game starts."));
+    profile_layout->addRow(tr("Profile name:"), profile_name);
+    layout->addWidget(profile_row);
+
     enabled = new QCheckBox(tr("Enable online play"));
     QFont f = enabled->font();
     f.setBold(true);
@@ -65,8 +77,9 @@ MultiplayerPage::MultiplayerPage(QWidget* parent) : QWidget(parent) {
 
     nickname = new QLineEdit;
     nickname->setMaxLength(20);
-    nickname->setPlaceholderText(tr("4 to 20 letters, digits, spaces, . _ -"));
-    form->addRow(tr("Nickname:"), nickname);
+    nickname->setPlaceholderText(tr("empty: your profile name"));
+    nickname->setToolTip(tr("Your name in the room (4 to 20 letters, digits, spaces, . _ -). Empty: the profile name above."));
+    form->addRow(tr("Room nickname:"), nickname);
 
     room_name = new QLineEdit;
     room_name->setMaxLength(40);
@@ -118,6 +131,7 @@ MultiplayerPage::MultiplayerPage(QWidget* parent) : QWidget(parent) {
     const int m = s.contains(QStringLiteral("multiplayer/role")) ? s.value(QStringLiteral("multiplayer/role")).toInt() : (old_mode == 1 ? Join : Host);
     modes->button(m == Join ? Join : Host)->setChecked(true);
     nickname->setText(s.value(QStringLiteral("multiplayer/nickname")).toString());
+    profile_name->setText(s.value(QStringLiteral("profile/name")).toString());
     room_name->setText(s.value(QStringLiteral("multiplayer/room_name")).toString());
     address->setText(s.value(QStringLiteral("multiplayer/address")).toString());
     port->setValue(s.value(QStringLiteral("multiplayer/port"), kDefaultPort).toInt());
@@ -132,7 +146,7 @@ MultiplayerPage::MultiplayerPage(QWidget* parent) : QWidget(parent) {
     connect(modes, &QButtonGroup::idToggled, this, [changed](int, bool on) {
         if (on) changed();
     });
-    for (auto* e : {nickname, room_name, address, password}) connect(e, &QLineEdit::textChanged, this, changed);
+    for (auto* e : {profile_name, nickname, room_name, address, password}) connect(e, &QLineEdit::textChanged, this, changed);
     for (auto* b : {port, members}) connect(b, &QSpinBox::valueChanged, this, changed);
     connect(copy_details, &QPushButton::clicked, this, [this] {
         if (auto* clip = QApplication::clipboard()) clip->setText(joinDetails());
@@ -151,6 +165,7 @@ void MultiplayerPage::save() const {
     s.setValue(QStringLiteral("multiplayer/role"), mode());
     s.setValue(QStringLiteral("multiplayer/mode"), enabled->isChecked() ? (mode() == Join ? 1 : 2) : 0); // older launchers
     s.setValue(QStringLiteral("multiplayer/nickname"), nickname->text());
+    s.setValue(QStringLiteral("profile/name"), profile_name->text());
     s.setValue(QStringLiteral("multiplayer/room_name"), room_name->text());
     s.setValue(QStringLiteral("multiplayer/address"), address->text());
     s.setValue(QStringLiteral("multiplayer/port"), port->value());
@@ -187,10 +202,16 @@ void MultiplayerPage::refresh() {
     else hint->setText(tr("The game joins the room when it starts; the host's session then appears in Wireless Play's lobby."));
 }
 
+QString MultiplayerPage::roomNickname() const {
+    return nickname->text().trimmed().isEmpty() ? profile_name->text().trimmed() : nickname->text();
+}
+
 QString MultiplayerPage::problem() const {
     if (!enabled->isChecked()) return {};
     static const QRegularExpression nick(QStringLiteral("^[a-zA-Z0-9._\\- ]{4,20}$"));
-    if (!nick.match(nickname->text()).hasMatch()) return tr("The nickname must be 4 to 20 letters, digits, spaces, dots, dashes or underscores.");
+    if (!nick.match(roomNickname()).hasMatch())
+        return tr("The room nickname must be 4 to 20 letters, digits, spaces, dots, dashes or underscores (it is the profile name "
+                  "when left empty).");
     if (mode() == Join && address->text().trimmed().isEmpty()) return tr("Enter the room's address.");
     if (password->text().contains(QLatin1Char('@')) || password->text().contains(QLatin1Char(':')))
         return tr("The password cannot contain '@' or ':'.");
@@ -198,15 +219,16 @@ QString MultiplayerPage::problem() const {
 }
 
 void MultiplayerPage::apply(QProcessEnvironment& env) const {
+    if (!profile_name->text().trimmed().isEmpty()) env.insert(QStringLiteral("KARTRECOMP_PROFILE_NAME"), profile_name->text().trimmed());
     if (!enabled->isChecked() || !problem().isEmpty()) return;
     const QString pass = password->text();
     if (mode() == Host) {
         env.insert(QStringLiteral("KARTRECOMP_ROOM_HOST"), QString::number(port->value()) + (pass.isEmpty() ? QString() : QLatin1Char(':') + pass));
-        env.insert(QStringLiteral("KARTRECOMP_ROOM_NICK"), nickname->text());
+        env.insert(QStringLiteral("KARTRECOMP_ROOM_NICK"), roomNickname());
         env.insert(QStringLiteral("KARTRECOMP_ROOM_MAX"), QString::number(members->value()));
         if (!room_name->text().trimmed().isEmpty()) env.insert(QStringLiteral("KARTRECOMP_ROOM_NAME"), room_name->text().trimmed());
     } else {
-        env.insert(QStringLiteral("KARTRECOMP_ROOM"), nickname->text() + (pass.isEmpty() ? QString() : QLatin1Char(':') + pass) + QLatin1Char('@') +
+        env.insert(QStringLiteral("KARTRECOMP_ROOM"), roomNickname() + (pass.isEmpty() ? QString() : QLatin1Char(':') + pass) + QLatin1Char('@') +
                                                          address->text().trimmed() + QLatin1Char(':') + QString::number(port->value()));
     }
 }
