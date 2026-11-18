@@ -102,3 +102,26 @@ Group = the plugin's installer function (nro offset). Site counts include functi
 3. **Tables from the user's pack**: course and cup databases and texts extracted at import (emulator logic reimplemented in C++, or a
    static reader of the builder at nro 0xb010), stored in the mod folder.
 4. Features in order of value: course ids + cups + cup screen rows -> music -> settings / speedometer / timer -> online.
+
+## Status (2026-11-18)
+
+Working on 3.0.4 (scripted runs; 4.0.1 has every address but is not run yet):
+* Course table, cup table and texts from the user's pack (launcher import, `ctgp_tables.txt` + `CTGPText.msbt`).
+* CTGP's 64 tracks as new course ids 124..187: names, platform tags, pictures, base-course behaviour, music streams
+  (`pBGM_CT_xx_*`), course-local MapObj files, per-track SpeedMultiplier, no time limit.
+* Cup screen: CTGP's layout (two extra icon columns, L/R line scroll with `Scroll_RL/LR`), 8 extra CupIcon parts created through
+  game calls from the hooks, the plugin's remap, every cup -> course lookup remapped (Grand Prix list, course preview, labels).
+  Verified: R twice -> purple CTGP cups; Boo Cup shows Omatsuri Circuit / Vanilla Lake 1 / Broken Pier / Mystic Tangle and races
+  Omatsuri Circuit at 60 fps.
+* Engine mechanisms: block starts at every site (`--roots`), hooks on exact instructions, calling game functions from a hook
+  (`CallGuestSeq`: registers saved, return trap, resume; a resumed block passes the hooks twice), `KARTRECOMP_CTGP_SKIP=<handlers>`.
+
+Known limits / next:
+* Extra icons on the first cup page only (Grand Prix): the 64-bit menu heap has no room for a second set (the plugin itself
+  skips its third page). VS / Time Trial cup pages show CTGP cups only through ... nothing yet (no paging there).
+* Menu background / title screen / top menu layouts left out: CTGP's 3.0.3 `mn_Background_00` makes 3.0.4 call
+  `nn::os::LockMutex(null)` on a loader thread.
+* Speedometer: `T_SOM_00` is in the HUD (shows the layout's placeholder); needs the local kart pointer (3.0.3 path
+  raceSys+0xf0 -> +0x12c -> +0x68 -> [i] -> +4 -> +0x14; speed field 3.0.3 +0x330 = 64-bit +0x37c, found by matching).
+* Music switch / now-playing banner (`L_Sus_00`, `L_MusSwch_00`), CTGP Settings page (title button, page 0x88 in 4.0.1),
+  race timer, honk visibility, online (packets, `CTGPDelux010101`): mapped (agent_*.md), not implemented.
