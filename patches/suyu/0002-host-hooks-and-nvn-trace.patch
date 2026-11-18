@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..cbf8ffa788
+index 0000000000..d94ab0b114
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1757 @@
+@@ -0,0 +1,1778 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -2463,14 +2463,14 @@ index 0000000000..cbf8ffa788
 +    if (!layout || g_cup.vanilla) return false;
 +    // The plugin skips its third call ever (FUN_1745c counter): the menu heap has room for two pages' extra icons only (on the
 +    // 64-bit builds, where an icon with its animations takes 0x1118 bytes, the third set made the next page's allocations fail).
-+    // Only the first cup page of a menu (the Grand Prix one) gets the icons for now: on the 64-bit builds the menu heap has room for
-+    // one set (two sets made the next page's allocations fail). KARTRECOMP_CTGP_ICON_PAGES=<n> changes it (tests).
++    // The menu heaps are 1 MB larger with CTGP (heap-create hook in Install), so every cup page gets the icons, like the plugin
++    // (which skips only its third). KARTRECOMP_CTGP_ICON_PAGES=<n> limits it (tests).
 +    // One menu build constructs its cup pages within a few seconds; a page seen again later is a new page at an old address (the
 +    // menu is rebuilt after every race), so its old entry goes and the per-build page count starts again.
 +    const auto now = std::chrono::steady_clock::now();
 +    static std::chrono::steady_clock::time_point last_build{};
 +    static int calls = 0;
-+    static const int max_pages = [] { const char* v = std::getenv("KARTRECOMP_CTGP_ICON_PAGES"); return v ? std::atoi(v) : 1; }();
++    static const int max_pages = [] { const char* v = std::getenv("KARTRECOMP_CTGP_ICON_PAGES"); return v ? std::atoi(v) : 99; }();
 +    {
 +        std::scoped_lock lk{g_pages_lock};
 +        if (const auto it = g_pages.find(page); it != g_pages.end()) {
@@ -2814,6 +2814,11 @@ index 0000000000..cbf8ffa788
 +    {
 +        std::scoped_lock lk{g_pages_lock};
 +        const auto it = g_pages.find(page);
++        if (std::getenv("KARTRECOMP_CTGP_PAGE_LOG")) {
++            static std::set<u64> seen;
++            if (seen.insert(page).second)
++                LOG_INFO(Core_ARM, "CTGP: cup page update {:#x}: {}", page, it == g_pages.end() ? "unknown" : it->second.complete ? "with icons" : "incomplete");
++        }
 +        if (it == g_pages.end() || !it->second.complete) return false;
 +        pg = it->second;
 +    }
@@ -2862,6 +2867,8 @@ index 0000000000..cbf8ffa788
 +        case 2: {
 +            const u32 trig = m.Read32(res + 0x10);
 +            const bool r = (trig & 0x1000) != 0, l = (trig & 0x800) != 0;
++            if (std::getenv("KARTRECOMP_CTGP_PAGE_LOG") && trig)
++                LOG_INFO(Core_ARM, "CTGP: cup page {:#x} trig {:#x} cursor {} cursor state {}", page, trig, cursor, m.Read32(cursor_obj + 0x28));
 +            if ((!r && !l) || m.Read32(cursor_obj + 0x28) == 5 || cursor > 0xb) {
 +                sc->step = 30; // just the hint visibility
 +                next = {Fn(ui.set_visible), {pg.change_icon, cursor < 0xc ? 1u : 0u}};
@@ -3387,6 +3394,20 @@ index 0000000000..cbf8ffa788
 +                             [site, is304, handler](RecompHooks::HookContext& ctx) { return RunSite(ctx, *site, is304, handler); });
 +        ++installed;
 +    }
++    // The menu heaps (UIHeap_Menu 96 MB, UIHeap_MenuSub 84 MB, sized for the game's own pages) get room for CTGP's extra cup icons on
++    // every cup page (Grand Prix, VS, Time Trial): heap create (sead, x0 = size, x1 = SafeString name), at its entry.
++    RecompHooks::Install(main_base + (is304 ? 0x611ecc : 0x605128), [](RecompHooks::HookContext& ctx) {
++        if (!ctx.x[1] || !Enabled()) return false;
++        auto& mem = ctx.system.ApplicationMemory();
++        const u64 str = mem.Read64(ctx.x[1] + 8);
++        if (!str) return false;
++        const std::string name = mem.ReadCString(str, 32);
++        if (name != "UIHeap_Menu" && name != "UIHeap_MenuSub") return false;
++        static const u64 extra = [] { const char* v = std::getenv("KARTRECOMP_CTGP_MENU_HEAP_MB"); return (v ? std::strtoull(v, nullptr, 10) : 1ull) << 20; }(); // the parent heap has little room; a set of 8 icons takes ~35 KB
++        LOG_INFO(Core_ARM, "CTGP: {} {} MB -> {} MB", name, ctx.x[0] >> 20, (ctx.x[0] + extra) >> 20);
++        ctx.x[0] += extra;
++        return false;
++    });
 +    if (std::getenv("KARTRECOMP_CTGP_TRACE_PARTS")) {
 +        // debug: every UI part set-up with its pane name (finds panes a layout lacks)
 +        RecompHooks::Install(main_base + Ui().part_init, [](RecompHooks::HookContext& ctx) {

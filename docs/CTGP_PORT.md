@@ -117,8 +117,9 @@ Working on 3.0.4 and 4.0.1 (scripted runs):
   (`CallGuestSeq`: registers saved, return trap, resume; a resumed block passes the hooks twice), `KARTRECOMP_CTGP_SKIP=<handlers>`.
 
 Known limits / next:
-* Extra icons on the first cup page only (Grand Prix): the 64-bit menu heap has no room for a second set (the plugin itself
-  skips its third page). The other cup pages (VS, Time Trial) have no CTGP paging yet.
+* Extra icons on every cup page (2026-11-18): UIHeap_Menu / UIHeap_MenuSub are created 1 MB larger with CTGP (heap-create
+  hook at its entry, 4.0.1 0x605128 / 3.0.4 0x611ecc; the parent heap cannot spare 16 MB). Verified: Grand Prix and Time Trials
+  page to the CTGP cups (Time Trials: Boo Cup -> Omatsuri Circuit); VS uses the same page code (not scripted).
 * Menu background / title screen / top menu layouts left out: CTGP's 3.0.3 `mn_Background_00` makes 3.0.4 call
   `nn::os::LockMutex(null)` on a loader thread.
 * Speedometer: done (2026-11-18). Kart = [[[[[raceSys+0x1b0]+0x238]+0xc8]+i*8]+8]+0x28, speed float +0x37c, i = the game's
