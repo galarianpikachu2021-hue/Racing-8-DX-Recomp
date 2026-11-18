@@ -1,0 +1,79 @@
+old_site	kind	new_site_401	new_fn_401	regs	action	confidence
+0x12580	W32AT	0x11cd4	0x11bec	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x125c4	W32AT	0x11d14	0x11bec	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x125c8	W32AT	0x11cf4	0x11bec	r4->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x125cc	W32AT	0x11d1c	0x11bec	r4->w23	cmp w23, #0xbb (was #0x7b)	high
+0x11a028	W32AT	0x105e90	0x105d18	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x11a068	W32AT	0x105ed0	0x105d18	r6->w24	cmp w24, #0xba (was #0x7a)	high
+0x11a06c	W32AT	0x105eb0	0x105d18	r4->w24 (const in w25)	mov w25, #0xbb (was #0x7b)	high
+0x11a070	W32AT	0x105ed8	0x105d18	r4->w24	cmp w24, #0xbb (was #0x7b)	high
+0x13e93c	W32AT	0x129220	0x128e28	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x13e980	W32AT	0x129260	0x128e28	r4->w20	cmp w20, #0xba (was #0x7a)	high
+0x13e984	W32AT	0x129240	0x128e28	r5->w20 (const in w28)	mov w28, #0xbb (was #0x7b)	high
+0x13e988	W32AT	0x129268	0x128e28	r5->w20	cmp w20, #0xbb (was #0x7b)	high
+0x1e3388	W32AT	0x1c5648	0x1c5604	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x1e33c8	W32AT	0x1c5688	0x1c5604	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x1e33cc	W32AT	0x1c5668	0x1c5604	r6->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x1e33d0	W32AT	0x1c5690	0x1c5604	r6->w23	cmp w23, #0xbb (was #0x7b)	high
+0x1e5c18	W32AT	0x1c7fa8	0x1c7f64	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x1e5c58	W32AT	0x1c7fe8	0x1c7f64	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x1e5c5c	W32AT	0x1c7fc8	0x1c7f64	r6->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x1e5c60	W32AT	0x1c7ff0	0x1c7f64	r6->w23	cmp w23, #0xbb (was #0x7b)	high
+0x20ff2c	W32AT	0x1f11d8	0x1f1194	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x20ff6c	W32AT	0x1f1218	0x1f1194	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x20ff70	W32AT	0x1f11f8	0x1f1194	r6->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x20ff74	W32AT	0x1f1220	0x1f1194	r6->w23	cmp w23, #0xbb (was #0x7b)	high
+0x2b2390	W32AT	0x28ff08	0x28fec4	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x2b23d0	W32AT	0x28ff48	0x28fec4	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x2b23d4	W32AT	0x28ff28	0x28fec4	r6->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x2b23d8	W32AT	0x28ff50	0x28fec4	r6->w23	cmp w23, #0xbb (was #0x7b)	high
+0x37afe4	W32AT	0x3565c0	0x35657c	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0x37b024	W32AT	0x356600	0x35657c	r7->w23	cmp w23, #0xba (was #0x7a)	high
+0x37b028	W32AT	0x3565e0	0x35657c	r6->w23 (const in w24)	mov w24, #0xbb (was #0x7b)	high
+0x37b02c	W32AT	0x356608	0x35657c	r6->w23	cmp w23, #0xbb (was #0x7b)	high
+0xf2df0	W32AT	0xe4344	0xe4308	r2->w2	mov w2, #0xbc (was #0x7c)	high
+0xf2e34	W32AT	0xe4388	0xe4308	r5->w24	cmp w24, #0xba (was #0x7a)	high
+0xf2e38	W32AT	0xe4368	0xe4308	r7->w24 (const in w25)	mov w25, #0xbb (was #0x7b)	high
+0xf2e3c	W32AT	0xe4390	0xe4308	r7->w24	cmp w24, #0xbb (was #0x7b)	high
+0x44ae78	W32AT	0x418ea0	0x418e3c	r6->w20	cmp w20, #0xbb (was #0x7b)	high
+0x4d27fc	W32AT	0x496824	0x4966c8	r5->w20 (input trigger mask)	and w10, w20, #0x200 (was and w10, w20, #0x1800)	high
+0x4d287c	W32AT	0x496898	0x4966c8	r5->w20 (input trigger mask)	and w10, w20, #0x200 (was and w10, w20, #0x1800)	high
+0x4d2848	W32AT	0x49686c	0x4966c8	r5->w20 (input trigger mask)	tbnz w20, #9 (was tbnz w20, #0xb)	high
+0x4d2854	W32AT	0x496870	0x4966c8	r5->w20 (input trigger mask)	tbz w20, #9 (was tbz w20, #0xc)	high
+0x4d28c8	W32AT	0x4968dc	0x4966c8	r5->w20 (input trigger mask)	tbnz w20, #9 (was tbnz w20, #0xb)	high
+0x4d28d4	W32AT	0x4968e0	0x4966c8	r5->w20 (input trigger mask)	tbz w20, #9 (was tbz w20, #0xc)	high
+0x4e1434	W32AT	0x4a3a88 + 0x4a3a8c	0x4a3940	r0->x8 (row ptr), r1->x9 (col / loaded word), [sp+0x10]->[sp+0x18] (course idx = w25)	0x4a3a88: nop (drop add x8,x8,x9,lsl#4); 0x4a3a8c: ldr w9, [sp, #0x18] (was ldr w9,[x8])	high
+0x449914	W32AT	0x417934	0x417908	r1->w1	mov w1, #0xbb (was #0x7c)	high
+0x44991c	W32AT	0x417940	0x417908	r7->w20	mov w20, #0xbb (was #0x7c)	high
+0x436928	W32AT	0x405fa4	0x405f74	r3->w3	mov w3, #0x300 (was #0x96)	high
+0x437144	W32	0x406794	0x406760	r3->w3	mov w3, #0x150 (was #0x46)	high
+0x94424c	W32AT	0x8a9864	0x8a91e4	r0->w8	cmp w8, #0xbb (was #0x7b)	high
+0x1c4a0	W32AT	0x1b4cc	0x1b4ac	r4->w19	b 0x1b4d8 (was b.ls; i.e. drop the id>0x7b -> return NULL check)	high
+0x51a6d8	W32	0x4d7d5c	0x4d7ba4 (title menu builder; f401 lists it inside 0x4d7a90)	-	nop (skip bl 0x8bc0c4 registering the Online button)	high
+0x51a694	W32	0x4d7d1c	0x4d7ba4	r0->x0	mov x0, xzr (was bl 0x5902d0 alloc)	high
+0x51d910	W32	0x4da6d0	0x4da65c	r0=[this+0x128]->x0=[x20+0x1e0]	nop (skip bl 0x437e80 on NULL Online button)	high
+0x51d920	W32	0x4da6e4	0x4da65c	r0=[this+0x128]->x0	nop (skip bl 0x437e98 on NULL Online button)	high
+0x42bf18	FUNC	0x3fc4a8	0x3fc4a8	r1->w1 (cursor idx), r2->w2 (input bits), ret r0->w0	w0 = ctgp_nav(w1, w2) (table below)	high
+0x957954	FUNC	0x8bcba4	0x8bcba4	r0..r2 -> x0 (factory), x1 (heap flag), w2 (page type)	x0 = ctgp_factory_create(this, heap, type): types < game count via game tables, CTGP extra type via own creator	high (mapping) / see note
+0x957eb8	FUNC	0x8bd0c8	0x8bd0c8	r0->x0 (registry), r1->x1 (&type), r2->x2 (object)	if type > size: ctgp_extra[type-0x87(4.0.1: -0x88)] = obj else buf[type] = obj	high
+0x957f3c	INLINE	0x8bd0f4 (replace lookup 0x8bd0f4..0x8bd10c)	0x8bd0e8	r0(this)->x0, r1(&type)->x1, r4(result)->x19	x19 = ctgp_registry_get(x0,[x1]); continue at 0x8bd110	high
+0x94bacc	INLINE	0x8b1314	0x8b1164	r0->x0 and x22 (new factory)	x22 = x0 = ctgp_factory_new() (skip bl 0x8bcb78)	high
+0x4367c4	INLINE	0x405f04	0x404410 (page registration fn; f401 boundaries unreliable)	r4->x19 (page manager / registration ctx)	call ctgp_register_page(x19): extra creator/info, then 0x8b3cb0(x19,&CTGP_PAGE_ID,10)	medium
+0x8fcfc	INLINE	0x88a70	0x88a14	r0->w8, r4->x19	after str w8,[x19,#0x228]: ctgp_state.page = w8	high
+0x50ad70	INLINE0	0x4c9958	0x4c9888	r0->w8	w8 |= 0x418 (was orr #0x600); continue	high
+0x50ae04	INLINE0	0x4c9a04	0x4c99f0	r0->w8	w8 |= 0x418 (was orr #0x600); continue	high
+0x432df8	W32	0x4028c0	0x4028b4	r0->w0	mov w0, wzr (was ldr w0,[x8])	high
+0x47097c	W32	0x43ca54	0x43c8b8	r0->w8	mov w8, #0x19 (was #0x201)	high
+0x50a53c	W32	0x4c91c8	0x4c906c	r0->w8 (input mask [x20+0x30])	branch to 0x4c933c if (w8 & 0x18)==0 (was tbz w8,#9)	high
+0x957988	W32AT	0x8bcbe4	0x8bcba4	r4->w19	cmp w19, #0x89 (4.0.1 already #0x88) - dead: fn replaced	high
+0x94bac4	W32AT	0x8b1308	0x8b1164	-	nop (mov w0,#0x888)	high
+0x94bac8	W32AT	0x8b130c	0x8b1164	-	nop (bl 0x5fa960 operator new)	high
+0x957ed4	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957f64	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957f6c	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957ed8	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957edc	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957ee0	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957ee4	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957ee8	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high
+0x957eec	W32AT	0x8bd0e8 (covered by hook at 0x8bd0f4)	0x8bd0e8	this->x0, &type->x1, result->x19	none separately; part of 0x957f3c hook	high

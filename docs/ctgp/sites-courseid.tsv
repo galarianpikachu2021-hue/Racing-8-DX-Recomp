@@ -1,0 +1,75 @@
+old_site	kind	new_site_401	new_fn_401	regs	action	confidence
+0x4e73e8	INLINE	0x4aa554	0x4a9f40	r0->w8 (value just loaded by ldr w8,[x8,#0x2088]); r5->w21	w8 = (w8>=0x7b)?0x10:w8	high
+0x4e74a4	INLINE	0x4aa600	0x4a9f40	r0->w8 (value just loaded by ldr w8,[x8,#0x2088]); r5->w21	w8 = (w8>=0x7b)?0x10:w8	high
+0x4e7560	INLINE	0x4aa6ac	0x4a9f40	r0->w8 (value just loaded by ldr w8,[x8,#0x2088]); r5->w21	w8 = (w8>=0x7b)?0x10:w8	high
+0x40d8d8	INLINE	0x3df5a0	0x3df4f0	r0(raceinfo2)->x8; r0->w8	w8 = (w8>=0x7b)?0x10:w8	high
+0x4e53ac	INLINE	0x4a8844	0x4a8710	r0->x0; r7->w22	w22 = (w22>=0x7b)?0x10:w22	high
+0x4e1454	INLINE	0x4a3ab4	0x4a3940	r5 (=scene+0x1cf8)->x0 (=x22+0x2088)	[x0+4] = db.name([x0]); [x0+8] = db.platform([x0])	medium
+0x4e40dc	INLINE	0x4a6b70	0x4a5c48	r0->w8 (after ldr w8,[x8,#0x2088]); sl(this)->[sp,#0x10] ; fp->x21	w8 = ([[this+0x890]+0xb4] >= 0x7b) ? 0x10 : w8 ; this=[sp,#0x10]	medium
+0x5805d0	INLINE0	0x53314c	0x532b8c	r0(raceinfo, from [sp,#0x14])->x8; r0->w8	w8 = db.base(w8+1)	high
+0x59d25c	INLINE0	0x54cadc	0x54c740	r5(raceinfo)->x21; r2->w10	w10 = db.base(w10+1)	high
+0x58092c	INLINE	0x533408	0x533368	r6(raceinfo)->x20; r2->w10	w10 = db.base(w10+1)	high
+0x965b8	INLINE	0x8ebe8	0x8ebd0	r0->x0; r0->w8	w8 = db.base(w8+1)	high
+0x47aaf0	INLINE	0x446154	0x446068	r4->x19, [r4+0x64]->[x19+0xb4], r6->x22, r0->w0	w0 = db.name([x19+0xb4]+1)	high
+0x47ab04	INLINE	0x446168	0x446068	r4->x19, [r4+0x64]->[x19+0xb4], r6->x22, r1->w8 (keep the x22 writeback)	ldr w8,[x22,#4]!; w8 = db.platform([x19+0xb4]+1)	high
+0x47ab1c	INLINE	0x44617c	0x446068	r4->x19, [r4+0x64]->[x19+0xb4], r6->x22, r0->w0	w0 = db.platform([x19+0xb4]+1)	high
+0x451f38	FUNC	0x41fd6c	0x41fd6c	r0(ptr)->x0; ret r0->w0	w0 = cupDB.find((int8)[x0]).nameLabel (cup+4)	high
+0x1c64c	INLINE	0x1b63c	0x1b4ac	r4->w19; r0->x0	x0 = db.folder(w19) (guest char* of entry[w19].field_0; id>=count -> entry 0)	high
+0x4cfde8	FUNC	0x4942b8	0x4942b8	r0(layout)->x0, r1->x1	reimplement: 12 anim groups (adds Scroll_RL/Scroll_LR)	high
+0x4d460c	INLINE	0x498408	0x4980a0	r7(cup)->w24, r8(slot)->w25, r2->w10	w10 = cupSel(w24,w25)  (before str w10,[x9,#0x2088])	high
+0x4701e4	INLINE	0x43c300	0x43c2e8	r5->x20, r4->x19, r0->w8	w8 = slotCourse([x20]+1)	high
+0x470208	INLINE	0x43c338	0x43c2e8	r5->x20, r4->x19, r1->w8	w8 = slotPlatform([x20]+1)	high
+0x470224	INLINE	0x43c34c	0x43c2e8	r5->x20, r4->x19, r0->w0	w0 = slotPlatform([x20]+1)	high
+0x47025c	INLINE	0x43c384	0x43c2e8	r5->x20, r4->x19, r0->w8	w8 = slotName([x20]+1)	high
+0x4d268c	INLINE	0x4966c8	0x4966c8	r0(this)->x0; [this+0xa4]->[this+0x124]	call cupScreenUpdate(x0); if [x0+0x124]==6: return	medium
+0x5432f8	INLINE	0x4fb620	0x4fb290	sl(cup)->w23, r4(slot*0x10)->x22, r1->w9	after ldr w9,[x8]: w9 = cupSlotCourse(w23, x22>>4)	high
+0x543310	INLINE	0x4fb63c	0x4fb290	r8->x9 (x9 = x26+4+x22 = record dest), r1->low32(x8)	after ldur x8,[x8,#4]: c=[x9-4]; x8.lo = db.platform(c+1)	high
+0x543314	INLINE	0x4fb63c	0x4fb290	r0->high32(x8)	after ldur x8,[x8,#4]: x8.hi = db.name(c+1), c=[x9-4]	high
+0x44b4d0	INLINE	0x4194c0	0x419374	fp->w21 (idx), r5->x20 (64-bit ptr)	x20 = db.picName(w21+1)	high
+0x44b040	INLINE	0x419064	0x418ed0	r5(&idx)->x21, r5(result)->x20	x20 = db.picName([x21]+1)	high
+0x4de824	INLINE	0x4a16d8	0x4a133c	fp(raceInfo2)->x20, r6->w21	w21 = db.name([x20+0x1a0]+1)	high
+0x4de7ec	INLINE	0x4a16a8	0x4a133c	fp->x20, r6->w21	w21 = db.platform([x20+0x1a0]+1)	high
+0x556ce0	INLINE	0x50cfbc	0x50ccc0	fp(layout)->x21, singleton->x20	call setAuthor(x21): T_Author=msg(db.author([x20+0x1a0]+1)), T_AuthorHeader=msg(600000)	medium
+0x556c90	INLINE	0x50cf6c	0x50ccc0	[sp,#0xc](singleton)->x20, r5->w25	w25 = db.name([x20+0x1a0]+1)	high
+0x556cc8	INLINE	0x50cfa0	0x50ccc0	singleton->x20, r5->w25	w25 = db.platform([x20+0x1a0]+1)	high
+0x557194	INLINE	0x50d32c	0x50ccc0	r8(singleton)->x20, r2->x2 (64-bit ptr)	x2 = cupIconName([x20+0x1a0]+1)	high
+0x5575cc	INLINE	0x50d6f8	0x50ccc0	singleton->x20, r0->w8	w8 = db.cup([x20+0x1a0]+1)	high
+0x558750	INLINE	0x50e64c	0x50e100	scene([[r6]])->x8 at 0x50e600 (capture), r2->x2	x2 = cupIconName([scene+0x143c]+1)	medium
+0x558780	INLINE	0x50e668	0x50e100	scene (captured)->, r0->w8	w8 = db.cup([scene+0x143c]+1)	medium
+0x46fa74	INLINE	0x43bb80	0x43bb68	r5->x20, r0->w8	exec str w8,[x19,#0x3d0]; [x20] = remapCup(w8)	high
+0x4d0b48	INLINE	0x494fec	0x494f08	fp->x19, r0->w8	w8 = remapCup([x19])	high
+0x906df8	INLINE	0x86f610	0x86f5b0	r5->x20, r4->x19 (sret x8), r1->w8	f = db.flag34([x20+0x1a0]+1); if f != -1: w8 = f  (then str w8,[x19])	high
+0x12558	INLINE	0x11cac	0x11bec	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x14e50	INLINE	0x143cc	0x142d8	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x1701c	INLINE	0x164e4	0x16348	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x19054	INLINE	0x182f8	0x17f20	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x3405c	INLINE	0x32050	0x31db8	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x35568	INLINE	0x33528	0x33514	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x57480	INLINE	0x53ad8	0x537fc	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x57edc	INLINE	0x548ac	0x537fc	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x71300	INLINE	0x6c070	0x6bfd4	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x85a7c	INLINE	0x7f214	0x7eaa4	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xae588	INLINE	0xa5200	0xa51d8	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xb5e50	INLINE	0xac4d4	0xac468	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xc3788	INLINE	0xb8f0c	0xb8ea4	r0(singleton)->x0; r0(result)->w9	w9 = db.base(w9+1)	high
+0xc4a70	INLINE	0xba22c	0xba1f8	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xd8f08	INLINE	0xcc5c4	0xcc4d8	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xde108	INLINE	0xd1444	0xd142c	r0(singleton)->x0; r0(result)->w9	w9 = db.base(w9+1)	high
+0xde190	INLINE	0xd14e4	0xd14d0	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xe698c	INLINE	0xd8638	0xd8530	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0xe7470	INLINE	0xd905c	0xd8fc4	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x119d44	INLINE	0x105bdc	0x105b20	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x11b2b8	INLINE	0x1073c8	0x107238	r0(singleton)->x0; r1(dest)->w8	w8 = db.base(w8+1)  [plugin bug: stub writes r0, r1 keeps junk]	medium
+0x11b2cc	INLINE	0x10748c	0x107238	r0(singleton)->x0; r1(dest)->w8	w8 = db.base(w8+1)  [plugin bug: stub writes r0, r1 keeps junk]	medium
+0x13e914	INLINE	0x1291f8	0x128e28	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x1542fc	INLINE	0x13e098	0x13d778	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x166c6c	INLINE	0x14ecd0	0x14e7d4	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x166c7c	INLINE	0x14ece0	0x14e7d4	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x17fb2c	INLINE	0x166c18	0x1664b0	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x184ad8	INLINE	0x16c0c8	0x16bff0	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x870180	INLINE	0x7ddfd4	0x7ddea8	r8(singleton)->x20; r0(dest)->w8	w8 = db.base(w8+1)  [plugin bug: stub reads [r0+0x1a0], r0 = new buffer]	medium
+0x28629c	INLINE	0x264d8c	0x264d70	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x13c28c	INLINE	0x126e90	0x126d88	r0(singleton)->x0; sb(dest)->w22	w22 = db.base(w22+1)	high
+0x965910	INLINE0	0x8caa70	0x8ca9fc	r0(singleton)->x0; r0(result)->w8	w8 = db.base(w8+1)	high
+0x3ac31c	INLINE0	0x385cb0	0x3858ac	r7(raceinfo)->x22; r0->w8	w8 = db.baseBCP(w8+1)	high
+0x556864	INLINE	0x50ccb0	0x50c6a8	r4->x19 (=this+0x30)	call preloadCupIcons(x19)	high

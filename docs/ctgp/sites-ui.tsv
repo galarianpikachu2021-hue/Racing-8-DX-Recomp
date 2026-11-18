@@ -1,0 +1,47 @@
+old_site	kind	new_site_401	new_fn_401	regs	action	confidence
+0x82640	INLINE	0x7c340	0x7b1cc	r4->w8(idx 0..5); r1->w21	w21 = ctgpTitleVoiceWait[w8] ({0x90,0x78,0x78,0x6c,0x64,0xa0}) instead of ldr w21,[x10,#8]	high
+0x669480	INLINE	0x5f8ea0	0x5f8e70	r1->x1(path char*)	x1 = redirectStreamPath(x1) ?: x1 (courseDB pBGM_<folder>[_B]<suffix> / per-course Resource/Stream override)	high
+0x7f6464	INLINE	0x768b80	0x768b24	r1->w9	w9 = byte[x9+0x13] & ~2 (or pc=0x768bac)	high
+0x437208	INLINE	0x406850	0x406760	r4->x19 (no regs used)	if !courseFilesHashOk() crash(skip in port); setupCourseStreamDir()	high
+0x426da0	INLINE	0x3f8098	0x3f8004	none	if !courseFilesHashOk() crash(skip in port); setupCourseStreamDir()	high
+0xa4a4c	INLINE	0x9c078	0x9c044	r0->x0(race singleton), result->w8	w8 = db[[x0+0x1a0]+1].bgmCourseIndex(0x28)	high
+0x8fa28	INLINE	0x887ec	0x88728	r1->w8(page id)	if w8==0x84 || w8==NEW_SETTINGS_PAGE(0x88) pc=0x88804	high
+0x80d24	INLINE	0x7abc8	0x7aa48	r0->w8(page id)	if w8==NEW_SETTINGS_PAGE(0x88) w8=0x22	high
+0xa5ce4	INLINE	0x9d170	0x9d14c	r4->x19; r1->w1	w1 = (setting[2] DefaultRaceBGM==None) ? 0 : [x19+0x108]	high
+0x4d08e0	INLINE	0x494d60	0x494b44	r6(this)->x19	ctgpCupIcons(x19).setup: icon[i].set(cup 0x18+i, state 5) for i<8	medium
+0x52b300	INLINE	0x4e6588	0x4e64a8	r4->x19; [r4+0x3ec]->[x19+0x578]	createCtgpCupIcons(page=x19, layout=[x19+0x578])	high
+0x4d3c20	INLINE	0x497ae0	0x4979b8	r4->x19; [r4+0x3ec]->[x19+0x578]	createCtgpCupIcons(page=x19, layout=[x19+0x578])	high
+0x4d37b0	INLINE	0x4976bc	0x497524	r4->x19; [r4+0x3ec]->[x19+0x578]	createCtgpCupIcons(page=x19, layout=[x19+0x578])	high
+0x4d1624	INLINE	0x4958e4	0x4958c8	r0->x0(page)	cupIconSetup(x0,0) [0x494b44]; if map[x0] && cupState.byte2 hide N_ChangeIcon_01	high
+0x4c9350	INLINE	0x48e1ec	0x48e190	r4->x19(page)	if ([x19+state]-1)>=2 cupIconSetup(x19,0) [0x494b44]	medium
+0x6953e4	INLINE	0x6231c0	0x6231a4	r0->x0(archive), r2->x2(SafeString*: [r2+4]->[x2+8])	alt=courseLocalPath(x0,[x2+8]); if alt [x2+8]=alt	high
+0x278e8	INLINE	0x261c4	0x26044	s0->s0(len); result s0->s2	s2 = speedMult/len (orig 1/len)	medium
+0x226f8	INLINE	0x215a4	0x214c8	s0->s0; s4->s1	s1 = speedMult/s0	medium
+0x227f8	INLINE	0x21784	0x214c8	s0->s0 (in/out)	s0 = speedMult/s0	medium
+0x22898	INLINE	0x21824	0x214c8	s0->s0; s2->s1	s1 = speedMult/s0	medium
+0x354f8	INLINE	0x334b0	0x332f8	s0->s0; s4->s1	s1 = speedMult/s0	medium
+0x3a558	INLINE	0x38244	0x37ff8	s0->s0; s4->s1	s1 = speedMult/s0	high
+0x19d648	INLINE	0x182e2c	0x182c14	s0->s1 (value stored to 0x3dc->0x42c)	s1 *= speedMult before str s1,[x19,#0x42c]	medium
+0x19d690	INLINE	0x182e40,0x182e7c	0x182c14	s0->s0	s0 *= speedMult before str s0,[x19,#0x42c] (two 4.0.1 paths)	medium
+0x11f830	INLINE	0x10b95c	0x10b6c8	none	speedMult=1.0; if (root=0x7fc894()) byamlGetFloat(root,"SpeedMultiplier",&speedMult)	high
+0x123de0	INLINE	0x10fb00	0x10fa04	r5->w20(laps); r0->s1 (scvtf)	s1 = float(lapFrame(w20, mode=[[[raceObj4+0x218]+0x58]+0x64]))	high
+0x3c45bc	INLINE	0x39b978	0x39b950	r1->w1	if [race+0x1a0] > 0x7a: w1 = 0 (else 300000)	high
+0x123dc8	W32AT	0x10faec	0x10fa04	-	nop (b.ne 0x10fb10)	high
+0x55fba0	INLINE	0x515370	0x5152f8	r0->w9	w9 = max(0, 0x8521f4()) (local player index) instead of ldrsb [x19,#0xdd]	high
+0x57ee90	INLINE	0x531d94	0x53198c	fp->x19; [fp+0x228]->[x19+0x320]; r0->w8(race mode)	createSusAndMusSwchParts(x19, [x19+0x320]+0x30); Z = raceTimerWanted() -> pc = Z?0x531d9c:0x531f58	high
+0x55ceb0	INLINE	0x5129b0	0x5128e0	r5->x20(layout part)	speedoInit(layout x20): find T_SOM_00; hide W_SOMBase_00 unless speedometer on	high
+0x55d32c	INLINE	0x5132e8	0x5132d0	none	speedoUpdate(): T_SOM_00 = int(abs(localKart.speed)*10)	medium
+0x51d950	INLINE	0x4da72c	0x4da71c	-	no-op in plugin (FUN_15e34 is empty) - no hook needed	medium
+0x4d93ac	INLINE	0x49c89c	0x49c88c	none	setCupModeFlags(pageId=S.page): 0x21->byte0=!vanillaComm,byte2=vanillaComm; 0x23->byte0=1,byte2=0	high
+0x51c874	INLINE	0x4d988c	0x4d92e8	r0->w8(btn-0x14); r6->w21; r7->w22	w21 = (w8==0x57)?-1:0; w22 = (w8==0x57)?0xd:0 (instead of mov w21,w22)	high
+0x51acfc	INLINE0	0x4d8274	0x4d7ba4	sl->x19(page); [sl+0x31c]->x20/[x19+0x448]	createSettingsButton L_SubBtn_07 id 0x6b, text 813000	high
+0x51c1f0	INLINE0	0x4d93dc	0x4d92e8	r4->x19; r0->w8(btn id)	if w8==0x6b: openPage(0x88); [x19+0x184]=0x19; 0x8ba5fc(x19,trans); pc=0x4da640	high
+0x49d9ec	INLINE0	0x466604	0x463d50	r4->x19(list); r5->x21(kind*); r1->w9; r0->w8; r6->w22; r8->w21	if [x21]==8 addCtgpSettingsRows(x19); w9=[x19+0x2f0]; w8=[x19+0x2f4]; w21=w22=0; pc=0x4664f8	medium
+0x51b5b0	INLINE	0x4d89d0	0x4d8350	r0->w8	treat w8==0x88 like 0x84 (Z=1)	high
+0x509480	INLINE	0x4c82d8	0x4c7c68	fp->x20(res); sb->x19; [sb+0x120]->[x19+0x1d0]	load TitlePicSetting_00^l.bntx via 0x8b63f8(x20,..) and put on pane P_Setting_00	high
+0x507044	INLINE	0x4c6048	0x4c5b30	[r4+0x120]->[x19+0x1d0]	g_NSetting = findPane([x19+0x1d0],"N_Setting_00")	high
+0x5073c0	INLINE	0x4c637c	0x4c6360	none	setVisible(g_NSetting,false)	high
+0x50768c	INLINE	0x4c6618	0x4c6360	r0(kind if >0xc)->[x19] (kind*)	if [x19]==0xd setVisible(g_NSetting,true)	medium
+0x3bc964	INLINE0	0x3942ec	0x394110	r4->x19(flags); r5->x20; [r5+0x24]->[x20+0x48]; r8->x22	if honkMod: [x19+0x34] = ([x19+0x34]&~0x80000) | (([[x20+0x48]+0x1cc]&0x10000)?0x80000:0)	medium
+0x18cd6c	INLINE0	0x173f34	0x173e30	r4->x19; r0->w8; [r4+0x178]->[x19+0x1cc]; [r4+0x123]->[x19+0x177]	w8=byte[x19+0x177]; if honkMod && byte[x19+?0x93] && ([[x19+?0x10]+?0x13f0]&0x80000) w8=1	low
+0x1a87f8	W32	0x18d5dc	0x18d2d8	-	nop (keep bits 17+ of [x20+0x34] in packet word)	high

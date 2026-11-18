@@ -118,7 +118,7 @@ Working on 3.0.4 (scripted runs; 4.0.1 has every address but is not run yet):
 
 Known limits / next:
 * Extra icons on the first cup page only (Grand Prix): the 64-bit menu heap has no room for a second set (the plugin itself
-  skips its third page). VS / Time Trial cup pages show CTGP cups only through ... nothing yet (no paging there).
+  skips its third page). The other cup pages (VS, Time Trial) have no CTGP paging yet.
 * Menu background / title screen / top menu layouts left out: CTGP's 3.0.3 `mn_Background_00` makes 3.0.4 call
   `nn::os::LockMutex(null)` on a loader thread.
 * Speedometer: `T_SOM_00` is in the HUD (shows the layout's placeholder); needs the local kart pointer (3.0.3 path

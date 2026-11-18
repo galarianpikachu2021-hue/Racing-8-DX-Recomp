@@ -1,0 +1,36 @@
+old_site	kind	new_site_401	new_fn_401	regs	action	confidence
+0x8dfac0	W32AT	0x8491ac	0x848f54	r4->w27,r2->(none)	covered by INLINE 0x8dfac8 hook at 0x8491a8 (nop of and r2,r4,#0x7f; 4.0.1 has bfxil instead)	high
+0x8dfacc	W32AT	0x8491ac	0x848f54	r0->w9	covered by INLINE 0x8dfac8 hook (nop and #0x80 = part of bfxil w9,w27,#0,#7)	high
+0x8dfad0	W32AT	0x8491ac	0x848f54	r0->w9,r2->w27	covered by INLINE 0x8dfac8 hook (nop orr = part of bfxil)	high
+0x8dfb98	W32AT	0x849248	0x848f54	r0->w8	covered by INLINE 0x8dfb94 hook at 0x849244 (nop and w8,w8,#0x7f)	high
+0x8ea69c	W32AT	0x853140	0x8530cc	r0->w8	covered by INLINE 0x8ea698 hook at 0x85313c (nop and w8,w8,#0x7f)	high
+0x8e4a28	W32AT	0x84db0c	0x84d948	sl->w22,r0->w8	covered by INLINE 0x8e4a24 hook at 0x84db08 (nop and w22,w8,#0x7f)	high
+0x8e4afc	W32AT	0x84dbec	0x84d948	r2->w10,sl->w22	and w10,w22,#0x7f -> mov w10,w22 (unconditional)	high
+0x8e4b18	W32AT	0x84dc04	0x84d948	r6->w14,r7->w13	covered by INLINE 0x8e4b14 hook at 0x84dc00 (nop and)	high
+0x8e4b20	W32AT	0x84dc10	0x84d948	r7->w13	covered by INLINE 0x8e4b14 hook (nop andne)	high
+0x8e4b24	W32AT	0x84dc14	0x84d948	r7->w13,r2->w10	covered by INLINE 0x8e4b14 hook (nop orrne)	high
+0x8e4b28	W32AT	0x84dc18	0x84d948	r7->w13,r3->x12	covered by INLINE 0x8e4b14 hook (nop strbne)	high
+0x8e1788	W32AT	0x84abcc	0x84aa38	sl->w26	covered by INLINE 0x8e1784 hook at 0x84abc8 (nop and w26,w8,#0x7f)	high
+0x8e1850	W32AT	0x84acb4	0x84aa38	r1->w8	covered by INLINE 0x8e184c hook at 0x84acb0 (nop and w8,w8,#0x7f)	high
+0x8e29a8	INLINE0	0x84bc38	0x84bbec	r0->w0	effective: tbnz w0,#0 always taken (b 0x84bc8c); result of fn is ignored by both callers after W32 nops -> may skip	medium
+0x8e2a5c	INLINE0	0x84bcc0	0x84bbec	r0->x0	effective: nop cbz x0 (null check removed); fn result ignored -> recommend skip	medium
+0x52c6e8	INLINE0	0x4e75a8	0x4e6e34	r0->w8	if comm && rand()%3!=0: w8 = 0x7b + rand()%(count-0x7b) (random CT course index) before str w8,[sp]	high
+0x8de8ec	INLINE	0x84820c	0x847aa4	r3->w10	cmp w10, db.count (0xbb) instead of #0x7b	high
+0x8b90bc	INLINE	0x824048	0x823f08	r0->w8	cmp w8, db.count (0xbb) instead of #0x7b	high
+0x8b9010	INLINE	0x823fa4	0x823f08	fp->x20,r5->x22-0x10	str: [x20] = comm ? [x22-4]&0x7fffffff : [x22]&0x7f	high
+0x8b8e68	INLINE	0x823df8	0x823a44	r0->x8,fp->x21,sl->w19	strb [x8+0x10]=(([x21]&0x7f)|w19<<7); if comm: [x8+0xc]=([x21]&0x7fffffff)|w19<<31; [x8+0x10]=([x21]?0x10:0)|w19<<7	high
+0x8b9074	INLINE0	0x824004	0x823f08	r5->x22-0x10,fp->x20	strb [x22]=[x20]|0x80; if comm: [x22-4]=[x20]|0x80000000; u32 [x22]=([x20]?0x10:0)|0x80	high
+0x8b9004	INLINE0	0x823f98	0x823f08	sl->x19,r5->x22-0x10	strb [x19]=[x22]>>7; if comm: strb [x19]=[x22-4]>>31	high
+0x8e4a24	INLINE	0x84db08	0x84d948	r0->x0,sl->w22	w22 = comm ? [x0+8]&0x7fffffff : [x0+6]&0x7f; resume 0x84db10	high
+0x8e4b14	INLINE	0x84dc00	0x84d948	r3->x12,r7->w13,r6->w14,sl->w22,r2->w10	comm: w=[x12+8]; if (w&0x7fffffff)!=w22 {strb [x12+6]=(u8)(w+0x80); [x12+8]=w10}; else original; resume 0x84dc1c	high
+0x8dfac8	INLINE	0x8491a8	0x848f54	r0->x0(obj),r1->x8+6,r4->w27	comm: [x8+8]=w27&0x7fffffff, byte +6 unchanged; else original bfxil/strb; resume 0x8491b4 (keep flags of cmp x24,x23)	high
+0x8dfb94	INLINE	0x849244	0x848f54	r0->x0/w8	w8 = comm ? [x0+8]&0x7fffffff : [x0+6]&0x7f; resume 0x84924c (cbz w8)	high
+0x8ea698	INLINE	0x85313c	0x8530cc	r0->x8-0x10(obj),r1->x8+6	w8 = comm ? [x8+8]&0x7fffffff : [x8+6]&0x7f; resume 0x853144	high
+0x8e1784	INLINE	0x84abc8	0x84aa38	r0->x8-0x10(obj),r1->x8+6,sl->w26	w26 = comm ? [x8+8]&0x7fffffff : [x8+6]&0x7f; resume 0x84abd0	high
+0x8e184c	INLINE	0x84acb0	0x84aa38	r0->x0,r1->w8	w8 = comm ? [x0+8]&0x7fffffff : [x0+6]&0x7f; resume 0x84acb8	high
+0x8d6460	INLINE0	0x840874	0x84079c	r4->x19	if comm: call 0x902f70(x19, 0, 0x10000002) (3.0.3 0x9a2910) before 0x902de0(x19,1)	medium
+0x8d62d8	INLINE0	0x8406fc	0x840660	r1+0x80->x29-0x30 (=sp+0x80)	strcpy(x29-0x30, comm ? "CTGPDelux010101" : "MarioKart8Delux") before bl 0x903344(x19,key,0x20)	high
+0x8e2374	INLINE0	0x84b7bc	0x84b5c4	r2->x2,r8->x23	if comm: [x2] = [x23+0xc]&0x7fffffff before bl 0x823a44	high
+0x8b90ec	FUNC	0x824078	0x824078	r0->x0	replace: same 12x12 sort of 0x18-byte records; swap additionally exchanges u32 at +0xc when comm	high
+0x8e11b8	W32	0x84a680	0x84a498	r0->w0	nop (tbz w0,#0,#0x84a6d0)	high
+0x8e1468	W32	0x84a89c	0x84a780	r0->w0	nop (tbz w0,#0,#0x84a8e0)	high
