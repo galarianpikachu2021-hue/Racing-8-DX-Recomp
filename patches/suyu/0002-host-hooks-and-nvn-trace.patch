@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..dc7e4562c8
+index 0000000000..753b0b0342
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1280 @@
+@@ -0,0 +1,1335 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -1656,6 +1656,7 @@ index 0000000000..dc7e4562c8
 +#include <memory>
 +#include <filesystem>
 +#include <map>
++#include <set>
 +#include <cstring>
 +#include <fstream>
 +#include <mutex>
@@ -1751,7 +1752,7 @@ index 0000000000..dc7e4562c8
 +    u64 Alloc(Core::System& system, u64 bytes, u64 align = 16) {
 +        std::scoped_lock lk{lock};
 +        if (base == 0) {
-+            constexpr size_t kPages = 64; // 256 KiB
++            constexpr size_t kPages = 256; // 1 MiB
 +            Kernel::KProcessAddress addr{};
 +            auto* process = system.ApplicationProcess();
 +            if (!process || process->GetPageTable().MapPages(std::addressof(addr), kPages, Kernel::KMemoryState::Normal,
@@ -2504,10 +2505,22 @@ index 0000000000..dc7e4562c8
 +            return true;
 +        }
 +        switch (sc->step) {
-+        case 0:
++        case 0: {
 +            sc->step = 1;
++            // KARTRECOMP_CTGP_ICON_ARENA=1 (test): the icon objects from CTGP's own guest memory instead of the menu heap
++            static const bool arena = std::getenv("KARTRECOMP_CTGP_ICON_ARENA") != nullptr;
++            if (arena) {
++                const u64 obj = g_arena.Alloc(*sys, 0x3e0, 16);
++                if (obj) {
++                    sc->obj = obj;
++                    sc->step = 2;
++                    next = {Fn(ui.icon_ctor), {sc->obj, 1}};
++                    return true;
++                }
++            }
 +            next = {Fn(ui.alloc), {0x3e0, 4}};
 +            return true;
++        }
 +        case 1:
 +            if (!sc->obj) return false; // out of memory: leave the page as it is
 +            sc->step = 2;
@@ -2907,6 +2920,48 @@ index 0000000000..dc7e4562c8
 +            float speed = 0;
 +            if (kart) { const u32 b = mem.Read32(kart + 0x37c); std::memcpy(&speed, &b, 4); }
 +            LOG_INFO(Core_ARM, "CTGP probe: x0 {:#x} kart {:#x} f37c {}", ctx.x[0], kart, speed);
++            static std::set<u64> karts;
++            if (kart) karts.insert(kart);
++            static bool searched = false;
++            if (!searched && karts.size() >= 12) { // where do the race system's players lead to their karts? (3 hops, 0x800 bytes)
++                searched = true;
++                const u64 base = KartHookTrace::MainBase();
++                const u64 rs = mem.Read64(mem.Read64(mem.Read64(mem.Read64(base + 0x12f6388)) + 0x20) + 8);
++                LOG_INFO(Core_ARM, "CTGP probe: race system {:#x}", rs);
++                for (u32 i = 0; i < 12; ++i) {
++                    const u64 p0 = mem.Read64(rs + 0x190 + 8 * i);
++                    std::string found;
++                    for (u64 a = 0; a < 0x800 && p0; a += 8) {
++                        const u64 p1 = mem.Read64(p0 + a);
++                        if (karts.contains(p1)) found += fmt::format("[{:x}] ", a);
++                        if (p1 < 0x2000000000ULL || p1 > 0x3000000000ULL) continue;
++                        for (u64 b = 0; b < 0x800; b += 8) {
++                            const u64 p2 = mem.Read64(p1 + b);
++                            if (karts.contains(p2)) found += fmt::format("[{:x}][{:x}] ", a, b);
++                            if (p2 < 0x2000000000ULL || p2 > 0x3000000000ULL) continue;
++                            for (u64 c = 0; c < 0x400; c += 8)
++                                if (karts.contains(mem.Read64(p2 + c))) found += fmt::format("[{:x}][{:x}][{:x}] ", a, b, c);
++                        }
++                    }
++                    LOG_INFO(Core_ARM, "CTGP probe: player {} {:#x}: {}", i, p0, found.substr(0, 400));
++                }
++            }
++            static std::set<u64> seen;
++            if (kart && seen.insert(kart).second) { // small integers in the kart and the x0 object, once each
++                std::string row;
++                for (u64 o = 0; o < 0x600; o += 4) {
++                    const u32 v = mem.Read32(kart + o);
++                    if (v < 12) row += fmt::format("{:x}={} ", o, v);
++                }
++                LOG_INFO(Core_ARM, "CTGP probe vt: kart {:#x} obj {:#x} vtable {:#x} obj+0x804 {}", kart, ctx.x[0], mem.Read64(ctx.x[0]) - KartHookTrace::MainBase(), mem.Read32(ctx.x[0] + 0x804));
++                LOG_INFO(Core_ARM, "CTGP probe kart {:#x}: {}", kart, row);
++                row.clear();
++                for (u64 o = 0; o < 0x900; o += 4) {
++                    const u32 v = mem.Read32(ctx.x[0] + o);
++                    if (v < 12) row += fmt::format("{:x}={} ", o, v);
++                }
++                LOG_INFO(Core_ARM, "CTGP probe obj {:#x}: {}", ctx.x[0], row);
++            }
 +            return false;
 +        });
 +    }
