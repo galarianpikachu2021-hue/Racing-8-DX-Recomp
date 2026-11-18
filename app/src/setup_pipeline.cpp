@@ -106,6 +106,13 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     const VerifyResult verdict = VerifyBuild(paths.engine, layout, 150, cancel);
     if (!verdict.ok) return {false, verdict.message};
 
+    if (in.deleteBuildFiles) {
+        // Space saving: the game runs from the module folder; the exporter's output and the compile work folder are only for the
+        // next (incremental) build.
+        QDir(layout.exportDir()).removeRecursively();
+        QDir(layout.workDir()).removeRecursively();
+    }
+
     QFile stamp(layout.moduleDir() + "/module.json");
     if (!stamp.open(QIODevice::WriteOnly)) return {false, QCoreApplication::translate("Messages", "Cannot write %1.").arg(stamp.fileName())};
     stamp.write("{ \"engineVersion\": \"" + paths.engineVersion.toUtf8() + "\", \"update\": \"" + updateName.toUtf8() + "\" }\n");

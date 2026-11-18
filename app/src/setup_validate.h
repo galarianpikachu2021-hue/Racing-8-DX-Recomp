@@ -29,6 +29,9 @@ struct SetupInputs {
     /// the update applied) and its data (a folder of the RomFS files, or a romfs.bin image). Used when `exefs` is set.
     QString exefs, romfs;
     bool decrypted() const { return !exefs.isEmpty(); }
+    /// Delete the build's work files (the read game code and the compiled pieces, ~6 GB) once the game is built and tested; the
+    /// next build then starts from scratch (a few minutes longer).
+    bool deleteBuildFiles = false;
 };
 
 /// Which supported update an ExeFS folder holds ("3.0.4", "4.0.1"), from the build id of its main; "" when it is neither.

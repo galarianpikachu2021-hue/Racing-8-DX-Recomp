@@ -61,6 +61,7 @@ private:
     QStringList dlc;
     QPushButton *buildButton, *cancelButton, *playButton;
     QCheckBox* split60 = nullptr;
+    QCheckBox* delete_build_files = nullptr;
     QProgressBar* bar;
     QLabel* message;
     std::thread worker;

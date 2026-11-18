@@ -103,6 +103,10 @@ SetupPage::SetupPage(QWidget* parent)
                                "Changing it needs Rebuild game, which only rebuilds the part that changes."));
     split60->setToolTip(tr("Built into the game when it is compiled (no JIT): every player's view is drawn every frame."));
     top->addWidget(split60);
+    delete_build_files = new QCheckBox(tr("Delete the build files after building (saves about 6 GB; the next build takes a few minutes longer)"));
+    delete_build_files->setToolTip(tr("The game runs from the built module alone. The read game code and the compiled pieces are kept only "
+                                      "so that a later build can reuse them."));
+    top->addWidget(delete_build_files);
     auto* buttons = new QHBoxLayout;
     buildButton = new QPushButton(tr("Build game"));
     cancelButton = new QPushButton(tr("Cancel"));
@@ -145,6 +149,7 @@ SetupPage::SetupPage(QWidget* parent)
         revalidate();
     });
     split60->setChecked(s.value("setup/split60", false).toBool());
+    delete_build_files->setChecked(s.value("setup/delete_build_files", false).toBool());
     dlcRow.edit->setText(dlc.join("; "));
     QString missing;
     if (!paths.complete(&missing)) message->setText(missing);
@@ -207,6 +212,7 @@ SetupInputs SetupPage::inputs() const {
         in.firmware = decFirmware.edit->text();
     }
     if (split60->isChecked()) in.patches << QStringLiteral("split60");
+    in.deleteBuildFiles = delete_build_files->isChecked();
     return in;
 }
 
@@ -340,6 +346,7 @@ void SetupPage::saveInputs() const {
     s.setValue("setup/firmware", firmware.edit->text());
     s.setValue("setup/dlc", dlc);
     s.setValue("setup/split60", split60->isChecked());
+    s.setValue("setup/delete_build_files", delete_build_files->isChecked());
     s.setValue("setup/exefs", exefs.edit->text());
     s.setValue("setup/romfs", romfs.edit->text());
     s.setValue("setup/dec_keys", decKeys.edit->text());
