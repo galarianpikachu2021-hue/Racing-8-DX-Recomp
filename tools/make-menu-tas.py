@@ -103,9 +103,10 @@ def main() -> int:
     # before loads got faster), so
     # N right-presses in between move N cups along (1 = Flower Cup, whose first course, Mario Circuit,
     # has an open sky; the default Mushroom Cup starts in the mostly enclosed Mario Kart Stadium).
+    # 2026-11-18: presses 8 frames apart were too close (the second one was lost: --cup=2 stopped on the Flower Cup); 16 apart.
     for i in range(cup):
         for k in range(4):
-            lines.append(f"{1136 + 8 * i + k} KEY_DRIGHT 0;0 0;0")
+            lines.append(f"{1144 + 16 * i + k} KEY_DRIGHT 0;0 0;0")
     # Smart Steering resets each race and is toggled from the pause menu (L), which
     # only opens once the race has started: + (pause), L, + (resume) after "GO",
     # with the accelerator released (A would pick "Continue"). "GO" is around frame 2325 on a normal

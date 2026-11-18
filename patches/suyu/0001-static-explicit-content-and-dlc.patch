@@ -16111,10 +16111,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..c2b831a999
+index 0000000000..e4731b4b5c
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8377 @@
+@@ -0,0 +1,8392 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -17797,6 +17797,21 @@ index 0000000000..c2b831a999
 +        static const bool scale_bloom = [] { const char* v = std::getenv("KARTRECOMP_BLOOM_SCALE"); return !v || *v != '0'; }();
 +        const bool bloom_chain = scale_bloom && render_target && t.target == 1 && t.width == 480 && t.height == 272;
 +        img.scalable = render_target && (t.target == 1 || t.target == 4) && ((t.levels <= 1 && t.height > 288) || bloom_chain);
++        // Shadow maps (depth-only targets drawn from the light; their size has nothing to do with the screen) - which ones the
++        // rule above catches, and KARTRECOMP_SCALE_SHADOWMAPS=0 to leave them at the game's size (user report: misplaced,
++        // wrongly sized shadows at 1440p).
++        if (img.scalable && (info->format == VK_FORMAT_D16_UNORM || info->format == VK_FORMAT_D32_SFLOAT ||
++                             info->format == VK_FORMAT_D24_UNORM_S8_UINT || info->format == VK_FORMAT_D32_SFLOAT_S8_UINT)) {
++            static const bool scale_shadow = [] { const char* v = std::getenv("KARTRECOMP_SCALE_SHADOWMAPS"); return !v || *v != '0'; }();
++            const bool screen_size = current_frame && t.width == current_frame->present.width && t.height == current_frame->present.height;
++            static int logged = 0;
++            if (logged < 24) {
++                ++logged;
++                LOG_INFO(Frontend, "scalable depth target {}x{} (target {}, layers {}, format {}){}", t.width, t.height, t.target, t.depth,
++                         static_cast<int>(info->format), screen_size ? " - screen size" : " - NOT screen size (shadow map?)");
++            }
++            if (!scale_shadow && !screen_size) img.scalable = false;
++        }
 +        img.scaled = img.scalable && (ScaleActive(cur_scale) || ScaleActive(cur_wide));
 +        img.scale = img.scaled ? cur_scale : 1.0f;
 +        img.wide = img.scaled ? cur_wide : 1.0f;
