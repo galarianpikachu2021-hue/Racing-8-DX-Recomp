@@ -5,10 +5,10 @@
 # KARTRECOMP_EXPORT_BIN: the tool (default: the research workspace's clang build tree). Heavy: run under systemd-run --scope.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-bin="${KARTRECOMP_EXPORT_BIN:-/home/carter/reverse-engineering/mk8d/mk8-recomp/build/suyu-nojit-clang/bin/kartrecomp-export}"
+bin="${KARTRECOMP_EXPORT_BIN:-$(dirname "$0")/../../local/b235/kartrecomp-export}"
 keys="${KARTRECOMP_KEYS:-$PWD/local/suyu-home/suyu/keys/prod.keys}"
 base="$PWD/local/game/content/base.nsp"; upd="$PWD/local/game/content/update-3.0.4.nsp"
-old="${KARTRECOMP_OLD_UPDATE:-/home/carter/reverse-engineering/mk8d/mk8-recomp/local/content/mk8d-update-3.0.3-v1245184.nsp}"
+old="${KARTRECOMP_OLD_UPDATE:-$(dirname "$0")/../../local/game/content/update-3.0.3.nsp}"
 out="${1:-$PWD/local/spike/export-fresh}"
 [ -x "$bin" ] || { echo "FAIL: no exporter at $bin"; exit 1; }
 rm -rf "$out"
