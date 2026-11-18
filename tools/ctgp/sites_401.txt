@@ -258,3 +258,6 @@
 0x3942ec root | ui 0x3bc964
 0x173f34 root | ui 0x18cd6c
 0x18d5dc root | ui 0x1a87f8
+0x5129b0 call speedo_init | 0x55ceb0 (CTGP's speedometer box hidden until the speedometer works)
+0x9d174 call bgm_none | 0xa5ce4 (CTGP race music "None")
+0x531d94 call race_timer | 0x57ee90 (CTGP Race Timer: the time trial timer in other races)

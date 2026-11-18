@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..8c490180fe
+index 0000000000..f6f5e7f500
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1095 @@
+@@ -0,0 +1,1147 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -1914,6 +1914,21 @@ index 0000000000..8c490180fe
 +    return 0;
 +}
 +
++/// CTGP's race settings (the F10 overlay's CTGP rows; its Settings page in the original): ctgp_settings.txt in the data folder.
++struct CtgpSettings {
++    int music = 0; ///< 0 CTGPDX OST, 1 Author's Pick (the _B streams), 2 None
++    int timer = 0; ///< 1: the time trial timer in other races too
++};
++CtgpSettings Settings_() {
++    CtgpSettings st;
++    std::ifstream in(KartDataFile("ctgp_settings.txt"));
++    for (std::string line; std::getline(in, line);) {
++        if (line.rfind("music=", 0) == 0) st.music = std::atoi(line.c_str() + 6);
++        if (line.rfind("timer=", 0) == 0) st.timer = std::atoi(line.c_str() + 6);
++    }
++    return st;
++}
++
 +int TestCup() {
 +    static const int cup = [] { const char* v = std::getenv("KARTRECOMP_CTGP_TEST_CUP"); return v && *v ? std::atoi(v) : -1; }();
 +    return cup;
@@ -2121,8 +2136,11 @@ index 0000000000..8c490180fe
 +                suffix = s;
 +                break;
 +            }
++        // Author's Pick: the track's _B stream when it has one (plugin: entry + 0x2c == 1)
++        if (Settings_().music == 1 && HostFileExists("Audio/Resource/Stream/pBGM_" + c->folder + "_B" + suffix))
++            alt = kStream + "pBGM_" + c->folder + "_B" + suffix;
 +        const std::string file = "pBGM_" + c->folder + suffix;
-+        if (HostFileExists("Audio/Resource/Stream/" + file)) alt = kStream + file;
++        if (alt.empty() && HostFileExists("Audio/Resource/Stream/" + file)) alt = kStream + file;
 +    } else if (HostFileExists("Course/" + c->folder + "/Resource/Stream/" + name)) {
 +        alt = "content://Course/" + c->folder + "/Resource/Stream/" + name;
 +    }
@@ -2170,6 +2188,19 @@ index 0000000000..8c490180fe
 +    std::memcpy(&bits, &f, 4);
 +    ctx.v[site.reg][0] = (ctx.v[site.reg][0] & ~0xffffffffULL) | bits;
 +    return false;
++}
++bool H_BgmNone(RecompHooks::HookContext& ctx, const Site&) {
++    // Race music start, after "ldr w1, [x19, #0x108]" (the music settings course): "None" starts course 0's (no race music),
++    // plugin FUN_16de8 at 0xa5ce4.
++    if (Settings_().music == 2) ctx.x[1] = 0;
++    return false;
++}
++bool H_RaceTimer(RecompHooks::HookContext& ctx, const Site&) {
++    // Race HUD builder, on "cmp w8, #2" (race mode 2 = time trial gets the timer part): with CTGP's Race Timer on, every race but
++    // the modes the game already excludes here gets it (plugin FUN_15c44 at 0x57ee90; its solo check is not ported yet).
++    if (Settings_().timer != 1) return false;
++    ctx.pc += 8; // skip the compare and its "b.ne": create the timer
++    return true;
 +}
 +bool H_TimerLimit(RecompHooks::HookContext& ctx, const Site&) {
 +    // Race time limit (5:00.000 in w1): none on CTGP's tracks.
@@ -2463,6 +2494,27 @@ index 0000000000..8c490180fe
 +    }, [ret](RecompHooks::HookContext& r) { r.pc = ret; }); // the original function is replaced: return to its caller
 +}
 +
++bool H_SpeedoInit(RecompHooks::HookContext& ctx, const Site&) {
++    // Coin / lap counter part set-up (x20 = its layout): CTGP's speedometer box W_SOMBase_00 is hidden unless the speedometer is
++    // on (plugin FUN_15d58). The speedometer value needs the local kart, which is not found yet, so the box stays hidden.
++    const u64 layout = ctx.x[20];
++    const u64 name = GuestSafeString(ctx.system, "W_SOMBase_00");
++    if (!layout || !name) return false;
++    const UiFns ui = Ui();
++    auto step = std::make_shared<int>(0);
++    return CallGuestSeq(ctx, [step, layout, name, ui](u64 r, GuestCall& next) {
++        if ((*step)++ == 0) {
++            next = {Fn(ui.find_pane), {layout, name}};
++            return true;
++        }
++        if (*step == 2 && r) {
++            next = {Fn(ui.set_visible), {r, 0}};
++            return true;
++        }
++        return false;
++    });
++}
++
 +bool H_CupLineToggle(RecompHooks::HookContext& ctx, const Site&) {
 +    // Cup page update, after the trigger bits are loaded into w20 (plugin's six patches of 0x1800 / bits 11, 12 -> bit 9): the
 +    // game's own line toggle (base / Booster cups) answers bit 9; L / R belong to CTGP's paging.
@@ -2586,7 +2638,7 @@ index 0000000000..8c490180fe
 +    {"mapobj_path", H_MapObjPath}, {"speed_load", H_SpeedLoad},     {"speed_scale", H_SpeedScale}, {"timer_limit", H_TimerLimit},
 +    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_update", H_CupUpdate},
 +    {"cup_page_create", H_CupPageCreate}, {"cup_icons_set", H_CupIconsSet}, {"cup_line_toggle", H_CupLineToggle},
-+    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse},
++    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse}, {"speedo_init", H_SpeedoInit}, {"bgm_none", H_BgmNone}, {"race_timer", H_RaceTimer},
 +    {"slot_course", H_SlotCourse}, {"slot_platform", H_SlotPlatform}, {"slot_name", H_SlotName},
 +};
 +
@@ -2805,10 +2857,10 @@ index 0000000000..1dedb70831
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
 new file mode 100644
-index 0000000000..ea05bb5bb5
+index 0000000000..2595a9870c
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_sites.inc
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,144 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
 +// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
@@ -2950,6 +3002,9 @@ index 0000000000..ea05bb5bb5
 +CTGP_SITE(0x4c64f8, 0x4c9a04, Call, 0, 0x23, 0x0, "accept_mask", "0x50ae04")
 +CTGP_SITE(0x403f54, 0x405fa4, Set, 3, 0x300, 0x0, "", "0x436928 (0x96 -> 0x300)")
 +CTGP_SITE(0x404740, 0x406794, Set, 3, 0x150, 0x0, "", "0x437144 (0x46 -> 0x150)")
++CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x24, 0x0, "speedo_init", "0x55ceb0 (CTGP's speedometer box hidden until the speedometer works)")
++CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x25, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
++CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x26, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..9d3bb0ff5f

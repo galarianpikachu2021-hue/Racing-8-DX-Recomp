@@ -14293,10 +14293,10 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..8606f3b0d5
+index 0000000000..5a2ef6c832
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,654 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
 +#include "common/kart_data_path.h"
@@ -14378,22 +14378,16 @@ index 0000000000..8606f3b0d5
 +    for (int i = 0; i < 4; ++i) {
 +        items[kPlayer1 + i] = {"Player " + std::to_string(i + 1) + " controller", {"Disconnected", "Keyboard"}, 1, false, "no controller info yet"};
 +    }
-+    // Extra cups (CTGP DX's, added without replacing any course): "extra_cups.txt" in the game folder lists them, one per line as
-+    // "Cup name|CT_00 CT_01 CT_02 CT_03". Choosing one writes extra_cup.txt, which the Grand Prix start hook reads (see docs/CTGP.md).
-+    items[kExtraCup] = {"Extra cup (next Grand Prix)", {"Off"}, 0, false, "none installed"};
-+    if (std::ifstream list(KartDataFile("extra_cups.txt")); list) {
-+        for (std::string line; std::getline(list, line);) {
-+            const auto bar = line.find('|');
-+            if (bar == std::string::npos || bar == 0) continue;
-+            items[kExtraCup].options.push_back(line.substr(0, bar));
-+            extra_cups.push_back(line.substr(bar + 1));
-+        }
-+        if (!extra_cups.empty()) {
-+            items[kExtraCup].enabled = true;
-+            items[kExtraCup].note = "press A in the cup screen as usual";
++    // CTGP DX's race settings (its own Settings page in the original): ctgp_settings.txt in the data folder, read by the engine's
++    // CTGP code (core/arm/recomp/ctgp_dx.cpp) when a race starts. Shown when CTGP DX is installed.
++    items[kCtgpMusic] = {"CTGP race music", {"CTGPDX OST", "Author's Pick", "None"}, 0, true, "CTGP DX tracks; the next race"};
++    items[kCtgpTimer] = {"CTGP race timer", {"Off", "On"}, 0, true, "solo races: the time trial timer"};
++    if (std::ifstream in(KartDataFile("ctgp_settings.txt")); in) {
++        for (std::string line; std::getline(in, line);) {
++            if (line.rfind("music=", 0) == 0) items[kCtgpMusic].value = std::clamp(std::atoi(line.c_str() + 6), 0, 2);
++            if (line.rfind("timer=", 0) == 0) items[kCtgpTimer].value = std::clamp(std::atoi(line.c_str() + 6), 0, 1);
 +        }
 +    }
-+    std::remove(KartDataFile("extra_cup.txt").c_str()); // never start with an old choice
 +    items[kControls] = {"Controls", {}, 0, true, "every button of each player; rebind, swap A/B and X/Y"};
 +    items[kMods] = {"Mods", {}, 0, true, ""};
 +    items[kQuit] = {"Quit game", {}, 0, true, "closes the game (progress is saved by the game as usual)"};
@@ -14478,12 +14472,10 @@ index 0000000000..8606f3b0d5
 +    case kPresent: live.present_mode = v; return kChangePresent;
 +    case kSpeed: live.speed_limit = v; return kChangeSpeed;
 +    case kFps: live.fps_counter = v != 0; return kChangeOther;
-+    case kExtraCup: {
-+        if (v <= 0 || static_cast<size_t>(v) > extra_cups.size()) {
-+            std::remove(KartDataFile("extra_cup.txt").c_str());
-+        } else if (std::ofstream out(KartDataFile("extra_cup.txt"), std::ios::trunc); out) {
-+            out << extra_cups[static_cast<size_t>(v - 1)] << '\n';
-+        }
++    case kCtgpMusic:
++    case kCtgpTimer: {
++        if (std::ofstream out(KartDataFile("ctgp_settings.txt"), std::ios::trunc); out)
++            out << "music=" << (row == kCtgpMusic ? v : items[kCtgpMusic].value) << "\ntimer=" << (row == kCtgpTimer ? v : items[kCtgpTimer].value) << "\n";
 +        return 0;
 +    }
 +    case kPlayer1: case kPlayer2: case kPlayer3: case kPlayer4: {
@@ -14535,7 +14527,7 @@ index 0000000000..8606f3b0d5
 +bool Menu::Visible(int row) const {
 +    static const bool dev = [] { const char* v = std::getenv("KARTRECOMP_DEV_MENU"); return v && *v == '1'; }();
 +    if (row == kModel) return items[kModel].options.size() > 1; // only for an upscaler that has models
-+    return dev || (row != kJitter && row != kExtraCup);
++    return dev || row != kJitter;
 +}
 +
 +namespace {
@@ -14961,10 +14953,10 @@ index 0000000000..8606f3b0d5
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.h b/src/suyu_cmd/native_gpu/overlay_menu.h
 new file mode 100644
-index 0000000000..ad7c8a82aa
+index 0000000000..773b4a1c3f
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.h
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,145 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the in-game overlay menu (model and layout; drawing is in vk_shadow_backend.cpp).
 +//
@@ -15065,7 +15057,7 @@ index 0000000000..ad7c8a82aa
 +    void SetJitter(bool on) { live.jitter = on; items[kJitter].value = on ? 1 : 0; }
 +
 +    static constexpr int kSpeedDefault = 2; ///< 100%
-+    enum Row { kUpscaler, kModel, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kExtraCup, kControls, kMods, kQuit, kClose, kRowCount };
++    enum Row { kUpscaler, kModel, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kCtgpMusic, kCtgpTimer, kControls, kMods, kQuit, kClose, kRowCount };
 +    /// Sets a row's value (clamped) and applies it; returns the Change bits it caused.
 +    uint32_t Set(Row row, int value);
 +    int Get(Row row) const { return items[row].value; }
@@ -15104,7 +15096,6 @@ index 0000000000..ad7c8a82aa
 +    bool Visible(int row) const;
 +
 +    std::vector<Item> items;
-+    std::vector<std::string> extra_cups; ///< track folders of each extra cup, parallel to the row's options after "Off"
 +    int selected = 0;
 +    uint64_t pads_version = ~0ull;
 +    Live live;
