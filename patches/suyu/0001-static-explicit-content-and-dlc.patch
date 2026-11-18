@@ -553,6 +553,41 @@ index 5fbe66c62b..81b7e6d0e8 100644
      endif()
  
      create_resource("../../dist/suyu.bmp" "suyu_cmd/suyu_icon.h" "suyu_icon")
+diff --git a/src/suyu_cmd/controller_assign.h b/src/suyu_cmd/controller_assign.h
+index d8e34913ba..87250fa51f 100644
+--- a/src/suyu_cmd/controller_assign.h
++++ b/src/suyu_cmd/controller_assign.h
+@@ -140,6 +140,16 @@ struct Slots {
+     Common::ParamPackage Mapping(std::size_t slot) const {
+         return Common::ParamPackage{players[slot].buttons[Settings::NativeButton::A]};
+     }
++    /// Every button of the slot on the keyboard (or unmapped): a keyboard player, however its keys are laid out.
++    bool AllKeyboard(std::size_t slot) const {
++        for (const auto& button : players[slot].buttons) {
++            const std::string engine = Common::ParamPackage{button}.Get("engine", "");
++            if (!engine.empty() && engine != "keyboard") {
++                return false;
++            }
++        }
++        return true;
++    }
+     bool IsStock(std::size_t slot) const {
+         for (std::size_t i = 0; i < players[slot].buttons.size(); ++i) {
+             const Common::ParamPackage key{players[slot].buttons[i]};
+@@ -156,9 +166,11 @@ struct Slots {
+         if (engine.empty() || IsStock(slot)) {
+             return true;
+         }
+-        // The keyboard and mouse are always there.
++        // The keyboard and mouse are always there - but Player 1 on the keyboard gives way to a controller (kart-recomp: a
++        // controller plugged in while the game runs takes Player 1, whatever the keyboard layout; the layout comes back when the
++        // last controller leaves). Other players keep their keyboard.
+         if (engine == "keyboard" || engine == "mouse") {
+-            return false;
++            return slot == 0 && AllKeyboard(slot);
+         }
+         return std::none_of(devices.begin(), devices.end(),
+                             [&](const auto& device) { return SameDevice(device, mapping); });
 diff --git a/src/suyu_cmd/controller_profiles.h b/src/suyu_cmd/controller_profiles.h
 new file mode 100644
 index 0000000000..739a5389ef
@@ -878,10 +913,10 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..8a6b36c91b 100644
+index bca83ab630..d7e66f87a0 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-@@ -1,6 +1,15 @@
+@@ -1,7 +1,17 @@
  // SPDX-FileCopyrightText: 2016 Citra Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
@@ -895,9 +930,11 @@ index bca83ab630..8a6b36c91b 100644
 +#include "hid_core/frontend/emulated_controller.h"
 +#include "common/kart_overlay.h"
  #include <algorithm>
++#include <optional>
  #include <cstdlib>
  #include <cwchar>
-@@ -27,7 +36,10 @@ static constexpr Uint8 SDL_RELEASED = 0;
+ #include <set>
+@@ -27,7 +37,10 @@ static constexpr Uint8 SDL_RELEASED = 0;
  #include "common/param_package.h"
  #include "common/settings_input.h"
  #include "suyu_cmd/controller_assign.h"
@@ -908,7 +945,7 @@ index bca83ab630..8a6b36c91b 100644
  #include "suyu_cmd/native_status.h"
  #include "suyu_cmd/sdl_config.h"
  #include "suyu_cmd/suyu_icon.h"
-@@ -84,6 +96,24 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
+@@ -84,6 +97,24 @@ void MapDefault(InputCommon::InputSubsystem& input, const Common::ParamPackage&
      for (const auto& [motion, param] : input.GetMotionMappingForDevice(pad)) {
          player.motions[motion] = param.Serialize();
      }
@@ -933,7 +970,7 @@ index bca83ab630..8a6b36c91b 100644
  }
  } // namespace
  
-@@ -885,6 +915,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
+@@ -885,6 +916,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
          return;
      }
  #endif
@@ -988,7 +1025,7 @@ index bca83ab630..8a6b36c91b 100644
      if (state == SDL_PRESSED) {
          input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
      } else if (state == SDL_RELEASED) {
-@@ -900,7 +978,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
+@@ -900,7 +979,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
      tas_playback = true;
  }
  
@@ -1090,7 +1127,7 @@ index bca83ab630..8a6b36c91b 100644
      if (!tas_playback) {
          return;
      }
-@@ -1016,6 +1188,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1016,6 +1189,7 @@ void EmuWindow_SDL2::WaitEvent() {
              LOG_ERROR(Frontend, "SDL_WaitEventTimeout failed: {}", error);
              SDL_ClearError();
          }
@@ -1098,7 +1135,7 @@ index bca83ab630..8a6b36c91b 100644
          const u64 idle_time = SDL_GetTicks();
          if (idle_time > last_time + kStatusRefreshMs) {
              last_time = idle_time;
-@@ -1090,6 +1263,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1090,6 +1264,7 @@ void EmuWindow_SDL2::WaitEvent() {
          break;
      }
  
@@ -1106,7 +1143,7 @@ index bca83ab630..8a6b36c91b 100644
      const u64 current_time = SDL_GetTicks();
      if (current_time > last_time + kStatusRefreshMs) {
          last_time = current_time;
-@@ -1215,6 +1389,12 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1215,6 +1390,12 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
      if (gamepad_check_pending) {
          AutoAssignControllers();
      }
@@ -1119,7 +1156,7 @@ index bca83ab630..8a6b36c91b 100644
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
-@@ -1227,7 +1407,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1227,7 +1408,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
  
      SuyuCmd::NativeStatusSnapshot display{};
      SuyuCmd::TryGetNativeStatusSnapshot(display);
@@ -1128,7 +1165,7 @@ index bca83ab630..8a6b36c91b 100644
          display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
      }
      const std::string title = SuyuCmd::FormatNativeTitle(display);
-@@ -1243,7 +1423,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1243,7 +1424,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
      if (!g_export_package || !SdlConfig::auto_assign_controllers ||
@@ -1137,11 +1174,22 @@ index bca83ab630..8a6b36c91b 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,19 +1448,8 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,18 +1449,24 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
 -    // The layout SdlConfig gives a player with nothing configured.
++    // Player 1's own keyboard layout, kept while a controller has Player 1 (a controller takes Player 1 even from a custom
++    // keyboard layout) and given back when no controller is left.
++    static std::optional<Settings::PlayerInput> keyboard_layout;
++    {
++        const auto& p1 = players[0];
++        const bool keyboard = std::all_of(p1.buttons.begin(), p1.buttons.end(), [](const std::string& b) {
++            const std::string engine = Common::ParamPackage{b}.Get("engine", "");
++            return engine.empty() || engine == "keyboard";
++        });
++        if (keyboard) keyboard_layout = p1;
++    }
      const auto restore_keyboard = [](Settings::PlayerInput& player) {
 -        for (std::size_t i = 0; i < player.buttons.size(); ++i) {
 -            player.buttons[i] = InputCommon::GenerateKeyboardParam(SdlConfig::default_buttons[i]);
@@ -1153,12 +1201,16 @@ index bca83ab630..8a6b36c91b 100644
 -        }
 -        for (std::size_t i = 0; i < player.motions.size(); ++i) {
 -            player.motions[i] = InputCommon::GenerateKeyboardParam(SdlConfig::default_motions[i]);
--        }
-+        RestoreKeyboard(player);
++        if (keyboard_layout) {
++            player.buttons = keyboard_layout->buttons;
++            player.analogs = keyboard_layout->analogs;
++            player.motions = keyboard_layout->motions;
++        } else {
++            RestoreKeyboard(player);
+         }
          LOG_INFO(Frontend, "No controller left: Player 1 uses the keyboard");
      };
-     if (!SuyuCmd::AssignControllers(players, devices, pads, bindings, pads_seen,
-@@ -1298,6 +1467,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1485,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
