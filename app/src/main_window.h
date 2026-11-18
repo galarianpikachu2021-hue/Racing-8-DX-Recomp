@@ -35,6 +35,12 @@ public:
     bool launchWithoutWindow();
     /// -f / --fullscreen on the command line: this run starts the game fullscreen whatever the saved setting says.
     void forceFullscreen() { force_fullscreen = true; }
+    /// Steam Deck profile (steamdeck=1 / --steamdeck in Steam's launch options, or Steam's own SteamDeck=1): fullscreen at the
+    /// Deck's 800p, the game's handheld quality, no frame generation, no CPU pinning.
+    void setSteamDeck(bool on) {
+        steam_deck = on;
+        if (on) force_fullscreen = true;
+    }
     ~MainWindow() override;
 
 signals:
@@ -84,6 +90,7 @@ private:
     QLabel* status_label = nullptr;
     QCheckBox* fullscreen_check = nullptr;
     bool force_fullscreen = false;
+    bool steam_deck = false;
     bool headless = false;          ///< --nolauncher: no window, no questions; the game starts on its own once mod merging is done
     bool start_after_merge = false; ///< headless: launch() again when the running merge finishes
     int headless_merges = 0;        ///< headless: merges run so far (at most two: texts, then menus; never loop)

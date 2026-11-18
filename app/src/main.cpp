@@ -49,6 +49,9 @@ int main(int argc, char** argv) {
     // One dash is accepted too (-nolauncher, -fullscreen): easy to type that way in Steam's launch options.
     const auto has = [&](const char* name) { return args.contains(QStringLiteral("--") + QLatin1String(name)) || args.contains(QStringLiteral("-") + QLatin1String(name)); };
     if (args.contains(QStringLiteral("-f")) || has("fullscreen")) window.forceFullscreen();
+    // Steam Deck profile: "steamdeck=1" (or --steamdeck) in Steam's launch options, or Steam's own SteamDeck=1 on a Deck.
+    if (args.contains(QStringLiteral("steamdeck=1")) || has("steamdeck") || qEnvironmentVariable("SteamDeck") == QLatin1String("1"))
+        window.setSteamDeck(true);
     if (has("nolauncher") || has("play")) {
         if (!window.launchWithoutWindow()) return 1;
         return app.exec();

@@ -635,6 +635,12 @@ QProcessEnvironment MainWindow::launchEnvironment() const {
         }
     }
 #endif
+    if (steam_deck) {
+        env.insert(QStringLiteral("KARTRECOMP_DECK"), QStringLiteral("1"));
+        env.insert(QStringLiteral("KARTRECOMP_NATIVE_HEIGHT"), QStringLiteral("800")); // the Deck's screen (1280x800)
+        env.remove(QStringLiteral("KARTRECOMP_PIN"));                                  // 4 cores: no CPUs to set aside
+        env.remove(QStringLiteral("KARTRECOMP_PIN_RENDER"));
+    }
     if (multiplayer_page) multiplayer_page->apply(env);
     if (nvn_capture_check->isChecked()) {
         env.insert(QStringLiteral("KARTRECOMP_NVN_TRACE"), QStringLiteral("1"));
