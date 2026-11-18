@@ -179,3 +179,18 @@ Fix: `GuestThread::start_core` (set by CreateThread and by SetThreadCoreMask bef
 
 The race-start dips (51-55 fps) are gone, because the workers now really run on their own cores. No call-to-null recoveries,
 no core dumps. Still opt-in until the user has played it.
+
+## Default on Linux (2026-11-18)
+
+The runtime kernel is now the Linux default (`KARTRECOMP_NATIVE_KERNEL=0` brings back the emulated kernel; other platforms stay
+opt-in with `=1`). Checks with the current engine:
+
+| check | result |
+|---|---|
+| 1P race, 4.0.1, no mods | 150 s, 59 fps, no errors |
+| CTGP DX, 3.0.4 (cup screen, music switch, banner, speedometer) | 59 fps; CTGP's guest arena now maps through the runtime's address space |
+| Setup's test boot (no picture, `KARTRECOMP_VERIFY_BOOT`) | 9.8 billion blocks in 45 s, keeps running (passes the new main-loop rule) |
+| Wireless Play over a hosted room | same as the emulated kernel: room created, on to kart select |
+
+Not re-run this time: 4P (passed on 2026-11-15, kernel code unchanged since), keyless boot. Next: stage 5 (audio_core, hid_core
+and the driver module on runtime events), then stage 6 (delete `core/hle/kernel` from the Linux build).
