@@ -12,8 +12,9 @@
 //
 // The pack's code is a 32-bit Skyline plugin made for game version 3.0.3 and cannot run in this build. Its tracks are data, though, and are
 // copied unchanged into their own folders (Course/CT_xx, pBGM_CT_xx, ym_CoursePict_CT_xx): not one of the game's own courses is replaced.
-// The in-game "Extra cup" hook (see docs/CTGP.md) runs them. Their names are added to the game's own message files as NEW labels
-// (21000 + track number, +100 for the title form); the pack's own message and UI files are never copied.
+// The engine's CTGP code (core/arm/recomp/ctgp_dx.cpp, docs/CTGP_PORT.md) adds them as new course ids with CTGP's cups, from the
+// tables read out of the pack's plugin; CTGP's texts (CTGPText.msbt) and its cup screen / race HUD layouts are merged into the game's own
+// archives.
 namespace CtgpConvert {
 
 // Minimal SARC (little endian) and MSBT (UTF-16 LE) containers.
@@ -40,7 +41,6 @@ struct Msbt {
 };
 
 struct Options {
-    QString cups_list_path; ///< where to write the cup list the in-game "Extra cup" menu reads (extra_cups.txt); empty = not written
     QString vanilla_cmn_dir; ///< the game's own UI/cmn archives (menu.sarc, common.sarc, race.sarc; no mods); empty = no UI layouts
     QString baseline_path;   ///< data/mk8d-3.0.4/ui_cmn_hashes.txt: which archive members CTGP changed (vs the 3.0.4 game)
 };

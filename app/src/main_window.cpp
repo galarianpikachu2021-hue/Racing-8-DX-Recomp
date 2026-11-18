@@ -1203,15 +1203,14 @@ void MainWindow::refreshMods() {
         switch (ctgp) {
         case ModAddon::State::NotImported:
             text = tr("CTGP DX is not added yet. Choose your own CTGP Deluxe zip (the release for Mario Kart 8 Deluxe, the one with an "
-                      "atmosphere/contents folder) and its 64 tracks are added as extra cups with their own names, pictures and music. None of the "
-                      "game's courses are changed. Pick a cup in the in-game menu (F10, \"Extra cup\") before starting a Grand Prix. The pack's code "
-                      "cannot run in this recompiled build; see \"About this conversion\".");
+                      "atmosphere/contents folder) and its 16 cups and 64 tracks are added next to the game's own, with CTGP's cup screen, names, "
+                      "pictures and music. None of the game's courses are changed. On the cup screen, L / R scroll to the CTGP cups.");
             selected_exists = false;
             break;
         case ModAddon::State::Enabled:
         case ModAddon::State::Disabled: {
             selected_enabled = ctgp == ModAddon::State::Enabled;
-            text = selected_enabled ? tr("CTGP DX: added, enabled. 16 extra cups (F10 menu, \"Extra cup\"); the game's own courses are untouched.")
+            text = selected_enabled ? tr("CTGP DX: added, enabled. 16 more cups on the cup screen (L / R scroll to them); the game's own courses are untouched.")
                                     : tr("CTGP DX: added, turned off (the game plays normally).");
             text += QLatin1Char('\n') + ModAddon::CodeRecompBlocker(mod_info);
             break;
@@ -1381,7 +1380,7 @@ void MainWindow::importCtgp() {
         const QString tmp = ModAddon::VanillaUiDir(root);
         if (!DumpVanillaUi(exe, workDir, args, env, tmp, error)) return false;
         CtgpConvert::Options options;
-        options.cups_list_path = QDir(root).filePath(QStringLiteral("extra_cups.txt"));
+        QFile::remove(QDir(root).filePath(QStringLiteral("extra_cups.txt"))); // the old in-game "Extra cup" list is not used any more
         // The game's own menu archives, for CTGP's cup screen and race HUD layouts (merged member by member).
         if (!QFileInfo::exists(QDir(tmp).filePath(QStringLiteral("UI/cmn/menu.sarc"))) && !DumpVanillaMenus(exe, workDir, args, env, tmp, error)) return false;
         options.vanilla_cmn_dir = QDir(tmp).filePath(QStringLiteral("UI/cmn"));

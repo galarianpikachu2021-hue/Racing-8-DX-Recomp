@@ -177,10 +177,11 @@ bool RemoveCtgp(const QString& root, QString* error) {
 
 QString CodeRecompBlocker(const PackInfo& info) {
     Q_UNUSED(info)
-    return QStringLiteral("CTGP DX's code is a 32-bit ARM plugin made for game version 3.0.3, and this build is the 64-bit 3.0.4 game, so the code cannot "
-                          "run here. The pack's tracks are data, so they are converted instead: each custom track takes the place of one of the game's "
-                          "race courses, with its thumbnail, music and name, and the cups are renamed. Not available: the extra cups' own menus, the "
-                          "speedometer, online play and the pack's settings screen.");
+    return QCoreApplication::translate("Messages",
+        "CTGP DX's own code is a 32-bit plugin for game version 3.0.3; this build recreates it for 3.0.4 and 4.0.1 instead "
+        "(docs/CTGP_PORT.md). Its 64 tracks are new courses next to the game's own, with CTGP's cup screen (press L / R there to "
+        "reach the CTGP cups), its names, pictures and music. Race music set, race timer and online mode are in the in-game menu "
+        "(F10, the CTGP rows). Not yet: the speedometer, the in-race music switch and CTGP's own settings page.");
 }
 
 // ------------------------------------------------------------------------------------------------------------ ordinary mods

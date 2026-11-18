@@ -466,18 +466,6 @@ bool Convert(const QString& zip_path, const QString& vanilla_ui_dir, const QStri
         if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate) || out.write(van.write()) < 0) return fail(QCoreApplication::translate("Messages", "Cannot write the message files"));
         if (!step(lang)) return fail(QStringLiteral("Cancelled"));
     }
-    // 3. The cup list for the in-game "Extra cup" menu: CTGP DX's 16 cups of four tracks (cup k = tracks 4k..4k+3; names from label 700000+k).
-    if (!options.cups_list_path.isEmpty()) {
-        QFile list(options.cups_list_path);
-        if (!list.open(QIODevice::WriteOnly | QIODevice::Truncate)) return fail(QCoreApplication::translate("Messages", "Cannot write the cup list"));
-        for (int k = 0; k < 16; ++k) {
-            QString name = text_of(en, QString::number(700000 + k));
-            if (name.isEmpty()) name = QStringLiteral("Cup %1").arg(k + 1);
-            QStringList tracks;
-            for (int r = 0; r < 4; ++r) tracks << QStringLiteral("CT_%1").arg(k * 4 + r, 2, 16, QLatin1Char('0')).toUpper().replace(QStringLiteral("CT_"), QStringLiteral("CT_"));
-            list.write((name.toLatin1().replace('|', ' ') + "|" + tracks.join(QLatin1Char(' ')).toLatin1() + "\n"));
-        }
-    }
     return true;
 }
 

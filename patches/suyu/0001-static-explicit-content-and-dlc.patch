@@ -14293,10 +14293,10 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..5a2ef6c832
+index 0000000000..16fa5cabec
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,654 @@
+@@ -0,0 +1,658 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
 +#include "common/kart_data_path.h"
@@ -14382,10 +14382,12 @@ index 0000000000..5a2ef6c832
 +    // CTGP code (core/arm/recomp/ctgp_dx.cpp) when a race starts. Shown when CTGP DX is installed.
 +    items[kCtgpMusic] = {"CTGP race music", {"CTGPDX OST", "Author's Pick", "None"}, 0, true, "CTGP DX tracks; the next race"};
 +    items[kCtgpTimer] = {"CTGP race timer", {"Off", "On"}, 0, true, "solo races: the time trial timer"};
++    items[kCtgpOnline] = {"CTGP online", {"Vanilla players", "CTGPDX players"}, 0, true, "CTGPDX players: CTGP tracks online, only with other CTGP players"};
 +    if (std::ifstream in(KartDataFile("ctgp_settings.txt")); in) {
 +        for (std::string line; std::getline(in, line);) {
 +            if (line.rfind("music=", 0) == 0) items[kCtgpMusic].value = std::clamp(std::atoi(line.c_str() + 6), 0, 2);
 +            if (line.rfind("timer=", 0) == 0) items[kCtgpTimer].value = std::clamp(std::atoi(line.c_str() + 6), 0, 1);
++            if (line.rfind("online=", 0) == 0) items[kCtgpOnline].value = std::clamp(std::atoi(line.c_str() + 7), 0, 1);
 +        }
 +    }
 +    items[kControls] = {"Controls", {}, 0, true, "every button of each player; rebind, swap A/B and X/Y"};
@@ -14473,9 +14475,11 @@ index 0000000000..5a2ef6c832
 +    case kSpeed: live.speed_limit = v; return kChangeSpeed;
 +    case kFps: live.fps_counter = v != 0; return kChangeOther;
 +    case kCtgpMusic:
-+    case kCtgpTimer: {
++    case kCtgpTimer:
++    case kCtgpOnline: {
++        items[row].value = v;
 +        if (std::ofstream out(KartDataFile("ctgp_settings.txt"), std::ios::trunc); out)
-+            out << "music=" << (row == kCtgpMusic ? v : items[kCtgpMusic].value) << "\ntimer=" << (row == kCtgpTimer ? v : items[kCtgpTimer].value) << "\n";
++            out << "music=" << items[kCtgpMusic].value << "\ntimer=" << items[kCtgpTimer].value << "\nonline=" << items[kCtgpOnline].value << "\n";
 +        return 0;
 +    }
 +    case kPlayer1: case kPlayer2: case kPlayer3: case kPlayer4: {
@@ -14953,7 +14957,7 @@ index 0000000000..5a2ef6c832
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.h b/src/suyu_cmd/native_gpu/overlay_menu.h
 new file mode 100644
-index 0000000000..773b4a1c3f
+index 0000000000..f82c30affa
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.h
 @@ -0,0 +1,145 @@
@@ -15057,7 +15061,7 @@ index 0000000000..773b4a1c3f
 +    void SetJitter(bool on) { live.jitter = on; items[kJitter].value = on ? 1 : 0; }
 +
 +    static constexpr int kSpeedDefault = 2; ///< 100%
-+    enum Row { kUpscaler, kModel, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kCtgpMusic, kCtgpTimer, kControls, kMods, kQuit, kClose, kRowCount };
++    enum Row { kUpscaler, kModel, kGraphics, kResolution, kQuality, kSharp, kJitter, kFrameGen, kHdr, kHdrPaper, kHdrPeak, kPresent, kSpeed, kFps, kRecord, kPlayer1, kPlayer2, kPlayer3, kPlayer4, kCtgpMusic, kCtgpTimer, kCtgpOnline, kControls, kMods, kQuit, kClose, kRowCount };
 +    /// Sets a row's value (clamped) and applies it; returns the Change bits it caused.
 +    uint32_t Set(Row row, int value);
 +    int Get(Row row) const { return items[row].value; }

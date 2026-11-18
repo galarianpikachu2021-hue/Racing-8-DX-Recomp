@@ -1641,15 +1641,16 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..f6f5e7f500
+index 0000000000..dc7e4562c8
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1147 @@
+@@ -0,0 +1,1280 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
 +#include <array>
 +#include <atomic>
++#include <chrono>
 +#include <cstdlib>
 +#include <functional>
 +#include <memory>
@@ -1833,6 +1834,13 @@ index 0000000000..f6f5e7f500
 +    return c && !c->courses.empty() && c->courses[0] >= kFirstCtgpId;
 +}
 +
++/// The plugin's cup screen state (its S[2]): current line, number of columns, flags.
++struct CupState {
++    int line = 0;
++    bool fewer_lines = false; ///< plugin byte1: lines stop 7 columns before the end
++    bool vanilla = false;     ///< plugin byte2: CTGP cups off (vanilla online) - paging hidden
++} g_cup;
++
 +std::mutex g_state_lock;
 +std::map<std::string, u64> g_strings; ///< guest copies of names (built once each)
 +u64 g_singleton = 0;                  ///< race-info object ([+0x1a0] = current course index), seen by the hooks
@@ -1918,6 +1926,7 @@ index 0000000000..f6f5e7f500
 +struct CtgpSettings {
 +    int music = 0; ///< 0 CTGPDX OST, 1 Author's Pick (the _B streams), 2 None
 +    int timer = 0; ///< 1: the time trial timer in other races too
++    int online = 0; ///< CTGP's Communication Mode: 0 vanilla players (default here), 1 CTGPDX players
 +};
 +CtgpSettings Settings_() {
 +    CtgpSettings st;
@@ -1925,6 +1934,7 @@ index 0000000000..f6f5e7f500
 +    for (std::string line; std::getline(in, line);) {
 +        if (line.rfind("music=", 0) == 0) st.music = std::atoi(line.c_str() + 6);
 +        if (line.rfind("timer=", 0) == 0) st.timer = std::atoi(line.c_str() + 6);
++        if (line.rfind("online=", 0) == 0) st.online = std::atoi(line.c_str() + 7);
 +    }
 +    return st;
 +}
@@ -2202,6 +2212,107 @@ index 0000000000..f6f5e7f500
 +    ctx.pc += 8; // skip the compare and its "b.ne": create the timer
 +    return true;
 +}
++// ---- online / local play (plugin installers 0x84a0 / 0x80ec, docs/ctgp/sites-online.md) -----------------------------------------
++// With CTGP's Communication Mode on ("CTGPDX players"), course ids travel as 32-bit values (bit 31 = the flag the game keeps in
++// bit 7 of its byte) in fields the game leaves unused, so ids beyond 127 survive; the matchmaking key separates CTGP players.
++// Off (vanilla players, the default here: playing with an unmodded game), every hook below does nothing.
++bool Comm() {
++    return Settings_().online == 1;
++}
++u32 CourseField(Core::System& sys, u64 record) { // the 32-bit course id field of a 12-byte record (byte +6 = 7-bit id)
++    return sys.ApplicationMemory().Read32(record + 8) & 0x7fffffffu;
++}
++bool H_OnRandom(RecompHooks::HookContext& ctx, const Site&) {
++    // Online random course (before "str w8, [sp]"): two times in three a CTGP track (plugin FUN_156ec).
++    if (!Comm() || CourseCount() <= kFirstCtgpId || std::rand() % 3 == 0) return false;
++    ctx.x[8] = static_cast<u32>(0x7b + std::rand() % (CourseCount() - kFirstCtgpId));
++    return false;
++}
++bool H_OnStrCourse(RecompHooks::HookContext& ctx, const Site&) {
++    // before "str w8, [x20]": the 32-bit field at [x22 - 4]
++    if (Comm()) ctx.x[8] = ctx.system.ApplicationMemory().Read32(ctx.x[22] - 4) & 0x7fffffffu;
++    return false;
++}
++bool H_OnStoreRecord(RecompHooks::HookContext& ctx, const Site&) {
++    // after "strb w9, [x8, #0x10]" (station record, 0x18 bytes; course byte +0x10, flag w19): also the 32-bit field +0xc
++    if (!Comm()) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const u32 v = mem.Read32(ctx.x[21]);
++    const u32 flag = static_cast<u32>(ctx.x[19]) & 1;
++    mem.Write32(ctx.x[8] + 0xc, (v & 0x7fffffffu) | (flag << 31));
++    mem.Write8(ctx.x[8] + 0x10, static_cast<u8>((v ? 0x10 : 0) | (flag << 7)));
++    return false;
++}
++bool H_OnStoreFlagged(RecompHooks::HookContext& ctx, const Site&) {
++    // after "strb w8, [x22]" (course | 0x80): the 32-bit field gets the id with bit 31
++    if (!Comm()) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const u32 v = mem.Read32(ctx.x[20]);
++    mem.Write32(ctx.x[22] - 4, v | 0x80000000u);
++    mem.Write8(ctx.x[22], static_cast<u8>((v ? 0x10 : 0) | 0x80));
++    return false;
++}
++bool H_OnLoadFlag(RecompHooks::HookContext& ctx, const Site&) {
++    // after "strb w8, [x19]" (the flag from bit 7): from bit 31 of the 32-bit field
++    if (Comm()) ctx.system.ApplicationMemory().Write8(ctx.x[19], static_cast<u8>(ctx.system.ApplicationMemory().Read32(ctx.x[22] - 4) >> 31));
++    return false;
++}
++/// "ldrb w8, [xB, #6]; and wD, w8, #0x7f" pairs: the 32-bit field instead, both instructions skipped (reg = D; B = x0 or x8).
++bool H_OnLoadCourse0(RecompHooks::HookContext& ctx, const Site& site) { // base x0
++    if (!Comm()) return false;
++    ctx.x[site.reg] = CourseField(ctx.system, ctx.x[0]);
++    ctx.pc += 8;
++    return true;
++}
++bool H_OnLoadCourse8(RecompHooks::HookContext& ctx, const Site& site) { // base x8
++    if (!Comm()) return false;
++    ctx.x[site.reg] = CourseField(ctx.system, ctx.x[8]);
++    ctx.pc += 8;
++    return true;
++}
++bool H_OnStoreCourse(RecompHooks::HookContext& ctx, const Site&) {
++    // on "ldrb w9, [x8, #6]; bfxil w9, w27, #0, #7; strb w9, [x8, #6]": the id goes to the 32-bit field, the byte keeps its flag
++    if (!Comm()) return false;
++    ctx.system.ApplicationMemory().Write32(ctx.x[8] + 8, static_cast<u32>(ctx.x[27]) & 0x7fffffffu);
++    ctx.pc += 12;
++    return true;
++}
++bool H_OnUpdateCourse(RecompHooks::HookContext& ctx, const Site&) {
++    // on "ldrb w13, [x12, #6]!" .. "strb w13, [x12]" (7 instructions): compare / replace the id in the 32-bit field
++    if (!Comm()) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const u64 rec = ctx.x[12];
++    const u32 w = mem.Read32(rec + 8);
++    if ((w & 0x7fffffffu) != static_cast<u32>(ctx.x[22])) {
++        mem.Write8(rec + 6, static_cast<u8>(w + 0x80));
++        mem.Write32(rec + 8, static_cast<u32>(ctx.x[10]));
++    }
++    ctx.x[12] = rec + 6; // the pre-index writeback of the skipped load
++    ctx.pc += 0x1c;
++    return true;
++}
++bool H_OnKey(RecompHooks::HookContext& ctx, const Site&) {
++    // local play session set-up: the 32-byte matchmaking key at [x29 - 0x30] (plugin FUN_15748)
++    if (!Comm()) return false;
++    char key[0x20] = "CTGPDelux010101";
++    ctx.system.ApplicationMemory().WriteBlock(ctx.x[29] - 0x30, key, sizeof key);
++    return false;
++}
++bool H_OnVote(RecompHooks::HookContext& ctx, const Site&) {
++    // before the vote record copy (x2 = destination): the 32-bit id from [x23 + 0xc]
++    if (Comm()) ctx.system.ApplicationMemory().Write32(ctx.x[2], ctx.system.ApplicationMemory().Read32(ctx.x[23] + 0xc) & 0x7fffffffu);
++    return false;
++}
++u32 g_page = 0; ///< the menu page shown (plugin S[7])
++bool H_PageId(RecompHooks::HookContext& ctx, const Site&) {
++    // after "str w8, [x19, #0x228]" (page change): remember the page; in the online cup pages (0x21) the CTGP cups are off
++    // with vanilla players (plugin FUN_15e38 / the 0x4d93ac hook)
++    g_page = static_cast<u32>(ctx.x[8]);
++    if (g_page == 0x21) g_cup.vanilla = !Comm();
++    else if (g_page == 0x23 || g_page < 0x21) g_cup.vanilla = false;
++    return false;
++}
++
 +bool H_TimerLimit(RecompHooks::HookContext& ctx, const Site&) {
 +    // Race time limit (5:00.000 in w1): none on CTGP's tracks.
 +    const int index = CurrentIndex(ctx.system);
@@ -2231,18 +2342,13 @@ index 0000000000..f6f5e7f500
 +    return KartHookTrace::MainBase() + off;
 +}
 +
-+/// The plugin's cup screen state (its S[2]): current line, number of columns, flags.
-+struct CupState {
-+    int line = 0;
-+    bool fewer_lines = false; ///< plugin byte1: lines stop 7 columns before the end
-+    bool vanilla = false;     ///< plugin byte2: CTGP cups off (vanilla online) - paging hidden
-+} g_cup;
 +
 +struct CupPage {
 +    std::array<u64, 8> icons{};
 +    std::array<u64, 8> panes{};
 +    u64 change_icon = 0; ///< N_ChangeIcon_01 (the line-change hint)
 +    bool complete = false;
++    std::chrono::steady_clock::time_point made{}; ///< when the page was built (pages come back at old addresses later)
 +};
 +std::mutex g_pages_lock;
 +std::map<u64, CupPage> g_pages;
@@ -2321,18 +2427,28 @@ index 0000000000..f6f5e7f500
 +    if (!layout || g_cup.vanilla) return false;
 +    // The plugin skips its third call ever (FUN_1745c counter): the menu heap has room for two pages' extra icons only (on the
 +    // 64-bit builds, where an icon with its animations takes 0x1118 bytes, the third set made the next page's allocations fail).
-+    static std::atomic<int> calls{0};
-+    // Only the first cup page (the Grand Prix one) gets the icons for now: on the 64-bit builds the menu heap has room for one set
-+    // (two sets made the next page's allocations fail). KARTRECOMP_CTGP_ICON_PAGES=<n> changes it (tests).
++    // Only the first cup page of a menu (the Grand Prix one) gets the icons for now: on the 64-bit builds the menu heap has room for
++    // one set (two sets made the next page's allocations fail). KARTRECOMP_CTGP_ICON_PAGES=<n> changes it (tests).
++    // One menu build constructs its cup pages within a few seconds; a page seen again later is a new page at an old address (the
++    // menu is rebuilt after every race), so its old entry goes and the per-build page count starts again.
++    const auto now = std::chrono::steady_clock::now();
++    static std::chrono::steady_clock::time_point last_build{};
++    static int calls = 0;
 +    static const int max_pages = [] { const char* v = std::getenv("KARTRECOMP_CTGP_ICON_PAGES"); return v ? std::atoi(v) : 1; }();
-+    if (++calls == 3 || calls > max_pages) {
-+        LOG_INFO(Core_ARM, "CTGP: cup page {:#x}: no extra icons (third page, as in the plugin)", page);
-+        return false;
-+    }
 +    {
 +        std::scoped_lock lk{g_pages_lock};
-+        if (g_pages.contains(page)) return false;
++        if (const auto it = g_pages.find(page); it != g_pages.end()) {
++            if (now - it->second.made < std::chrono::seconds(3)) return false; // the same construction passing a second site
++            g_pages.erase(it);
++        }
++        if (now - last_build > std::chrono::seconds(3)) calls = 0;
++        last_build = now;
++        if (++calls == 3 || calls > max_pages) {
++            LOG_INFO(Core_ARM, "CTGP: cup page {:#x}: no extra icons (page {} of this menu)", page, calls);
++            return false;
++        }
 +        g_pages[page] = {};
++        g_pages[page].made = now;
 +    }
 +    struct Script {
 +        int step = 0; ///< per icon: 0 alloc, 1 ctor, 2 part set-up, 3 find pane; then the hint pane
@@ -2639,6 +2755,10 @@ index 0000000000..f6f5e7f500
 +    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_update", H_CupUpdate},
 +    {"cup_page_create", H_CupPageCreate}, {"cup_icons_set", H_CupIconsSet}, {"cup_line_toggle", H_CupLineToggle},
 +    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse}, {"speedo_init", H_SpeedoInit}, {"bgm_none", H_BgmNone}, {"race_timer", H_RaceTimer},
++    {"on_random", H_OnRandom}, {"on_str_course", H_OnStrCourse}, {"on_store_record", H_OnStoreRecord},
++    {"on_store_flagged", H_OnStoreFlagged}, {"on_load_flag", H_OnLoadFlag}, {"on_load_course0", H_OnLoadCourse0},
++    {"on_load_course8", H_OnLoadCourse8}, {"on_store_course", H_OnStoreCourse}, {"on_update_course", H_OnUpdateCourse},
++    {"on_key", H_OnKey}, {"on_vote", H_OnVote}, {"page_id", H_PageId},
 +    {"slot_course", H_SlotCourse}, {"slot_platform", H_SlotPlatform}, {"slot_name", H_SlotName},
 +};
 +
@@ -2777,6 +2897,19 @@ index 0000000000..f6f5e7f500
 +                             [site, is304, handler](RecompHooks::HookContext& ctx) { return RunSite(ctx, *site, is304, handler); });
 +        ++installed;
 +    }
++    if (const char* probe = std::getenv("KARTRECOMP_CTGP_PROBE"); probe && is304) {
++        // debug: at main+<hex> log x0, the object at [x0 + 0x28] and its float at +0x37c, now and then (finding the kart's speed)
++        RecompHooks::Install(main_base + std::strtoull(probe, nullptr, 16), [](RecompHooks::HookContext& ctx) {
++            static std::atomic<int> n{0};
++            if (n++ % 97 != 0) return false;
++            auto& mem = ctx.system.ApplicationMemory();
++            const u64 kart = mem.Read64(ctx.x[0] + 0x28);
++            float speed = 0;
++            if (kart) { const u32 b = mem.Read32(kart + 0x37c); std::memcpy(&speed, &b, 4); }
++            LOG_INFO(Core_ARM, "CTGP probe: x0 {:#x} kart {:#x} f37c {}", ctx.x[0], kart, speed);
++            return false;
++        });
++    }
 +    if (std::getenv("KARTRECOMP_CTGP_TRACE_PARTS")) {
 +        // debug: every UI part set-up with its pane name (finds panes a layout lacks)
 +        RecompHooks::Install(main_base + Ui().part_init, [](RecompHooks::HookContext& ctx) {
@@ -2857,10 +2990,10 @@ index 0000000000..1dedb70831
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
 new file mode 100644
-index 0000000000..2595a9870c
+index 0000000000..3a45acd031
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_sites.inc
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,163 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
 +// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
@@ -3005,6 +3138,25 @@ index 0000000000..2595a9870c
 +CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x24, 0x0, "speedo_init", "0x55ceb0 (CTGP's speedometer box hidden until the speedometer works)")
 +CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x25, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
 +CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x26, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
++CTGP_SITE(0x854ec8, 0x84820c, Cmp, 10, 0xbb, 0x0, "", "0x8de8ec (course count)")
++CTGP_SITE(0x830d30, 0x824048, Cmp, 8, 0xbb, 0x0, "", "0x8b90bc (course count)")
++CTGP_SITE(0x4e3fac, 0x4e75a8, Call, 0, 0x27, 0x0, "on_random", "0x52c6e8")
++CTGP_SITE(0x830c8c, 0x823fa4, Call, 0, 0x28, 0x0, "on_str_course", "0x8b9010")
++CTGP_SITE(0x830ae4, 0x823dfc, Call, 0, 0x29, 0x0, "on_store_record", "0x8b8e68 (after the byte store)")
++CTGP_SITE(0x830cf0, 0x824008, Call, 0, 0x2a, 0x0, "on_store_flagged", "0x8b9074 (after the byte store)")
++CTGP_SITE(0x830c84, 0x823f9c, Call, 0, 0x2b, 0x0, "on_load_flag", "0x8b9004 (after the byte store)")
++CTGP_SITE(0x85a77c, 0x84db08, Call, 22, 0x2c, 0x0, "on_load_course0", "0x8e4a24")
++CTGP_SITE(0x855f00, 0x849244, Call, 8, 0x2d, 0x0, "on_load_course0", "0x8dfb94")
++CTGP_SITE(0x857948, 0x84acb0, Call, 8, 0x2e, 0x0, "on_load_course0", "0x8e184c")
++CTGP_SITE(0x85fda8, 0x85313c, Call, 8, 0x2f, 0x0, "on_load_course8", "0x8ea698")
++CTGP_SITE(0x857860, 0x84abc8, Call, 26, 0x30, 0x0, "on_load_course8", "0x8e1784")
++CTGP_SITE(0x855e64, 0x8491a8, Call, 0, 0x31, 0x0, "on_store_course", "0x8dfac8")
++CTGP_SITE(0x85a874, 0x84dc00, Call, 0, 0x32, 0x0, "on_update_course", "0x8e4b14")
++CTGP_SITE(0x84d3b8, 0x8406fc, Call, 0, 0x33, 0x0, "on_key", "0x8d62d8 (CTGPDelux010101)")
++CTGP_SITE(0x858454, 0x84b7bc, Call, 0, 0x34, 0x0, "on_vote", "0x8e2374")
++CTGP_SITE(0x857318, 0x84a680, Nop, 0, 0x0, 0x0, "", "0x8e11b8")
++CTGP_SITE(0x857534, 0x84a89c, Nop, 0, 0x0, 0x0, "", "0x8e1468")
++CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x35, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..9d3bb0ff5f
@@ -3267,10 +3419,10 @@ index 0000000000..0e0ebdf50a
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/kart_hook_trace.cpp b/src/core/arm/recomp/kart_hook_trace.cpp
 new file mode 100644
-index 0000000000..d7c0e38126
+index 0000000000..2335967bdb
 --- /dev/null
 +++ b/src/core/arm/recomp/kart_hook_trace.cpp
-@@ -0,0 +1,547 @@
+@@ -0,0 +1,293 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_data_path.h"
 +#include "core/arm/recomp/kart_hook_trace.h"
@@ -3419,115 +3571,6 @@ index 0000000000..d7c0e38126
 +
 +namespace {
 +
-+// ---- Race HUD map placement ---------------------------------------------------------------------------------------------------
-+// Common/Mush/UI.bin ("IUIU" ...) holds one 140-byte record per course index at 0x24 + 140*index (map scale / offsets...). The spare course
-+// indices 2..15 have the default identity record, which puts the minimap in the middle of the screen, so the extra cup copies a normal
-+// course's record over the ones it uses. The loaded copy is found by its header.
-+std::mutex g_cup_lock;
-+std::vector<std::string> g_cup_tracks; ///< the running extra cup's track folders (CT_xx), set at Grand Prix start
-+constexpr u64 kUiRecordSize = 140, kUiRecordsAt = 0x24, kUiTemplateIndex = 16;
-+std::mutex g_ui_lock;
-+std::vector<u64> g_ui_copies;
-+bool g_ui_scanned = false;
-+std::atomic<bool> g_ui_scanning{false};
-+
-+// The 8 spare "stand-in" music labels of an extra cup: the labels' stream file names live once in the sound archive's file table as
-+// "<label>.bfstm"; those strings are overwritten with CT_xx file names for the duration of the cup (labels of result / replay music, never
-+// used while racing). Index k (0..3): N label, F label.
-+const char* const kStandInN[4] = {"pBGM_ANIMAL_RESULT_SPRING", "pBGM_ANIMAL_RESULT_SUMMER", "pBGM_ANIMAL_RESULT_AUTUMN", "pBGM_ANIMAL_RESULT_WINTER"};
-+const char* const kStandInF[4] = {"pBGM_WU_OCEAN_REPLAY", "pBGM_WU_METRO_REPLAY", "pBGM_WU_SNOW_MOUNTAIN_REPLAY", "pBGM_GC_BABYPARK_REPLAY"};
-+std::vector<u64> g_bfstm_at[8];       ///< guest addresses of each stand-in's "<label>.bfstm" string
-+std::string g_bfstm_original[8];
-+bool g_bfstm_patched = false;
-+
-+void ScanUiBin(Core::Memory::Memory& mem) {
-+    static const u8 sig[16] = {0x49, 0x55, 0x49, 0x55, 0x68, 0x43, 0, 0, 1, 0, 0x14, 0, 0xe8, 0x03, 0, 0};
-+    std::string names[8];
-+    for (int k = 0; k < 4; ++k) {
-+        names[k] = std::string(kStandInN[k]) + ".bfstm";
-+        names[4 + k] = std::string(kStandInF[k]) + ".bfstm";
-+    }
-+    std::vector<u64> found;
-+    std::vector<u64> bfstm[8];
-+    std::vector<u8> chunk(0x1000 + 64);
-+    // Probe every 64 KiB, then walk that window page by page (a page is 4 KiB; the overlap catches a match across a page edge).
-+    for (u64 a = 0x200000; a < 0x8000000000ULL; a += 0x10000) {
-+        if (!mem.IsValidVirtualAddress(a)) continue;
-+        for (u64 page = a; page < a + 0x10000; page += 0x1000) {
-+            if (!mem.IsValidVirtualAddress(page)) continue;
-+            const u64 len = mem.IsValidVirtualAddress(page + 0x1000) ? 0x1000 + 64 : 0x1000;
-+            mem.ReadBlock(page, chunk.data(), len);
-+            for (u64 i = 0; i < 0x1000 && i < len; ++i) {
-+                const u8 c = chunk[i];
-+                if (c == 0x49 && i + sizeof sig <= len && std::memcmp(&chunk[i], sig, sizeof sig) == 0) found.push_back(page + i);
-+                if (c == 'p' && i + 6 <= len && chunk[i + 1] == 'B' && chunk[i + 2] == 'G' && chunk[i + 3] == 'M') {
-+                    for (int n = 0; n < 8; ++n) {
-+                        if (i + names[n].size() + 1 <= len && std::memcmp(&chunk[i], names[n].c_str(), names[n].size() + 1) == 0) bfstm[n].push_back(page + i);
-+                    }
-+                }
-+            }
-+        }
-+    }
-+    std::scoped_lock lock{g_ui_lock};
-+    g_ui_copies = std::move(found);
-+    for (int n = 0; n < 8; ++n) g_bfstm_at[n] = std::move(bfstm[n]);
-+    g_ui_scanned = true;
-+    LOG_INFO(Core_ARM, "extra cup: {} copy(ies) of UI.bin, stand-in stream names found {}/{}/{}/{} {}/{}/{}/{}", g_ui_copies.size(), g_bfstm_at[0].size(),
-+             g_bfstm_at[1].size(), g_bfstm_at[2].size(), g_bfstm_at[3].size(), g_bfstm_at[4].size(), g_bfstm_at[5].size(), g_bfstm_at[6].size(),
-+             g_bfstm_at[7].size());
-+}
-+
-+/// Points the stand-in labels' stream files at the extra cup's tracks (tracks[k] -> "pBGM_<track>_N.bfstm" / "_F.bfstm").
-+void PatchBgmFiles(Core::Memory::Memory& mem, const std::vector<std::string>& tracks) {
-+    std::scoped_lock lock{g_ui_lock};
-+    for (int n = 0; n < 8; ++n) {
-+        if (static_cast<size_t>(n % 4) >= tracks.size()) continue;
-+        const std::string wanted = "pBGM_" + tracks[static_cast<size_t>(n % 4)] + (n < 4 ? "_N.bfstm" : "_F.bfstm");
-+        for (const u64 at : g_bfstm_at[n]) {
-+            if (g_bfstm_original[n].empty()) {
-+                g_bfstm_original[n] = std::string(n < 4 ? kStandInN[n] : kStandInF[n - 4]) + ".bfstm";
-+            }
-+            mem.WriteBlock(at, wanted.c_str(), wanted.size() + 1);
-+        }
-+    }
-+    g_bfstm_patched = true;
-+}
-+
-+void RestoreBgmFiles(Core::Memory::Memory& mem) {
-+    std::scoped_lock lock{g_ui_lock};
-+    if (!g_bfstm_patched) return;
-+    for (int n = 0; n < 8; ++n) {
-+        for (const u64 at : g_bfstm_at[n]) mem.WriteBlock(at, g_bfstm_original[n].c_str(), g_bfstm_original[n].size() + 1);
-+    }
-+    g_bfstm_patched = false;
-+}
-+
-+void StartUiScan(Core::System& system) {
-+    if (g_ui_scanning.exchange(true)) return;
-+    std::thread([&system] { ScanUiBin(system.ApplicationMemory()); }).detach();
-+}
-+
-+void PatchUiMaps(Core::Memory::Memory& mem, size_t tracks) {
-+    {
-+        std::unique_lock lock{g_ui_lock};
-+        if (!g_ui_scanned) {
-+            lock.unlock();
-+            ScanUiBin(mem); // not found yet (no cup screen was seen): scan now
-+        }
-+    }
-+    std::scoped_lock lock{g_ui_lock};
-+    for (const u64 base : g_ui_copies) {
-+        u8 record[kUiRecordSize];
-+        mem.ReadBlock(base + kUiRecordsAt + kUiRecordSize * kUiTemplateIndex, record, kUiRecordSize);
-+        for (size_t k = 0; k < tracks; ++k) mem.WriteBlock(base + kUiRecordsAt + kUiRecordSize * (2 + k), record, kUiRecordSize);
-+    }
-+}
-+
-+// ---- Grand Prix course list override (prototype for extra cups) ---------------------------------------------------------------
-+// main+0x4f7f7c is the block right after the Grand Prix setup loop copied the chosen cup's four table entries into the race list
-+// (raceinfo = [sp], list at raceinfo+0x143c, 16-byte entries: u32 course index (= enum id - 1), u64 {0xffffffff, label}, byte at +0xc).
-+// KARTRECOMP_TEST_CUP="17,19,21,22" (course indices) replaces the four courses of the next Grand Prix. The normal course table is not
-+// touched; only the copy in the race list is.
 +// Which game build `main` is (first 8 bytes of its NSO build ID): every hook address below belongs to one build.
 +u64 g_main_build = 0;
 +constexpr u64 kBuild304 = 0x2452c49bc26ec159ULL; // update 3.0.4
@@ -3547,12 +3590,9 @@ index 0000000000..d7c0e38126
 +/// the hooks use - the race list at raceinfo+0x143c, the music records - checked identical).
 +struct GameAddrs {
 +    u64 mods_button, mods_return; ///< main menu Toy-Con case and the handler's return (0: not known for the build)
-+    u64 name_getter, name_table_var; ///< course name getter and the static holding the name table
-+    u64 cup_screen, gp_list;         ///< cup screen, block after the Grand Prix setup copied the race list
-+    u64 set_bgm, bgm_owner, string_pool;
 +};
-+constexpr GameAddrs kAddrs304{0x4d6234, 0x4d63b4, 0x1acb0, 0x12f5258, 0x4910c8, 0x4f7f7c, 0x7ee84, 0x12f4d98, 0x12f62a8};
-+constexpr GameAddrs kAddrs401{0, 0, 0x1b4ac, 0x12fa258, 0x494598, 0x4fb648, 0x7fcb8, 0x12f9d98, 0x12fb2a8};
++constexpr GameAddrs kAddrs304{0x4d6234, 0x4d63b4};
++constexpr GameAddrs kAddrs401{0, 0};
 +GameAddrs g_a{};
 +
 +void InstallModHooks(Core::System& system, u64 load_base) {
@@ -3564,7 +3604,7 @@ index 0000000000..d7c0e38126
 +        return;
 +    }
 +    LOG_INFO(Core_ARM, "main build {:016x}: game hooks installed (they run when the game was built with block hooks)", g_main_build);
-+    // CTGP DX recreated (core/arm/recomp/ctgp_dx.cpp): when its tables are installed it replaces the extra-cup prototype below.
++    // CTGP DX recreated (core/arm/recomp/ctgp_dx.cpp); it replaced the October extra-cup prototype.
 +    CtgpDx::Install(system, load_base, g_main_build);
 +    // Main menu (TitleSelect page, handler main+0x4d5d58): event 0x68 is the Toy-Con button, whose case (main+0x4d6234, reached
 +    // through the handler's jump table, so via the dispatcher) sends a "Labo" telemetry event and switches to the Labo page.
@@ -3575,148 +3615,6 @@ index 0000000000..d7c0e38126
 +        KartOverlay::OpenModsPage();
 +        LOG_INFO(Core_ARM, "main menu: Mods button");
 +        return true;
-+    });
-+    if (const char* alias = std::getenv("KARTRECOMP_CT_ALIAS"); alias && *alias && *alias != '0') {
-+        // The 14 spare course ids 3..16 ("Reserved01..14") become CT_00..CT_13: the name table's entries are overwritten in place as soon
-+        // as the table exists (it is built lazily by the first call of the name getter, main+0x1acb0), before the startup loops that
-+        // derive picture / course paths from the names.
-+        auto done = std::make_shared<std::atomic<bool>>(false);
-+        RecompHooks::Install(load_base + g_a.name_getter, [done, load_base](RecompHooks::HookContext& ctx) {
-+            if (done->load()) return false;
-+            auto& mem = ctx.system.ApplicationMemory();
-+            const u64 var = mem.Read64(load_base + g_a.name_table_var); // address of the static that holds the table pointer
-+            const u64 table = var ? mem.Read64(var) : 0;
-+            if (table < 0x10000) return false; // not built yet
-+            for (u32 id = 3; id <= 16; ++id) {
-+                const u64 str = mem.Read64(table + 8ULL * id);
-+                char name[16];
-+                std::snprintf(name, sizeof name, "CT_%02u", id - 3);
-+                if (str >= 0x10000) mem.WriteBlock(str, name, std::strlen(name) + 1);
-+            }
-+            done->store(true);
-+            LOG_INFO(Core_ARM, "extra courses: ids 3..16 renamed CT_00..CT_13");
-+            return false;
-+        });
-+    }
-+    // Extra cup from a file: "extra_cup.txt" in the working directory lists up to 4 track folder names ("CT_00 CT_01 CT_02 CT_03",
-+    // CTGP DX's hex numbering). At the next Grand Prix start the spare ids 3..6 are renamed to those folders in the name table and the
-+    // four race-list entries become course indices 2..5. The file is read each time, so it can be changed between races.
-+    RecompHooks::Install(load_base + g_a.cup_screen, [&system](RecompHooks::HookContext&) {
-+        if (std::ifstream(KartDataFile("extra_cups.txt"))) StartUiScan(system); // the cup screen is up: find UI.bin while the player chooses
-+        return false;
-+    });
-+    RecompHooks::Install(load_base + g_a.gp_list, [load_base](RecompHooks::HookContext& ctx) {
-+        std::ifstream f(KartDataFile("extra_cup.txt"));
-+        std::istringstream from_env{std::getenv("KARTRECOMP_EXTRA_CUP") ? std::getenv("KARTRECOMP_EXTRA_CUP") : ""}; // tests
-+        std::istream& in = f ? static_cast<std::istream&>(f) : static_cast<std::istream&>(from_env);
-+        std::vector<std::string> tracks;
-+        for (std::string t; in >> t && tracks.size() < 4;) tracks.push_back(t);
-+        if (tracks.empty()) return false;
-+        auto& mem = ctx.system.ApplicationMemory();
-+        const u64 var = mem.Read64(load_base + g_a.name_table_var);
-+        const u64 table = var ? mem.Read64(var) : 0;
-+        const u64 raceinfo = mem.Read64(ctx.x[31]);
-+        if (table < 0x10000 || raceinfo < 0x10000) return false;
-+        for (size_t k = 0; k < tracks.size(); ++k) {
-+            const u64 str = mem.Read64(table + 8ULL * (3 + k));
-+            if (str < 0x10000) continue;
-+            std::string name = tracks[k].substr(0, 10);
-+            mem.WriteBlock(str, name.c_str(), name.size() + 1);
-+            mem.Write32(raceinfo + 0x143c + 16 * k, static_cast<u32>(2 + k));
-+            // The entry's name label (+8): CTGP's track names are new labels 21000 + track number (see tools/ctgp/messages.py).
-+            if (name.size() == 5 && name.compare(0, 3, "CT_") == 0) {
-+                mem.Write32(raceinfo + 0x143c + 16 * k + 8, 21000u + static_cast<u32>(std::strtoul(name.c_str() + 3, nullptr, 16)));
-+            }
-+        }
-+        PatchUiMaps(mem, tracks.size());
-+        {
-+            std::scoped_lock cup_lock{g_cup_lock};
-+            g_cup_tracks = tracks;
-+        }
-+        PatchBgmFiles(mem, tracks);
-+        LOG_INFO(Core_ARM, "extra cup: {} courses from extra_cup.txt", tracks.size());
-+        return false;
-+    });
-+    // Race music: main+0x7ee84 is SetBgm(controller, course index); it reads the 32-byte record `index` of the per-course BGM database
-+    // ([db+0x78], pool-relative label offsets: +0 = "_N" label, +0x14 = "_F" (final lap) label). The spare indices 2..5 have empty labels,
-+    // so no race music starts. Before the function reads its record, write the extra cup's labels (pBGM_CT_xx_N / _F, CTGP DX's stream names)
-+    // into the zero bytes inside the spare records (+6..+0x13) and point the record at them.
-+    RecompHooks::Install(load_base + g_a.set_bgm, [load_base](RecompHooks::HookContext& ctx) {
-+        const u32 idx = static_cast<u32>(ctx.x[1]);
-+        auto& mem = ctx.system.ApplicationMemory();
-+        static const bool no_music = std::getenv("KARTRECOMP_CT_NO_MUSIC") != nullptr; // test: leave the race music alone
-+        if (no_music) return false;
-+        if (idx < 2 || idx > 5) {
-+            RestoreBgmFiles(mem); // a normal race: the stand-in labels get their own streams back
-+            return false;
-+        }
-+        std::string track;
-+        {
-+            std::scoped_lock cup_lock{g_cup_lock};
-+            if (idx - 2 >= g_cup_tracks.size()) return false;
-+            track = g_cup_tracks[idx - 2];
-+        }
-+        const u64 g = mem.Read64(load_base + g_a.bgm_owner);
-+        const u64 o = g ? mem.Read64(g) : 0;
-+        const u64 db = o ? mem.Read64(o + 0xa0) : 0;
-+        const u64 recs = db ? mem.Read64(db + 0x78) : 0;
-+        const u64 pool_var = mem.Read64(load_base + g_a.string_pool);
-+        const u64 pool = pool_var ? mem.Read64(pool_var) : 0;
-+        if (!recs || !pool) return false;
-+        // Scratch for the two label strings: the unused spare records 6..15 (320 bytes), 64 bytes per track slot.
-+        const u64 scratch = recs + 32ULL * 6 + 64ULL * (idx - 2);
-+        const std::string n = kStandInN[idx - 2], f = kStandInF[idx - 2];
-+        mem.WriteBlock(scratch, n.c_str(), n.size() + 1);
-+        mem.WriteBlock(scratch + 32, f.c_str(), f.size() + 1);
-+        const u64 rec = recs + 32ULL * idx;
-+        mem.Write32(rec, static_cast<u32>(scratch - pool));
-+        mem.Write32(rec + 0x14, static_cast<u32>(scratch + 32 - pool));
-+        LOG_INFO(Core_ARM, "extra cup: race music {} -> {} / {}", track, n, f);
-+        return false;
-+    });
-+    if (std::getenv("KARTRECOMP_BGM_PROBE")) {
-+        // The per-course BGM database used by main+0x7ee84 (SetBgm(controller, course index)): 32-byte records at [db+0x78], count u16 at
-+        // [db+0xd4], first dword = offset of the label in the string pool [*[GOT 0x12f62a8]]. Log it the first time it is used.
-+        auto once = std::make_shared<std::atomic<bool>>(false);
-+        RecompHooks::Install(load_base + g_a.set_bgm, [once, load_base](RecompHooks::HookContext& ctx) {
-+            if (once->exchange(true)) return false;
-+            auto& mem = ctx.system.ApplicationMemory();
-+            const u64 g = mem.Read64(load_base + g_a.bgm_owner);
-+            const u64 o = g ? mem.Read64(g) : 0;
-+            const u64 db = o ? mem.Read64(o + 0xa0) : 0;
-+            const u64 recs = db ? mem.Read64(db + 0x78) : 0;
-+            const u64 pool_var = mem.Read64(load_base + g_a.string_pool);
-+            const u64 pool = pool_var ? mem.Read64(pool_var) : 0;
-+            LOG_INFO(Core_ARM, "bgm probe: db={:#x} recs={:#x} count={} pool={:#x} idx={}", db, recs, db ? mem.Read16(db + 0xd4) : 0, pool,
-+                     static_cast<u32>(ctx.x[1]));
-+            for (const u32 i : {0u, 1u, 2u, 3u, 5u, 16u, 27u, 28u}) {
-+                if (!recs) break;
-+                const u64 r = recs + 32ULL * i;
-+                const u32 off = mem.Read32(r);
-+                std::string label = pool && off ? TextAt(mem, pool + off) : std::string{"-"};
-+                char row[160];
-+                std::snprintf(row, sizeof row, "rec %u @%llx: off=%x %08x %08x %08x %08x %08x %08x %08x '%s'", i, static_cast<unsigned long long>(r), off,
-+                              mem.Read32(r + 4), mem.Read32(r + 8), mem.Read32(r + 12), mem.Read32(r + 16), mem.Read32(r + 20),
-+                              mem.Read32(r + 24), mem.Read32(r + 28), label.c_str());
-+                LOG_INFO(Core_ARM, "bgm probe: {}", row);
-+            }
-+            return false;
-+        });
-+    }
-+    const char* spec = std::getenv("KARTRECOMP_TEST_CUP");
-+    if (!spec || !*spec) return;
-+    auto courses = std::make_shared<std::vector<u32>>();
-+    std::istringstream list{spec};
-+    for (std::string item; std::getline(list, item, ',');) courses->push_back(static_cast<u32>(std::strtoul(item.c_str(), nullptr, 0)));
-+    RecompHooks::Install(load_base + g_a.gp_list, [courses](RecompHooks::HookContext& ctx) {
-+        auto& mem = ctx.system.ApplicationMemory();
-+        const u64 raceinfo = mem.Read64(ctx.x[31]);
-+        if (raceinfo < 0x10000) return false;
-+        for (size_t k = 0; k < 4 && k < courses->size(); ++k) {
-+            mem.Write32(raceinfo + 0x143c + 16 * k, (*courses)[k]);
-+        }
-+        LOG_INFO(Core_ARM, "extra cup: race list replaced ({} courses)", courses->size());
-+        return false;
 +    });
 +    (void)system;
 +}

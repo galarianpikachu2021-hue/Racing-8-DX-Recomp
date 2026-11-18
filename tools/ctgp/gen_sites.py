@@ -18,7 +18,8 @@ Actions:
                     SRC: wN (index in a register), xN+0xOFF (u32 index in memory), saved+0xOFF (u32 at the pointer kept by `save`).
                     F: name platform author cup flag base basebcp picture folder icon (strings: DST gets a guest pointer)
     save   xN       keep xN for later `saved+` sources (no other effect)
-    call   NAME [R] custom handler NAME in ctgp_dx.cpp with optional register R, hook at <site> (runs before the instruction there)
+    call   NAME [R] [+N]  custom handler NAME in ctgp_dx.cpp with optional register R, hook at <site> (runs before the instruction
+                    there); +N: the handler may continue at site + N (a block starts there)
 For value-transforms the hook goes after the instruction at <site> when that instruction writes wN (a load of the value), else on
 <site> itself. Every 4.0.1 offset is mapped to 3.0.4 with the masked instruction-window match of tools/recomp/port_hooks.py; a site
 without a unique full match is an error. Output: CTGP_SITE(off304, off401, Act, reg, arg, arg2, "note") lines and ctgp_roots.txt
@@ -155,9 +156,12 @@ def main():
         elif act == "call":
             calls.append(args[0])
             arg = len(calls) - 1
-            if len(args) > 1:  # optional register argument for the handler (sN / wN / xN)
-                reg = int(args[1][1:])
             resume = None
+            for a in args[1:]:
+                if a.startswith("+"):  # the handler continues N bytes on: that instruction must start a block too
+                    resume = site + int(a[1:], 0)
+                else:  # optional register argument for the handler (sN / wN / xN)
+                    reg = int(a[1:])
         h304 = port(hook) if manual304 is None else (0 if manual304 < 0 else manual304 + (hook - site))
         if act == "branch":
             arg2 = port(resume)

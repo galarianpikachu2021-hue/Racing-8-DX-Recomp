@@ -89,7 +89,7 @@
 0x1b4ac call name_getter
 # Names, platforms, pictures and cup data of CTGP's tracks (plugin installer 0x8ccc; agent_courseid analysis).
 0x4a6b70 clamp w8 | 0x4e40dc
-0x4a3a8c call scene_course | 0x4e1434 (the scene's own course index instead of the cup record's)
+0x4a3a8c call scene_course +4 | 0x4e1434 (the scene's own course index instead of the cup record's)
 0x4a3ab4 call scene_labels | 0x4e1454 (plugin swapped name/platform and skipped +1; intent kept)
 0x446154 field w0 x19+0xb4 name | 0x47aaf0
 0x446168 field w8 x19+0xb4 platform | 0x47ab04
@@ -140,8 +140,8 @@
 0x497ae0 call cup_page_create | 0x4d3c20
 0x4976bc call cup_page_create | 0x4d37b0
 0x494d60 call cup_icons_set | 0x4d08e0 (CTGP's 8 icons: cups 0x18..0x1f)
-0x4c9958 call accept_mask | 0x50ad70
-0x4c9a04 call accept_mask | 0x50ae04
+0x4c9958 call accept_mask +4 | 0x50ad70
+0x4c9a04 call accept_mask +4 | 0x50ae04
 # Resource slot counts raised by the plugin (installer 0x94c4): the menu loads a picture for each of the 188 course ids.
 0x405fa4 set x3 0x300 | 0x436928 (0x96 -> 0x300)
 0x406794 set x3 0x150 | 0x437144 (0x46 -> 0x150)
@@ -260,4 +260,24 @@
 0x18d5dc root | ui 0x1a87f8
 0x5129b0 call speedo_init | 0x55ceb0 (CTGP's speedometer box hidden until the speedometer works)
 0x9d174 call bgm_none | 0xa5ce4 (CTGP race music "None")
-0x531d94 call race_timer | 0x57ee90 (CTGP Race Timer: the time trial timer in other races)
+0x531d94 call race_timer +8 | 0x57ee90 (CTGP Race Timer: the time trial timer in other races)
+# Online / local play (plugin installers 0x84a0 / 0x80ec; docs/ctgp/sites-online.md). Off unless "CTGP online: CTGPDX players".
+0x84820c cmp w10 0xbb | 0x8de8ec (course count)
+0x824048 cmp w8 0xbb | 0x8b90bc (course count)
+0x4e75a8 call on_random | 0x52c6e8
+0x823fa4 call on_str_course | 0x8b9010
+0x823dfc call on_store_record | 0x8b8e68 (after the byte store)
+0x824008 call on_store_flagged | 0x8b9074 (after the byte store)
+0x823f9c call on_load_flag | 0x8b9004 (after the byte store)
+0x84db08 call on_load_course0 w22 +8 | 0x8e4a24
+0x849244 call on_load_course0 w8 +8 | 0x8dfb94
+0x84acb0 call on_load_course0 w8 +8 | 0x8e184c
+0x85313c call on_load_course8 w8 +8 | 0x8ea698
+0x84abc8 call on_load_course8 w26 +8 | 0x8e1784
+0x8491a8 call on_store_course +12 | 0x8dfac8
+0x84dc00 call on_update_course +0x1c | 0x8e4b14
+0x8406fc call on_key | 0x8d62d8 (CTGPDelux010101)
+0x84b7bc call on_vote | 0x8e2374
+0x84a680 nop | 0x8e11b8
+0x84a89c nop | 0x8e1468
+0x88a74 call page_id | 0x8fcfc (after "str w8, [x19, #0x228]")
