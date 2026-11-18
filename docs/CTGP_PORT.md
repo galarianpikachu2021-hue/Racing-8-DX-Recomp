@@ -128,5 +128,9 @@ Known limits / next:
   race intro, phases 3..5) and `L_Sus_00` (banner: prefix, song, author, sub name, lap variant per music record; shown when a course
   stream opens) are created as plain game HUD parts at the race-timer site, with vtables copied from the game's timer part and its own
   slots stubbed (as CTGP's classes do); driven from the lap-counter update hook. Music records are per set and per lap variant.
-* CTGP Settings page (title button, page 0x88 in 4.0.1),
+* CTGP Settings page: deferred (the same settings are F10 rows). Needs CTGP's mn_TopMenuNX_00 (button L_SubBtn_07) and
+  mn_Background_00 (N_Setting_00 / P_Setting_00 title picture; this layout crashes 3.0.4: LockMutex(null) on a loader thread),
+  a new page type in the page factory (4.0.1 0x8bcba4 creators +8, infos +0x448; registration end 0x405f04), list kind 8 rows
+  (builder 0x466604, offsets to re-derive), title-menu button and decide handler (0x4d8274, 0x4d93dc). All sites have block starts.
+* (rest of the original list:)
   race timer, honk visibility, online (packets, `CTGPDelux010101`): mapped (agent_*.md), not implemented.
