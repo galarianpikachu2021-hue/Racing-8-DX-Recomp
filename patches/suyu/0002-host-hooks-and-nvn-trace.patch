@@ -1641,10 +1641,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..4382a53d17
+index 0000000000..c0b9402e46
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1352 @@
+@@ -0,0 +1,1409 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -1657,7 +1657,9 @@ index 0000000000..4382a53d17
 +#include <filesystem>
 +#include <map>
 +#include <set>
++#include <cmath>
 +#include <cstring>
++#include <limits>
 +#include <fstream>
 +#include <mutex>
 +#include <sstream>
@@ -1937,6 +1939,7 @@ index 0000000000..4382a53d17
 +    int music = 0; ///< 0 CTGPDX OST, 1 Author's Pick (the _B streams), 2 None
 +    int timer = 0; ///< 1: the time trial timer in other races too
 +    int online = 0; ///< CTGP's Communication Mode: 0 vanilla players (default here), 1 CTGPDX players
++    int speedo = 1; ///< CTGP's speedometer (solo races)
 +};
 +CtgpSettings Settings_() {
 +    CtgpSettings st;
@@ -1945,6 +1948,7 @@ index 0000000000..4382a53d17
 +        if (line.rfind("music=", 0) == 0) st.music = std::atoi(line.c_str() + 6);
 +        if (line.rfind("timer=", 0) == 0) st.timer = std::atoi(line.c_str() + 6);
 +        if (line.rfind("online=", 0) == 0) st.online = std::atoi(line.c_str() + 7);
++        if (line.rfind("speedo=", 0) == 0) st.speedo = std::atoi(line.c_str() + 7);
 +    }
 +    return st;
 +}
@@ -2347,12 +2351,12 @@ index 0000000000..4382a53d17
 +/// Game functions and data used here (offsets in main): 3.0.4, 4.0.1.
 +struct UiFns {
 +    u64 alloc, icon_ctor, part_init, find_pane, icon_set, set_visible, anim_play, anim_playing, icon_setup, pad, page_state,
-+        sel_icon, line_set, line_reset, safestring_got;
++        sel_icon, line_set, line_reset, safestring_got, set_text, player_index, race_sys_got;
 +};
 +constexpr UiFns kUi304{0x59d074, 0x439490, 0x8c85e8, 0x8b9e88, 0x4396d4, 0x8ba414, 0x8b98a0, 0x8b9b1c, 0x491674, 0x8cb67c,
-+                       0x8c8404, 0x493b44, 0x8bb994, 0x8bc090, 0x12f4e28};
++                       0x8c8404, 0x493b44, 0x8bb994, 0x8bc090, 0x12f4e28, 0x8ba1f4, 0x85ee60, 0x12f6388};
 +constexpr UiFns kUi401{0x5902d0, 0x43b924, 0x8bc0c4, 0x8ad8e8, 0x43bb68, 0x8ade74, 0x8ad300, 0x8ad57c, 0x494b44, 0x8bf158,
-+                       0x8bbee0, 0x497014, 0x8af3f4, 0x8afaf0, 0x12f9e28};
++                       0x8bbee0, 0x497014, 0x8af3f4, 0x8afaf0, 0x12f9e28, 0x8adc54, 0x8521f4, 0x12fb388};
 +const UiFns& Ui() {
 +    return g_is304 ? kUi304 : kUi401;
 +}
@@ -2640,25 +2644,133 @@ index 0000000000..4382a53d17
 +    }, [ret](RecompHooks::HookContext& r) { r.pc = ret; }); // the original function is replaced: return to its caller
 +}
 +
++// ---- speedometer (plugin FUN_15d58 / FUN_15c94) ----------------------------------------------------------------------------
++// CTGP's coin layout has W_SOMBase_00 with the text T_SOM_00. Every frame of a solo race the text is int(|speed| * 10) of the
++// local player's kart. 64-bit path (from 3.0.3's [[[[[raceSys+0xf0]+0x12c]+0x68]+i*4]+4]+0x14, matched in 4.0.1 0xe5d4c):
++// kart = [[[[[raceSys+0x1b0]+0x238]+0xc8]+i*8]+8]+0x28, speed float at kart+0x37c; i = the game's local player index function.
++struct Speedo {
++    u64 box = 0, text = 0, buf = 0;
++    int index = -1;  ///< local player's kart index (asked once per race)
++    int last = -1;   ///< value shown
++    int huds = 0;    ///< coin layouts set up in this burst (split-screen: more than one, no speedometer, like CTGP)
++    bool shown = false;
++    bool on = true;  ///< the speedometer setting, read when the race HUD is set up
++    std::chrono::steady_clock::time_point init{};
++};
++std::mutex g_speedo_lock;
++Speedo g_speedo;
++
 +bool H_SpeedoInit(RecompHooks::HookContext& ctx, const Site&) {
-+    // Coin / lap counter part set-up (x20 = its layout): CTGP's speedometer box W_SOMBase_00 is hidden unless the speedometer is
-+    // on (plugin FUN_15d58). The speedometer value needs the local kart, which is not found yet, so the box stays hidden.
++    // Coin / lap counter part set-up (x20 = its layout): find W_SOMBase_00 and T_SOM_00 and hide the box; the first update shows it
++    // when this is a solo race and the speedometer is on.
 +    const u64 layout = ctx.x[20];
-+    const u64 name = GuestSafeString(ctx.system, "W_SOMBase_00");
-+    if (!layout || !name) return false;
++    const u64 name_box = GuestSafeString(ctx.system, "W_SOMBase_00");
++    const u64 name_text = GuestSafeString(ctx.system, "T_SOM_00");
++    if (!layout || !name_box || !name_text) return false;
++    {
++        std::scoped_lock lk{g_speedo_lock};
++        const auto now = std::chrono::steady_clock::now();
++        const bool burst = g_speedo.huds > 0 && now - g_speedo.init < std::chrono::seconds(3);
++        g_speedo.huds = burst ? g_speedo.huds + 1 : 1;
++        g_speedo.init = now;
++        g_speedo.index = -1;
++        g_speedo.last = -1;
++        g_speedo.shown = false;
++        g_speedo.box = g_speedo.text = 0;
++        g_speedo.on = Settings_().speedo != 0;
++        if (!g_speedo.buf) g_speedo.buf = g_arena.Alloc(ctx.system, 32, 8);
++    }
 +    const UiFns ui = Ui();
 +    auto step = std::make_shared<int>(0);
-+    return CallGuestSeq(ctx, [step, layout, name, ui](u64 r, GuestCall& next) {
-+        if ((*step)++ == 0) {
-+            next = {Fn(ui.find_pane), {layout, name}};
++    return CallGuestSeq(ctx, [step, layout, name_box, name_text, ui](u64 r, GuestCall& next) {
++        switch ((*step)++) {
++        case 0:
++            next = {Fn(ui.find_pane), {layout, name_text}};
++            return true;
++        case 1: {
++            std::scoped_lock lk{g_speedo_lock};
++            if (g_speedo.huds == 1) g_speedo.text = r;
++            next = {Fn(ui.find_pane), {layout, name_box}};
 +            return true;
 +        }
-+        if (*step == 2 && r) {
++        case 2:
++            if (!r) return false;
++            {
++                std::scoped_lock lk{g_speedo_lock};
++                if (g_speedo.huds == 1) g_speedo.box = r;
++                else g_speedo.box = g_speedo.text = 0; // split-screen
++                LOG_INFO(Core_ARM, "CTGP: race HUD {} (speedometer {})", g_speedo.huds, g_speedo.text ? "found" : "not found");
++            }
 +            next = {Fn(ui.set_visible), {r, 0}};
 +            return true;
++        default:
++            return false;
 +        }
-+        return false;
 +    });
++}
++
++/// The local player's kart speed (guest float at kart+0x37c), or NaN when the race objects are not there.
++float LocalKartSpeed(Core::System& system, int index) {
++    auto& mem = system.ApplicationMemory();
++    const u64 base = KartHookTrace::MainBase();
++    auto rd = [&mem](u64 a) { return a ? mem.Read64(a) : 0; };
++    const u64 holder = rd(rd(rd(base + Ui().race_sys_got)) + 0x20);
++    const u64 rs = rd(holder ? holder + 8 : 0);
++    if (!rs || !(mem.Read8(rs + 0x180) & 4)) return std::numeric_limits<float>::quiet_NaN(); // the getter returns null unless bit 2 is set
++    const u64 mgr = rd(rs + 0x190 + 4 * 8);
++    const u64 list = rd(rd(mgr ? mgr + 0x238 : 0) + 0xc8);
++    const u64 entry = rd(list ? list + 8 * static_cast<u64>(index) : 0);
++    const u64 kart = rd(rd(entry ? entry + 8 : 0) + 0x28);
++    if (!kart || entry == 0) return std::numeric_limits<float>::quiet_NaN();
++    const u32 bits = mem.Read32(kart + 0x37c);
++    float speed;
++    std::memcpy(&speed, &bits, 4);
++    return speed;
++}
++
++bool H_SpeedoUpdate(RecompHooks::HookContext& ctx, const Site&) {
++    // Entry of the lap-counter part update (plugin FUN_15c94 at 0x55d32c): T_SOM_00 = int(|speed| * 10).
++    Speedo sp;
++    {
++        std::scoped_lock lk{g_speedo_lock};
++        if (!g_speedo.text || !g_speedo.box || !g_speedo.buf || g_speedo.huds != 1) return false;
++        sp = g_speedo;
++    }
++    if (!sp.on) return false;
++    const UiFns ui = Ui();
++    if (sp.index < 0) {
++        // ask the game once for the local player's index (3.0.3 0x8e971c), negative -> 0
++        return CallGuestSeq(ctx, [ui, called = false](u64 r, GuestCall& next) mutable {
++            if (!called) {
++                called = true;
++                next = {Fn(ui.player_index), {}};
++                return true;
++            }
++            std::scoped_lock lk{g_speedo_lock};
++            g_speedo.index = std::max(0, static_cast<int>(static_cast<s8>(r))); // a byte; -1 (no player) -> 0, as CTGP does
++            LOG_INFO(Core_ARM, "CTGP: speedometer for player kart {} (text pane {:#x})", g_speedo.index, g_speedo.text);
++            return false;
++        });
++    }
++    const float speed = LocalKartSpeed(ctx.system, sp.index);
++    if (std::isnan(speed)) return false;
++    const int value = static_cast<int>(std::fabs(speed * 10.0f));
++    if (value == sp.last && sp.shown) return false;
++    // UTF-16 digits into the guest buffer
++    const std::string digits = std::to_string(std::min(value, 99999));
++    auto& mem = ctx.system.ApplicationMemory();
++    // the HUD's number font has the full-width digits (U+FF10..), like the game's own number formatter writes
++    for (size_t k = 0; k < digits.size(); ++k) mem.Write16(sp.buf + 2 * k, static_cast<u16>(0xff10 + (digits[k] - '0')));
++    mem.Write16(sp.buf + 2 * digits.size(), 0);
++    {
++        std::scoped_lock lk{g_speedo_lock};
++        g_speedo.last = value;
++        g_speedo.shown = true;
++    }
++    std::vector<GuestCall> calls;
++    if (!sp.shown) calls.push_back({Fn(ui.set_visible), {sp.box, 1}});
++    calls.push_back({Fn(ui.set_text), {sp.text, sp.buf}});
++    return CallGuest(ctx, std::move(calls));
 +}
 +
 +bool H_CupLineToggle(RecompHooks::HookContext& ctx, const Site&) {
@@ -2784,7 +2896,7 @@ index 0000000000..4382a53d17
 +    {"mapobj_path", H_MapObjPath}, {"speed_load", H_SpeedLoad},     {"speed_scale", H_SpeedScale}, {"timer_limit", H_TimerLimit},
 +    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_update", H_CupUpdate},
 +    {"cup_page_create", H_CupPageCreate}, {"cup_icons_set", H_CupIconsSet}, {"cup_line_toggle", H_CupLineToggle},
-+    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse}, {"speedo_init", H_SpeedoInit}, {"bgm_none", H_BgmNone}, {"race_timer", H_RaceTimer},
++    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse}, {"speedo_init", H_SpeedoInit}, {"speedo_update", H_SpeedoUpdate}, {"bgm_none", H_BgmNone}, {"race_timer", H_RaceTimer},
 +    {"on_random", H_OnRandom}, {"on_str_course", H_OnStrCourse}, {"on_store_record", H_OnStoreRecord},
 +    {"on_store_flagged", H_OnStoreFlagged}, {"on_load_flag", H_OnLoadFlag}, {"on_load_course0", H_OnLoadCourse0},
 +    {"on_load_course8", H_OnLoadCourse8}, {"on_store_course", H_OnStoreCourse}, {"on_update_course", H_OnUpdateCourse},
@@ -2927,61 +3039,6 @@ index 0000000000..4382a53d17
 +                             [site, is304, handler](RecompHooks::HookContext& ctx) { return RunSite(ctx, *site, is304, handler); });
 +        ++installed;
 +    }
-+    if (const char* probe = std::getenv("KARTRECOMP_CTGP_PROBE"); probe && is304) {
-+        // debug: at main+<hex> log x0, the object at [x0 + 0x28] and its float at +0x37c, now and then (finding the kart's speed)
-+        RecompHooks::Install(main_base + std::strtoull(probe, nullptr, 16), [](RecompHooks::HookContext& ctx) {
-+            static std::atomic<int> n{0};
-+            if (n++ % 97 != 0) return false;
-+            auto& mem = ctx.system.ApplicationMemory();
-+            const u64 kart = mem.Read64(ctx.x[0] + 0x28);
-+            float speed = 0;
-+            if (kart) { const u32 b = mem.Read32(kart + 0x37c); std::memcpy(&speed, &b, 4); }
-+            LOG_INFO(Core_ARM, "CTGP probe: x0 {:#x} kart {:#x} f37c {}", ctx.x[0], kart, speed);
-+            static std::set<u64> karts;
-+            if (kart) karts.insert(kart);
-+            static bool searched = false;
-+            if (!searched && karts.size() >= 12) { // where do the race system's players lead to their karts? (3 hops, 0x800 bytes)
-+                searched = true;
-+                const u64 base = KartHookTrace::MainBase();
-+                const u64 rs = mem.Read64(mem.Read64(mem.Read64(mem.Read64(base + 0x12f6388)) + 0x20) + 8);
-+                LOG_INFO(Core_ARM, "CTGP probe: race system {:#x}", rs);
-+                for (u32 i = 0; i < 12; ++i) {
-+                    const u64 p0 = mem.Read64(rs + 0x190 + 8 * i);
-+                    std::string found;
-+                    for (u64 a = 0; a < 0x800 && p0; a += 8) {
-+                        const u64 p1 = mem.Read64(p0 + a);
-+                        if (karts.contains(p1)) found += fmt::format("[{:x}] ", a);
-+                        if (p1 < 0x2000000000ULL || p1 > 0x3000000000ULL) continue;
-+                        for (u64 b = 0; b < 0x800; b += 8) {
-+                            const u64 p2 = mem.Read64(p1 + b);
-+                            if (karts.contains(p2)) found += fmt::format("[{:x}][{:x}] ", a, b);
-+                            if (p2 < 0x2000000000ULL || p2 > 0x3000000000ULL) continue;
-+                            for (u64 c = 0; c < 0x400; c += 8)
-+                                if (karts.contains(mem.Read64(p2 + c))) found += fmt::format("[{:x}][{:x}][{:x}] ", a, b, c);
-+                        }
-+                    }
-+                    LOG_INFO(Core_ARM, "CTGP probe: player {} {:#x}: {}", i, p0, found.substr(0, 400));
-+                }
-+            }
-+            static std::set<u64> seen;
-+            if (kart && seen.insert(kart).second) { // small integers in the kart and the x0 object, once each
-+                std::string row;
-+                for (u64 o = 0; o < 0x600; o += 4) {
-+                    const u32 v = mem.Read32(kart + o);
-+                    if (v < 12) row += fmt::format("{:x}={} ", o, v);
-+                }
-+                LOG_INFO(Core_ARM, "CTGP probe vt: kart {:#x} obj {:#x} vtable {:#x} obj+0x804 {}", kart, ctx.x[0], mem.Read64(ctx.x[0]) - KartHookTrace::MainBase(), mem.Read32(ctx.x[0] + 0x804));
-+                LOG_INFO(Core_ARM, "CTGP probe kart {:#x}: {}", kart, row);
-+                row.clear();
-+                for (u64 o = 0; o < 0x900; o += 4) {
-+                    const u32 v = mem.Read32(ctx.x[0] + o);
-+                    if (v < 12) row += fmt::format("{:x}={} ", o, v);
-+                }
-+                LOG_INFO(Core_ARM, "CTGP probe obj {:#x}: {}", ctx.x[0], row);
-+            }
-+            return false;
-+        });
-+    }
 +    if (std::getenv("KARTRECOMP_CTGP_TRACE_PARTS")) {
 +        // debug: every UI part set-up with its pane name (finds panes a layout lacks)
 +        RecompHooks::Install(main_base + Ui().part_init, [](RecompHooks::HookContext& ctx) {
@@ -3072,10 +3129,10 @@ index 0000000000..9ef2bc0702
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
 new file mode 100644
-index 0000000000..3a45acd031
+index 0000000000..7e4a7a10cb
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_sites.inc
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,164 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
 +// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
@@ -3217,28 +3274,29 @@ index 0000000000..3a45acd031
 +CTGP_SITE(0x4c64f8, 0x4c9a04, Call, 0, 0x23, 0x0, "accept_mask", "0x50ae04")
 +CTGP_SITE(0x403f54, 0x405fa4, Set, 3, 0x300, 0x0, "", "0x436928 (0x96 -> 0x300)")
 +CTGP_SITE(0x404740, 0x406794, Set, 3, 0x150, 0x0, "", "0x437144 (0x46 -> 0x150)")
-+CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x24, 0x0, "speedo_init", "0x55ceb0 (CTGP's speedometer box hidden until the speedometer works)")
-+CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x25, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
-+CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x26, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
++CTGP_SITE(0x50f708, 0x512e1c, Call, 0, 0x24, 0x0, "speedo_update", "ui 0x55d32c (speedometer text; lap counter part update, matched by its lap-byte compare)")
++CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x25, 0x0, "speedo_init", "0x55ceb0 (speedometer panes)")
++CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x26, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
++CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x27, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
 +CTGP_SITE(0x854ec8, 0x84820c, Cmp, 10, 0xbb, 0x0, "", "0x8de8ec (course count)")
 +CTGP_SITE(0x830d30, 0x824048, Cmp, 8, 0xbb, 0x0, "", "0x8b90bc (course count)")
-+CTGP_SITE(0x4e3fac, 0x4e75a8, Call, 0, 0x27, 0x0, "on_random", "0x52c6e8")
-+CTGP_SITE(0x830c8c, 0x823fa4, Call, 0, 0x28, 0x0, "on_str_course", "0x8b9010")
-+CTGP_SITE(0x830ae4, 0x823dfc, Call, 0, 0x29, 0x0, "on_store_record", "0x8b8e68 (after the byte store)")
-+CTGP_SITE(0x830cf0, 0x824008, Call, 0, 0x2a, 0x0, "on_store_flagged", "0x8b9074 (after the byte store)")
-+CTGP_SITE(0x830c84, 0x823f9c, Call, 0, 0x2b, 0x0, "on_load_flag", "0x8b9004 (after the byte store)")
-+CTGP_SITE(0x85a77c, 0x84db08, Call, 22, 0x2c, 0x0, "on_load_course0", "0x8e4a24")
-+CTGP_SITE(0x855f00, 0x849244, Call, 8, 0x2d, 0x0, "on_load_course0", "0x8dfb94")
-+CTGP_SITE(0x857948, 0x84acb0, Call, 8, 0x2e, 0x0, "on_load_course0", "0x8e184c")
-+CTGP_SITE(0x85fda8, 0x85313c, Call, 8, 0x2f, 0x0, "on_load_course8", "0x8ea698")
-+CTGP_SITE(0x857860, 0x84abc8, Call, 26, 0x30, 0x0, "on_load_course8", "0x8e1784")
-+CTGP_SITE(0x855e64, 0x8491a8, Call, 0, 0x31, 0x0, "on_store_course", "0x8dfac8")
-+CTGP_SITE(0x85a874, 0x84dc00, Call, 0, 0x32, 0x0, "on_update_course", "0x8e4b14")
-+CTGP_SITE(0x84d3b8, 0x8406fc, Call, 0, 0x33, 0x0, "on_key", "0x8d62d8 (CTGPDelux010101)")
-+CTGP_SITE(0x858454, 0x84b7bc, Call, 0, 0x34, 0x0, "on_vote", "0x8e2374")
++CTGP_SITE(0x4e3fac, 0x4e75a8, Call, 0, 0x28, 0x0, "on_random", "0x52c6e8")
++CTGP_SITE(0x830c8c, 0x823fa4, Call, 0, 0x29, 0x0, "on_str_course", "0x8b9010")
++CTGP_SITE(0x830ae4, 0x823dfc, Call, 0, 0x2a, 0x0, "on_store_record", "0x8b8e68 (after the byte store)")
++CTGP_SITE(0x830cf0, 0x824008, Call, 0, 0x2b, 0x0, "on_store_flagged", "0x8b9074 (after the byte store)")
++CTGP_SITE(0x830c84, 0x823f9c, Call, 0, 0x2c, 0x0, "on_load_flag", "0x8b9004 (after the byte store)")
++CTGP_SITE(0x85a77c, 0x84db08, Call, 22, 0x2d, 0x0, "on_load_course0", "0x8e4a24")
++CTGP_SITE(0x855f00, 0x849244, Call, 8, 0x2e, 0x0, "on_load_course0", "0x8dfb94")
++CTGP_SITE(0x857948, 0x84acb0, Call, 8, 0x2f, 0x0, "on_load_course0", "0x8e184c")
++CTGP_SITE(0x85fda8, 0x85313c, Call, 8, 0x30, 0x0, "on_load_course8", "0x8ea698")
++CTGP_SITE(0x857860, 0x84abc8, Call, 26, 0x31, 0x0, "on_load_course8", "0x8e1784")
++CTGP_SITE(0x855e64, 0x8491a8, Call, 0, 0x32, 0x0, "on_store_course", "0x8dfac8")
++CTGP_SITE(0x85a874, 0x84dc00, Call, 0, 0x33, 0x0, "on_update_course", "0x8e4b14")
++CTGP_SITE(0x84d3b8, 0x8406fc, Call, 0, 0x34, 0x0, "on_key", "0x8d62d8 (CTGPDelux010101)")
++CTGP_SITE(0x858454, 0x84b7bc, Call, 0, 0x35, 0x0, "on_vote", "0x8e2374")
 +CTGP_SITE(0x857318, 0x84a680, Nop, 0, 0x0, 0x0, "", "0x8e11b8")
 +CTGP_SITE(0x857534, 0x84a89c, Nop, 0, 0x0, 0x0, "", "0x8e1468")
-+CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x35, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
++CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x36, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..9d3bb0ff5f
