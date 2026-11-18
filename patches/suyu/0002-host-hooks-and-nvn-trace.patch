@@ -1641,14 +1641,15 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..21902d8fdb
+index 0000000000..8c490180fe
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,1095 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
 +#include <array>
++#include <atomic>
 +#include <cstdlib>
 +#include <functional>
 +#include <memory>
@@ -1928,49 +1929,90 @@ index 0000000000..21902d8fdb
 +    u8 nzcv[4];
 +};
 +thread_local u64 t_resume_pc = 0; ///< the hook at this pc is being resumed after its guest calls: do not run it again
++thread_local int t_resume_skips = 0; ///< a resumed block passes the hooks twice (dispatcher loop, then the block's own check)
 +
 +struct GuestCall {
 +    u64 fn;
 +    std::array<u64, 8> args;
++    bool has_s0 = false; ///< a float argument in s0
++    float s0 = 0.0f;
 +};
 +
-+/// Runs `calls` in order (args fixed up front), then `done` (registers already restored). Returns true: the hook must return
-+/// true too, since pc now points at the first function.
-+bool CallGuest(RecompHooks::HookContext& ctx, std::vector<GuestCall> calls, std::function<void(RecompHooks::HookContext&)> done = {}) {
-+    if (calls.empty()) return false;
++/// Generator of guest calls: called with the previous call's result (0 before the first); fills `next` and returns true to make
++/// another call, false when done.
++using CallGen = std::function<bool(u64 prev_result, GuestCall& next)>;
++
++/// Runs the calls `gen` produces one after another, then `done` (registers already restored), then continues at the hooked
++/// instruction. Returns true (pc now points at the first function) or false when `gen` made no call (nothing changed).
++bool CallGuestSeq(RecompHooks::HookContext& ctx, CallGen gen, std::function<void(RecompHooks::HookContext&)> done = {}) {
++    GuestCall first{};
++    if (!gen(0, first)) return false;
 +    auto state = std::make_shared<GuestState>();
 +    std::memcpy(state->x, ctx.x, sizeof state->x);
 +    std::memcpy(state->v, ctx.v, sizeof state->v);
 +    if (ctx.nzcv) std::memcpy(state->nzcv, ctx.nzcv, 4);
 +    const u64 resume = ctx.pc;
-+    auto list = std::make_shared<std::vector<GuestCall>>(std::move(calls));
-+    auto step = std::make_shared<std::function<void(RecompHooks::HookContext&, size_t)>>();
-+    *step = [state, resume, list, step, done](RecompHooks::HookContext& c, size_t k) {
-+        // set up call k; its return lands in a trap that sets up k + 1 or restores everything
-+        const GuestCall& g = (*list)[k];
++    auto shared_gen = std::make_shared<CallGen>(std::move(gen));
++    // Each call returns into a trap whose function asks the generator for the next call (and jumps there), or restores the
++    // registers and continues at the hooked instruction.
++    auto arm = std::make_shared<std::function<void(RecompHooks::HookContext&, const GuestCall&)>>();
++    std::weak_ptr<std::function<void(RecompHooks::HookContext&, const GuestCall&)>> weak = arm;
++    *arm = [state, resume, shared_gen, weak, done](RecompHooks::HookContext& c, const GuestCall& g) {
 +        for (size_t a = 0; a < 8; ++a) c.x[a] = g.args[a];
-+        const bool last = k + 1 == list->size();
-+        c.x[30] = last ? resume : (*list)[k + 1].fn; // where the trap sends execution next (Dispatch sets pc = this)
-+        std::weak_ptr<std::function<void(RecompHooks::HookContext&, size_t)>> weak = step;
-+        RecompHooks::TrapReturn(c, [state, resume, last, k, weak, done](RecompHooks::HookContext& r) {
-+            if (!last) {
-+                if (auto s = weak.lock()) (*s)(r, k + 1);
++        if (g.has_s0) {
++            u32 bits;
++            std::memcpy(&bits, &g.s0, 4);
++            c.v[0][0] = bits;
++            c.v[0][1] = 0;
++        }
++        auto self = weak.lock();
++        RecompHooks::TrapReturn(c, [state, resume, shared_gen, self, done](RecompHooks::HookContext& r) {
++            GuestCall next{};
++            if (self && (*shared_gen)(r.x[0], next)) {
++                (*self)(r, next); // sets the arguments, a new trap as x30 and pc = next.fn
 +                return;
 +            }
 +            std::memcpy(r.x, state->x, sizeof state->x);
 +            std::memcpy(r.v, state->v, sizeof state->v);
 +            if (r.nzcv) std::memcpy(r.nzcv, state->nzcv, 4);
-+            // Dispatch continues at the trap's saved return address, which was set to `resume` above.
 +            t_resume_pc = resume;
++            t_resume_skips = 2;
++            r.pc = resume;
 +            if (done) done(r);
 +        });
 +        c.pc = g.fn;
 +    };
-+    (*step)(ctx, 0);
++    (*arm)(ctx, first);
++    // keep the arming function alive while its traps may still run (they hold only a weak reference)
++    static std::mutex keep_lock;
++    static std::vector<std::shared_ptr<void>> keep;
++    {
++        std::scoped_lock lk{keep_lock};
++        keep.push_back(arm);
++        if (keep.size() > 256) keep.erase(keep.begin());
++    }
 +    return true;
 +}
 +
++/// Fixed list of calls (arguments known up front).
++bool CallGuest(RecompHooks::HookContext& ctx, std::vector<GuestCall> calls, std::function<void(RecompHooks::HookContext&)> done = {}) {
++    auto list = std::make_shared<std::vector<GuestCall>>(std::move(calls));
++    auto k = std::make_shared<size_t>(0);
++    return CallGuestSeq(ctx, [list, k](u64, GuestCall& next) {
++        if (*k >= list->size()) return false;
++        next = (*list)[(*k)++];
++        return true;
++    }, std::move(done));
++}
++
 +using Handler = bool (*)(RecompHooks::HookContext&, const Site&);
++int RemapCup(int cup); // cup screen paging, below
++
++/// The cup a game cup id stands for on the current cup screen line (plugin FUN_1382c): CTGP's cup database decides its courses.
++const Cup* CupForGameId(int raw) {
++    if (TestCup() >= 0) return CupById(TestCup());
++    return CupById(RemapCup(raw));
++}
 +
 +bool H_NameGetter(RecompHooks::HookContext& ctx, const Site&) {
 +    // Function entry, w0 = course id: CTGP's ids answer their folder name; the game's ids run the game's function.
@@ -1984,7 +2026,7 @@ index 0000000000..21902d8fdb
 +bool H_SceneLabels(RecompHooks::HookContext& ctx, const Site&) {
 +    // x0 = {u32 course index, u32 platform label, u32 name label} about to be shown on the course screen.
 +    auto& mem = ctx.system.ApplicationMemory();
-+    if (const Course* c = CtgpCourseByIndex(mem.Read32(ctx.x[0]))) {
++    if (const Course* c = CourseById(static_cast<int>(mem.Read32(ctx.x[0])) + 1); c && c->name >= 0) {
 +        mem.Write32(ctx.x[0] + 4, static_cast<u32>(c->platform));
 +        mem.Write32(ctx.x[0] + 8, static_cast<u32>(c->name));
 +    }
@@ -1998,30 +2040,61 @@ index 0000000000..21902d8fdb
 +    ctx.pc = ctx.x[30];
 +    return true;
 +}
++/// Plugin FUN_1650c: a course shown in a cup's course list stands for the course at the same slot of the cup its cup stands for.
++const Course* SlotCourse(u32 index) {
++    const Course* c = CourseById(static_cast<int>(index) + 1);
++    if (!c || c->cup < 0 || c->slot < 0) return c;
++    const Cup* cup = CupForGameId(c->cup);
++    if (!cup || c->slot >= static_cast<int>(cup->courses.size())) return c;
++    return CourseById(cup->courses[static_cast<size_t>(c->slot)]);
++}
++bool H_SlotCourse(RecompHooks::HookContext& ctx, const Site& site) {
++    // Course panel of the cup screen, after "ldr w<reg>, [x20]" (the listed course index): the course it stands for.
++    if (const Course* c = SlotCourse(static_cast<u32>(ctx.x[site.reg]))) ctx.x[site.reg] = static_cast<u32>(c->id - 1);
++    return false;
++}
++bool H_SlotPlatform(RecompHooks::HookContext& ctx, const Site& site) {
++    // Same panel, after the platform label load into w<reg> (x20 -> the listed course index).
++    if (const Course* c = SlotCourse(ctx.system.ApplicationMemory().Read32(ctx.x[20]))) ctx.x[site.reg] = static_cast<u32>(c->platform);
++    return false;
++}
++bool H_SlotName(RecompHooks::HookContext& ctx, const Site& site) {
++    if (const Course* c = SlotCourse(ctx.system.ApplicationMemory().Read32(ctx.x[20]))) ctx.x[site.reg] = static_cast<u32>(c->name);
++    return false;
++}
 +bool H_CupSelect(RecompHooks::HookContext& ctx, const Site&) {
-+    // Before "str w10, [x9, #course]": w24 = cup, w25 = slot; w10 = the slot's course index.
-+    const int cup = static_cast<int>(static_cast<u32>(ctx.x[24])), slot = static_cast<int>(static_cast<u32>(ctx.x[25]));
-+    if (!IsCtgpCup(cup)) return false;
-+    const Cup* c = CupById(cup);
-+    if (slot >= 0 && slot < static_cast<int>(c->courses.size())) ctx.x[10] = static_cast<u32>(c->courses[slot] - 1);
++    // Course screen, before "str w10, [x9, #course]": w24 = cup (as the game has it), w25 = slot; w10 = the course of that slot of
++    // the cup the icon stands for (plugin FUN_165a8 -> FUN_1382c).
++    const int raw = static_cast<int>(static_cast<u32>(ctx.x[24])), slot = static_cast<int>(static_cast<u32>(ctx.x[25]));
++    const Cup* c = CupForGameId(raw);
++    if (c && slot >= 0 && slot < static_cast<int>(c->courses.size())) ctx.x[10] = static_cast<u32>(c->courses[slot] - 1);
 +    return false;
 +}
 +bool H_GpSlot(RecompHooks::HookContext& ctx, const Site&) {
-+    // Grand Prix start, after "ldr w9, [cup table record + slot]": w23 = cup, x22 = slot * 0x10; w9 = course index.
-+    int cup = static_cast<int>(static_cast<u32>(ctx.x[23]));
-+    if (TestCup() >= 0) cup = TestCup();
-+    if (!IsCtgpCup(cup)) return false;
-+    const Cup* c = CupById(cup);
++    // Grand Prix start, after "ldr w9, [cup table record + slot]": w23 = cup (as the game has it), x22 = slot * 0x10; w9 = the
++    // course of that slot of the cup the icon stands for (plugin FUN_1382c).
++    const int raw = static_cast<int>(static_cast<u32>(ctx.x[23]));
++    const Cup* c = CupForGameId(raw);
++    if (!c) return false;
 +    const u64 slot = ctx.x[22] >> 4;
 +    if (slot < c->courses.size()) ctx.x[9] = static_cast<u32>(c->courses[slot] - 1);
-+    if (slot == 0) LOG_INFO(Core_ARM, "CTGP: Grand Prix of cup {} ({})", cup, CourseById(c->courses[0])->folder);
++    if (slot == 0 && c->id != raw) LOG_INFO(Core_ARM, "CTGP: Grand Prix of cup {} (shown for game cup {}): {}", c->id, raw, CourseById(c->courses[0])->folder);
 +    return false;
 +}
 +bool H_GpLabels(RecompHooks::HookContext& ctx, const Site&) {
-+    // After "ldur x8, [record, #4]" (platform | name << 32), before it is stored next to the course index at [x9 - 4].
-+    if (const Course* c = CtgpCourseByIndex(ctx.system.ApplicationMemory().Read32(ctx.x[9] - 4)))
++    // After "ldur x8, [record, #4]" (platform | name << 32), before it is stored next to the course index at [x9 - 4]: the labels of
++    // the course actually listed (a remapped cup's courses are not the record's).
++    const u32 index = ctx.system.ApplicationMemory().Read32(ctx.x[9] - 4);
++    if (const Course* c = CourseById(static_cast<int>(index) + 1); c && c->name >= 0)
 +        ctx.x[8] = static_cast<u64>(static_cast<u32>(c->platform)) | (static_cast<u64>(static_cast<u32>(c->name)) << 32);
 +    return false;
++}
++bool H_SceneCourse(RecompHooks::HookContext& ctx, const Site&) {
++    // Course scene set-up, instead of "ldr w9, [cup record + slot]": the scene's own course index (saved at [sp + 0x18]), as the
++    // plugin's patch of 0x4e1434 does; its labels come from scene_labels.
++    ctx.x[9] = ctx.system.ApplicationMemory().Read32(ctx.x[31] + 0x18);
++    ctx.pc += 4;
++    return true;
 +}
 +bool H_BgmIndex(RecompHooks::HookContext& ctx, const Site&) {
 +    // Race music controller start, after "ldr w8, [race info, #0x1a0]" (x0 = race info): the track's music settings course.
@@ -2105,51 +2178,402 @@ index 0000000000..21902d8fdb
 +    return false;
 +}
 +
-+// ---- cup screen: CTGP's paging (plugin FUN_166bc remap, FUN_17190 input) -------------------------------------------------------
-+// The game's 12 cup icons show the columns line .. line+5 of CTGP's two cup rows (game cups and CTGP cups, 14 columns); L / R
-+// move the line. The game's own line toggle (base / Booster cups) moves to the button bit 9, as in the plugin.
-+int g_line = 0;
-+constexpr int kCupSlot[12] = {0, 1, 2, 3, 6, 7, 8, 9, 4, 10, 5, 11}; ///< game cup id -> screen slot (0..5 top, 6..11 bottom)
++// ---- cup screen: CTGP's extra rows (plugin FUN_1745c / FUN_16fb8 / FUN_166bc / FUN_17190, docs/CTGP_PORT.md) -------------------
++// CTGP's cup screen layout (mn_GrprCupSlct_00 from the pack) has 8 more icon panes, L_CupIcon_18..25. When a cup page is built,
++// 8 more CupIcon parts are created on them (the game's own allocation, constructor and part set-up, called from the hook);
++// they are given cup ids 0x18..0x1f, and every icon's cup id goes through CTGP's remap, which places the 40 cups in two rows of
++// columns scrolled by L / R ("lines", with the page's own line-change animation).
 +
++/// Game functions and data used here (offsets in main): 3.0.4, 4.0.1.
++struct UiFns {
++    u64 alloc, icon_ctor, part_init, find_pane, icon_set, set_visible, anim_play, anim_playing, icon_setup, pad, page_state,
++        sel_icon, line_set, line_reset, safestring_got;
++};
++constexpr UiFns kUi304{0x59d074, 0x439490, 0x8c85e8, 0x8b9e88, 0x4396d4, 0x8ba414, 0x8b98a0, 0x8b9b1c, 0x491674, 0x8cb67c,
++                       0x8c8404, 0x493b44, 0x8bb994, 0x8bc090, 0x12f4e28};
++constexpr UiFns kUi401{0x5902d0, 0x43b924, 0x8bc0c4, 0x8ad8e8, 0x43bb68, 0x8ade74, 0x8ad300, 0x8ad57c, 0x494b44, 0x8bf158,
++                       0x8bbee0, 0x497014, 0x8af3f4, 0x8afaf0, 0x12f9e28};
++const UiFns& Ui() {
++    return g_is304 ? kUi304 : kUi401;
++}
++u64 Fn(u64 off) {
++    return KartHookTrace::MainBase() + off;
++}
++
++/// The plugin's cup screen state (its S[2]): current line, number of columns, flags.
++struct CupState {
++    int line = 0;
++    bool fewer_lines = false; ///< plugin byte1: lines stop 7 columns before the end
++    bool vanilla = false;     ///< plugin byte2: CTGP cups off (vanilla online) - paging hidden
++} g_cup;
++
++struct CupPage {
++    std::array<u64, 8> icons{};
++    std::array<u64, 8> panes{};
++    u64 change_icon = 0; ///< N_ChangeIcon_01 (the line-change hint)
++    bool complete = false;
++};
++std::mutex g_pages_lock;
++std::map<u64, CupPage> g_pages;
++
++constexpr u32 kCupSlot[24] = {0, 1, 2, 3, 6, 7, 8, 9, 4, 10, 5, 11}; ///< game cup id -> screen slot (plugin table at nro 0x775c4)
++constexpr u32 kExtraRow[8] = {1, 2, 3, 4, 5, 6, 7, 8};                ///< extra icon -> row parity (nro 0x77584)
++constexpr u32 kExtraCol[8] = {1, 2, 4, 5, 3, 4, 4, 5};                ///< extra icon -> column offset (nro 0x775a4)
++
++int RowCup(const std::vector<int>& row, int i) {
++    return i >= 0 && i < static_cast<int>(row.size()) ? row[static_cast<size_t>(i)] : 0;
++}
++
++/// Plugin FUN_166bc, transcribed: the cup an icon shows for its own cup id (0..11 game icons, 0x18..0x1f CTGP's icons).
 +int RemapCup(int cup) {
 +    const int count = static_cast<int>(g_row_top.size());
 +    if (count == 0 || g_row_bottom.size() != g_row_top.size()) return cup;
-+    if (cup < 0 || cup >= 12) return cup; // Booster cups (their own line) and anything else unchanged
-+    const int slot = kCupSlot[cup];
-+    const auto& row = slot > 5 ? g_row_bottom : g_row_top;
-+    return row[static_cast<size_t>((g_line + slot % 6) % count)];
++    if (static_cast<u32>(cup & 0xff) - 0xc < 0xc || g_cup.vanilla) return cup; // Booster cups: their own line
++    const int line = g_cup.line;
++    if (cup < 0x18) {
++        if (cup < 0 || cup >= 12) return cup;
++        const u32 slot = kCupSlot[cup];
++        int col = static_cast<s8>(static_cast<s8>(line) + static_cast<s8>(slot % 6));
++        const auto& row = slot > 5 ? g_row_bottom : g_row_top;
++        if (g_cup.fewer_lines) {
++            if (static_cast<u32>(count - 7) < static_cast<u32>(col)) col = static_cast<s8>((col + 6) - count * ((col + 6) / count));
++            col += 6;
++        }
++        return RowCup(row, col - count * (col / count));
++    }
++    const int i = static_cast<s8>(cup - 0x18);
++    if (i < 0 || i >= 8) return cup;
++    const u32 parity = kExtraRow[i], offset = kExtraCol[i];
++    int col;
++    const std::vector<int>* row;
++    if (i < 4) {
++        const int v = (i + line) - static_cast<int>(offset);
++        col = v - count * (v / count);
++        row = (parity & 1) ? &g_row_top : &g_row_bottom;
++        if (col < 0) return RowCup(*row, count - 1);
++    } else {
++        row = (parity & 1) ? &g_row_top : &g_row_bottom;
++        const int v = (line + 5 + i) - static_cast<int>(offset);
++        col = static_cast<s8>(static_cast<s8>(v) - static_cast<s8>(count) * static_cast<s8>(v / count));
++    }
++    if (g_cup.fewer_lines) {
++        if (static_cast<u32>(count - 7) < static_cast<u32>(col)) col = static_cast<s8>((col + 6) - count * ((col + 6) / count));
++        col += 6;
++    }
++    return RowCup(*row, col);
 +}
 +
-+u64 GameFn(u64 off304, u64 off401) {
-+    return KartHookTrace::MainBase() + (g_is304 ? off304 : off401);
++void NextLine() { // plugin FUN_13618
++    const int last = static_cast<int>(g_row_top.size()) - (g_cup.fewer_lines ? 7 : 1);
++    g_cup.line = g_cup.line + 1 > last ? 0 : g_cup.line + 1;
++}
++void PrevLine() { // plugin FUN_13644
++    if (--g_cup.line < 0) g_cup.line = static_cast<int>(g_row_top.size()) - (g_cup.fewer_lines ? 7 : 1);
++}
++
++/// sead::SafeString {vtable, const char*} in guest memory, for the game's pane lookups.
++u64 GuestSafeString(Core::System& system, const std::string& text) {
++    auto& mem = system.ApplicationMemory();
++    const u64 got = mem.Read64(Fn(Ui().safestring_got));
++    const u64 obj = g_arena.Alloc(system, 16);
++    if (!obj || !got) return 0;
++    mem.Write64(obj, got + 0x10);
++    mem.Write64(obj + 8, Str(system, text));
++    return obj;
++}
++
++bool H_CupPageCreate(RecompHooks::HookContext& ctx, const Site&) {
++    // End of a cup page's construction: x19 = page, [x19 + 0x578] = its layout. Creates the 8 CTGP icons (plugin FUN_1745c).
++    const u64 page = ctx.x[19];
++    auto& mem = ctx.system.ApplicationMemory();
++    const u64 layout = mem.Read64(page + 0x578);
++    if (!layout || g_cup.vanilla) return false;
++    // The plugin skips its third call ever (FUN_1745c counter): the menu heap has room for two pages' extra icons only (on the
++    // 64-bit builds, where an icon with its animations takes 0x1118 bytes, the third set made the next page's allocations fail).
++    static std::atomic<int> calls{0};
++    // Only the first cup page (the Grand Prix one) gets the icons for now: on the 64-bit builds the menu heap has room for one set
++    // (two sets made the next page's allocations fail). KARTRECOMP_CTGP_ICON_PAGES=<n> changes it (tests).
++    static const int max_pages = [] { const char* v = std::getenv("KARTRECOMP_CTGP_ICON_PAGES"); return v ? std::atoi(v) : 1; }();
++    if (++calls == 3 || calls > max_pages) {
++        LOG_INFO(Core_ARM, "CTGP: cup page {:#x}: no extra icons (third page, as in the plugin)", page);
++        return false;
++    }
++    {
++        std::scoped_lock lk{g_pages_lock};
++        if (g_pages.contains(page)) return false;
++        g_pages[page] = {};
++    }
++    struct Script {
++        int step = 0; ///< per icon: 0 alloc, 1 ctor, 2 part set-up, 3 find pane; then the hint pane
++        int icon = 0;
++        u64 obj = 0;
++        std::array<u64, 9> names{};
++        u64 zero = 0;
++    };
++    auto sc = std::make_shared<Script>();
++    for (int k = 0; k < 8; ++k) sc->names[static_cast<size_t>(k)] = GuestSafeString(ctx.system, "L_CupIcon_" + std::to_string(18 + k));
++    sc->names[8] = GuestSafeString(ctx.system, "N_ChangeIcon_01");
++    sc->zero = g_arena.Alloc(ctx.system, 8);
++    if (!sc->zero || !sc->names[8]) return false;
++    auto* sys = &ctx.system;
++    const UiFns ui = Ui();
++    return CallGuestSeq(ctx, [sc, page, layout, ui, sys](u64 r, GuestCall& next) {
++        auto& m = sys->ApplicationMemory();
++        // results of the previous call
++        if (sc->step == 1) {                                               // after alloc
++            sc->obj = r;
++        }
++        if (sc->step == 4) {                                               // after find pane
++            std::scoped_lock lk{g_pages_lock};
++            auto& pg = g_pages[page];
++            if (sc->icon < 8) {
++                pg.icons[static_cast<size_t>(sc->icon)] = sc->obj;
++                pg.panes[static_cast<size_t>(sc->icon)] = r;
++                // plugin: clear bit 31 of the part flags (3.0.3 icon+0x48 = part+0x30; 64-bit part+0x58 = icon+0x88)
++                m.Write32(sc->obj + 0x88, m.Read32(sc->obj + 0x88) & 0x7fffffffu);
++                ++sc->icon;
++                sc->step = 0;
++            } else {
++                pg.change_icon = r;
++                pg.complete = true;
++                LOG_INFO(Core_ARM, "CTGP: cup page {:#x}: 8 extra cup icons", page);
++                return false;
++            }
++        }
++        static const bool find_only = std::getenv("KARTRECOMP_CTGP_ICON_FINDONLY") != nullptr; // debug: lookups only
++        if (find_only && sc->icon < 8) {
++            if (sc->step == 4) { ++sc->icon; sc->step = 0; }
++            if (sc->icon < 8) {
++                sc->step = 5;
++                next = {Fn(ui.find_pane), {layout, sc->names[static_cast<size_t>(sc->icon)]}};
++                sc->step = 4;
++                sc->obj = 0;
++                return true;
++            }
++        }
++        if (sc->icon == 8) { // all icons made: the hint pane
++            sc->step = 4;
++            next = {Fn(ui.find_pane), {layout, sc->names[8]}};
++            return true;
++        }
++        switch (sc->step) {
++        case 0:
++            sc->step = 1;
++            next = {Fn(ui.alloc), {0x3e0, 4}};
++            return true;
++        case 1:
++            if (!sc->obj) return false; // out of memory: leave the page as it is
++            sc->step = 2;
++            next = {Fn(ui.icon_ctor), {sc->obj, 1}};
++            return true;
++        case 2:
++            sc->step = 3;
++            next = {Fn(ui.part_init), {page, sc->obj + 0x30, layout, sc->names[static_cast<size_t>(sc->icon)], sc->zero}};
++            return true;
++        case 3:
++            sc->step = 4;
++            next = {Fn(ui.find_pane), {layout, sc->names[static_cast<size_t>(sc->icon)]}};
++            return true;
++        }
++        return false;
++    });
++}
++
++bool H_CupIconsSet(RecompHooks::HookContext& ctx, const Site&) {
++    // Inside the page's cup icon set-up (x19 = page): CTGP's icons get cup ids 0x18..0x1f, state 5 (plugin FUN_16fb8).
++    const u64 page = ctx.x[19];
++    std::array<u64, 8> icons;
++    {
++        std::scoped_lock lk{g_pages_lock};
++        const auto it = g_pages.find(page);
++        if (it == g_pages.end() || !it->second.complete) return false;
++        icons = it->second.icons;
++    }
++    const u64 args = g_arena.Alloc(ctx.system, 8 * 8);
++    if (!args) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    for (u32 k = 0; k < 8; ++k) {
++        mem.Write32(args + 8 * k, 0x18 + k); // cup id
++        mem.Write32(args + 8 * k + 4, 5);    // state
++    }
++    std::vector<GuestCall> calls;
++    for (u32 k = 0; k < 8; ++k) calls.push_back({Fn(Ui().icon_set), {icons[k], args + 8 * k, args + 8 * k + 4}});
++    return CallGuest(ctx, std::move(calls));
 +}
 +
 +bool H_CupIconSet(RecompHooks::HookContext& ctx, const Site&) {
-+    // CupIcon::set(icon, &cup, &state), after "str w8, [icon, #0x3d0]": the icon shows the cup of its column on the current line.
++    // CupIcon::set(icon, &cup, &state), after "str w8, [icon, #0x3d0]": the caller's cup id becomes the cup of that column.
 +    const int cup = static_cast<int>(static_cast<u32>(ctx.x[8]));
 +    const int shown = RemapCup(cup);
 +    if (shown != cup) ctx.system.ApplicationMemory().Write32(ctx.x[20], static_cast<u32>(shown));
 +    return false;
 +}
 +bool H_CupDecided(RecompHooks::HookContext& ctx, const Site&) {
-+    // Cup chosen on the cup screen, after "ldr w8, [x19]" (the icon's cup id): the cup of that column.
++    // Cup chosen, after "ldr w8, [x19]" (the icon's cup id): the cup of that column (plugin 0x4d0b48).
 +    ctx.x[8] = static_cast<u32>(RemapCup(static_cast<int>(static_cast<u32>(ctx.x[8]))));
 +    return false;
 +}
-+bool H_CupInput(RecompHooks::HookContext& ctx, const Site&) {
-+    // Cup screen update, after the trigger bits (w20) and the cursor (w9) are loaded; x19 = page, [x19 + 0x124] = state.
-+    auto& mem = ctx.system.ApplicationMemory();
++
++bool H_CupAnims(RecompHooks::HookContext& ctx, const Site&) {
++    // Replaces the cup page's animation set-up (entry; x0 = page, x1 = layout), plugin FUN_36400 for 0x4cfde8: 12 animation groups
++    // instead of 11 - group 11 is CTGP's line scroll {Scroll_RL, Scroll_LR}. The names are CTGP's layout's (two are spelt as in
++    // the 3.0.3 game: "TropyOnOff", "BGBoarrdChangeWtoB").
++    static const std::vector<std::vector<const char*>> kGroups = {
++        {"CourseBGChange"}, {"TropyOnOff"}, {"RandomBtnOnOff"}, {"CupIconLineChange_00"},
++        {"InAll_RL", "InAll_LR", "OutAll_RL", "OutAll_LR"}, {"Icon_08"}, {"CupIn", "CupOut"}, {"ChangeIconVisible"},
++        {"BGBoarrdChangeWtoB", "BGBoardChangeBtoW"}, {"Loop"}, {"LBtnDown", "RBtnDown"}, {"Scroll_RL", "Scroll_LR"},
++    };
++    const u64 page = ctx.x[0], layout = ctx.x[1];
++    const u64 groups_new = Fn(g_is304 ? 0x8c75d0 : 0x8bb0ac), group_make = Fn(g_is304 ? 0x8c76a4 : 0x8bb180),
++              anim_bind = Fn(g_is304 ? 0x8b96f8 : 0x8ad158);
++    struct Script {
++        size_t group = 0, anim = 0;
++        int step = 0; ///< 0 groups array, 1 make group, 2 bind anims
++        u64 g = 0;
++        std::vector<std::vector<u64>> names;
++    };
++    auto sc = std::make_shared<Script>();
++    for (const auto& grp : kGroups) {
++        sc->names.emplace_back();
++        for (const char* n : grp) sc->names.back().push_back(GuestSafeString(ctx.system, n));
++    }
++    const u64 ret = ctx.x[30];
++    return CallGuestSeq(ctx, [sc, page, layout, groups_new, group_make, anim_bind](u64 r, GuestCall& next) {
++        if (sc->step == 0) {
++            sc->step = 1;
++            next = {groups_new, {page, kGroups.size()}};
++            return true;
++        }
++        if (sc->step == 1 || (sc->step == 2 && sc->anim >= kGroups[sc->group].size())) {
++            if (sc->step == 2) { ++sc->group; }
++            if (sc->group >= kGroups.size()) return false;
++            sc->step = 3; // next result is the group
++            sc->anim = 0;
++            next = {group_make, {page, sc->group, layout, kGroups[sc->group].size()}};
++            return true;
++        }
++        if (sc->step == 3) {
++            sc->g = r;
++            sc->step = 2;
++        }
++        // bind anim sc->anim of the current group
++        next = {anim_bind, {sc->g, sc->anim, sc->names[sc->group][sc->anim]}};
++        ++sc->anim;
++        return true;
++    }, [ret](RecompHooks::HookContext& r) { r.pc = ret; }); // the original function is replaced: return to its caller
++}
++
++bool H_CupLineToggle(RecompHooks::HookContext& ctx, const Site&) {
++    // Cup page update, after the trigger bits are loaded into w20 (plugin's six patches of 0x1800 / bits 11, 12 -> bit 9): the
++    // game's own line toggle (base / Booster cups) answers bit 9; L / R belong to CTGP's paging.
 +    const u32 trig = static_cast<u32>(ctx.x[20]);
-+    const u32 state = mem.Read32(ctx.x[19] + 0x124);
-+    const u32 cursor = static_cast<u32>(ctx.x[9]);
-+    const int count = static_cast<int>(g_row_top.size());
-+    // the game's own line toggle: bit 9 instead of L / R
 +    ctx.x[20] = (trig & ~0x1800u) | ((trig & 0x200u) ? 0x800u : 0u);
-+    if (state != 0 || cursor >= 12 || count == 0 || !(trig & 0x1800u)) return false;
-+    g_line = (g_line + ((trig & 0x1000u) ? 1 : count - 1)) % count;
-+    LOG_INFO(Core_ARM, "CTGP: cup line {}", g_line);
-+    // redraw the icons for the new line: the game's cup icon set-up (page, 1)
-+    return CallGuest(ctx, {GuestCall{GameFn(0x491674, 0x494b44), {ctx.x[19], 1}}});
++    return false;
++}
++bool H_AcceptMask(RecompHooks::HookContext& ctx, const Site&) {
++    // Cup / course screen accepted-buttons mask: "orr w8, w8, #0x600" becomes | 0x418 (plugin 0x50ad70 / 0x50ae04).
++    ctx.x[8] = static_cast<u32>(ctx.x[8]) | 0x418u;
++    ctx.pc += 4;
++    return true;
++}
++
++bool H_CupUpdate(RecompHooks::HookContext& ctx, const Site&) {
++    // Entry of the cup page update (x0 = page), plugin FUN_17190 + its stub: CTGP's paging runs first; in state 6 (CTGP's line
++    // change) the game's update is skipped. Page fields (4.0.1 = 3.0.4): state +0x124, cursor +0x5a8, anims [+0x110] (the line
++    // change one at +0x58), flags +0x1a8, cursor object +0x1b0.
++    const u64 page = ctx.x[0];
++    CupPage pg;
++    {
++        std::scoped_lock lk{g_pages_lock};
++        const auto it = g_pages.find(page);
++        if (it == g_pages.end() || !it->second.complete) return false;
++        pg = it->second;
++    }
++    if (g_cup.vanilla) return false;
++    auto& mem = ctx.system.ApplicationMemory();
++    const u32 state = mem.Read32(page + 0x124);
++    const u64 anim = mem.Read64(mem.Read64(page + 0x110) + 0x58);
++    const u32 cursor = mem.Read32(page + 0x5a8);
++    const u64 cursor_obj = mem.Read64(page + 0x1b0);
++    const UiFns ui = Ui();
++    struct Script {
++        int step = 0;
++        bool forward = false;
++        u64 sel = 0;
++    };
++    auto sc = std::make_shared<Script>();
++    const u64 ret = ctx.x[30];
++    auto* sys = &ctx.system;
++    // The state-6 skip happens after the script (the game function returns at once then).
++    auto done = [page, ret, sys](RecompHooks::HookContext& r) {
++        if (sys->ApplicationMemory().Read32(page + 0x124) == 6) r.pc = ret; // return from the game's update
++    };
++    return CallGuestSeq(ctx, [=](u64 res, GuestCall& next) mutable {
++        auto& m = sys->ApplicationMemory();
++        switch (sc->step) {
++        case 0: // is the line-change animation playing?
++            sc->step = 1;
++            next = {Fn(ui.anim_playing), {anim}};
++            return true;
++        case 1: {
++            const bool playing = (res & 1) != 0;
++            if (state == 0) {
++                if (playing) break;
++                // pad trigger bits (plugin reads pad(0)+0xc; 64-bit +0x10)
++                sc->step = 2;
++                next = {Fn(ui.pad), {0}};
++                return true;
++            }
++            if (state == 6 && !playing) { // line change finished: select the icon again, redraw, back to state 0
++                sc->step = 10;
++                next = {Fn(ui.sel_icon), {page}};
++                return true;
++            }
++            break;
++        }
++        case 2: {
++            const u32 trig = m.Read32(res + 0x10);
++            const bool r = (trig & 0x1000) != 0, l = (trig & 0x800) != 0;
++            if ((!r && !l) || m.Read32(cursor_obj + 0x28) == 5 || cursor > 0xb) {
++                sc->step = 30; // just the hint visibility
++                next = {Fn(ui.set_visible), {pg.change_icon, cursor < 0xc ? 1u : 0u}};
++                return true;
++            }
++            sc->forward = r;
++            if (r) NextLine(); else PrevLine();
++            LOG_INFO(Core_ARM, "CTGP: cup line {}", g_cup.line);
++            sc->step = 3;
++            next = {Fn(ui.anim_play), {anim, sc->forward ? 0u : 1u}, true, 1.0f};
++            return true;
++        }
++        case 3:
++            sc->step = 4;
++            next = {Fn(ui.line_reset), {cursor_obj, 0}};
++            return true;
++        case 4:
++            m.Write32(page + 0x1a8, m.Read32(page + 0x1a8) & 0x7fffffffu);
++            sc->step = 30;
++            next = {Fn(ui.page_state), {page, 6}};
++            return true;
++        case 10: {
++            const u64 sel = res;
++            const u32 idx = sel ? m.Read32(sel + 0x98) : 0xffffffffu;
++            m.Write32(page + 0x1a8, m.Read32(page + 0x1a8) | 0x80000000u);
++            sc->step = 11;
++            next = {Fn(ui.line_set), {cursor_obj, 0, idx, 0x100, 1, 0}};
++            return true;
++        }
++        case 11:
++            sc->step = 12;
++            next = {Fn(ui.icon_setup), {page, 1}};
++            return true;
++        case 12:
++            sc->step = 30;
++            next = {Fn(ui.page_state), {page, 0}};
++            return true;
++        }
++        return false;
++    }, done);
 +}
 +
 +struct NamedHandler {
@@ -2160,13 +2584,20 @@ index 0000000000..21902d8fdb
 +    {"name_getter", H_NameGetter}, {"scene_labels", H_SceneLabels}, {"cup_label", H_CupLabel},   {"cup_select", H_CupSelect},
 +    {"gp_slot", H_GpSlot},         {"gp_labels", H_GpLabels},       {"bgm_index", H_BgmIndex},   {"music_path", H_MusicPath},
 +    {"mapobj_path", H_MapObjPath}, {"speed_load", H_SpeedLoad},     {"speed_scale", H_SpeedScale}, {"timer_limit", H_TimerLimit},
-+    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_input", H_CupInput},
++    {"cup_icon_set", H_CupIconSet}, {"cup_decided", H_CupDecided},  {"cup_update", H_CupUpdate},
++    {"cup_page_create", H_CupPageCreate}, {"cup_icons_set", H_CupIconsSet}, {"cup_line_toggle", H_CupLineToggle},
++    {"accept_mask", H_AcceptMask}, {"cup_anims", H_CupAnims}, {"scene_course", H_SceneCourse},
++    {"slot_course", H_SlotCourse}, {"slot_platform", H_SlotPlatform}, {"slot_name", H_SlotName},
 +};
 +
 +bool RunSite(RecompHooks::HookContext& ctx, const Site& site, bool is304, Handler handler) {
-+    if (t_resume_pc && t_resume_pc == ctx.pc) { // back from guest calls this hook made: let the instruction run
++    if (t_resume_skips > 0) {
++        if (t_resume_pc == ctx.pc) { // back from guest calls this hook made: let the instruction run
++            if (--t_resume_skips == 0) t_resume_pc = 0;
++            return false;
++        }
++        t_resume_skips = 0; // execution has moved on
 +        t_resume_pc = 0;
-+        return false;
 +    }
 +    u64* x = ctx.x;
 +    switch (site.act) {
@@ -2279,6 +2710,9 @@ index 0000000000..21902d8fdb
 +        if (!off) continue;
 +        const Site* site = &s;
 +        Handler handler = nullptr;
++        // KARTRECOMP_CTGP_SKIP=name,name: leave those handlers out (to find which one a problem comes from)
++        static const std::string skip = [] { const char* v = std::getenv("KARTRECOMP_CTGP_SKIP"); return v ? "," + std::string(v) + "," : std::string(); }();
++        if (site->act == Act::Call && !skip.empty() && skip.find("," + std::string(site->handler) + ",") != std::string::npos) continue;
 +        if (site->act == Act::Call) {
 +            for (const NamedHandler& h : kHandlers)
 +                if (std::strcmp(h.name, site->handler) == 0) handler = h.fn;
@@ -2290,6 +2724,15 @@ index 0000000000..21902d8fdb
 +        RecompHooks::Install(main_base + off,
 +                             [site, is304, handler](RecompHooks::HookContext& ctx) { return RunSite(ctx, *site, is304, handler); });
 +        ++installed;
++    }
++    if (std::getenv("KARTRECOMP_CTGP_TRACE_PARTS")) {
++        // debug: every UI part set-up with its pane name (finds panes a layout lacks)
++        RecompHooks::Install(main_base + Ui().part_init, [](RecompHooks::HookContext& ctx) {
++            auto& mem = ctx.system.ApplicationMemory();
++            const u64 str = ctx.x[3] ? mem.Read64(ctx.x[3] + 8) : 0;
++            LOG_INFO(Core_ARM, "CTGP trace: part set-up layout {:#x} pane {}", ctx.x[2], str ? mem.ReadCString(str, 64) : "?");
++            return false;
++        });
 +    }
 +    LOG_INFO(Core_ARM, "CTGP: {} courses, {} cups, {} hooks for {}", g_courses.size(), g_cups.size(), installed,
 +             is304 ? "3.0.4" : "4.0.1");
@@ -2362,10 +2805,10 @@ index 0000000000..1dedb70831
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
 new file mode 100644
-index 0000000000..071baa2ad8
+index 0000000000..ea05bb5bb5
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_sites.inc
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,141 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
 +// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
@@ -2454,17 +2897,19 @@ index 0000000000..071baa2ad8
 +CTGP_SITE(0x415c1c, 0x4179cc, Cmp, 8, 0xbc, 0x0, "", "fill loop (steps of 2) up to 0xbc")
 +CTGP_SITE(0x1acb0, 0x1b4ac, Call, 0, 0x0, 0x0, "name_getter", "0x1b4ac")
 +CTGP_SITE(0x4a37f0, 0x4a6b74, Clamp, 8, 0x0, 0x0, "", "0x4e40dc")
-+CTGP_SITE(0x4a0730, 0x4a3ab4, Call, 0, 0x1, 0x0, "scene_labels", "0x4e1454 (plugin swapped name/platform and skipped +1; intent kept)")
++CTGP_SITE(0x4a0708, 0x4a3a8c, Call, 0, 0x1, 0x0, "scene_course", "0x4e1434 (the scene's own course index instead of the cup record's)")
++CTGP_SITE(0x4a0730, 0x4a3ab4, Call, 0, 0x2, 0x0, "scene_labels", "0x4e1454 (plugin swapped name/platform and skipped +1; intent kept)")
 +CTGP_SITE(0x443cc4, 0x446158, Field, 0, 0xb40113, 0x0, "", "0x47aaf0")
 +CTGP_SITE(0x443cd8, 0x44616c, Field, 8, 0xb40113, 0x1, "", "0x47ab04")
 +CTGP_SITE(0x443cec, 0x446180, Field, 0, 0xb40113, 0x1, "", "0x47ab1c")
-+CTGP_SITE(0x41dd40, 0x41fd6c, Call, 0, 0x2, 0x0, "cup_label", "0x451f38 (function: cup name label)")
-+CTGP_SITE(0x494f38, 0x498408, Call, 0, 0x3, 0x0, "cup_select", "0x4d460c")
-+CTGP_SITE(0x439ea8, 0x43c33c, Field, 8, 0x114, 0x1, "", "0x470208")
-+CTGP_SITE(0x439ebc, 0x43c350, Field, 0, 0x114, 0x1, "", "0x470224")
-+CTGP_SITE(0x439ef4, 0x43c388, Field, 8, 0x114, 0x0, "", "0x47025c")
-+CTGP_SITE(0x4f7f58, 0x4fb624, Call, 0, 0x4, 0x0, "gp_slot", "0x5432f8 (Grand Prix course list; after the load of the course index)")
-+CTGP_SITE(0x4f7f74, 0x4fb640, Call, 0, 0x5, 0x0, "gp_labels", "0x543310 / 0x543314 (after the load of both labels)")
++CTGP_SITE(0x41dd40, 0x41fd6c, Call, 0, 0x3, 0x0, "cup_label", "0x451f38 (function: cup name label)")
++CTGP_SITE(0x494f38, 0x498408, Call, 0, 0x4, 0x0, "cup_select", "0x4d460c")
++CTGP_SITE(0x439e70, 0x43c304, Call, 8, 0x5, 0x0, "slot_course", "0x4701e4 (after 'ldr w8, [x20]': the course the listed one stands for)")
++CTGP_SITE(0x439ea8, 0x43c33c, Call, 8, 0x6, 0x0, "slot_platform", "0x470208")
++CTGP_SITE(0x439ebc, 0x43c350, Call, 0, 0x7, 0x0, "slot_platform", "0x470224")
++CTGP_SITE(0x439ef4, 0x43c388, Call, 8, 0x8, 0x0, "slot_name", "0x47025c")
++CTGP_SITE(0x4f7f58, 0x4fb624, Call, 0, 0x9, 0x0, "gp_slot", "0x5432f8 (Grand Prix course list; after the load of the course index)")
++CTGP_SITE(0x4f7f74, 0x4fb640, Call, 0, 0xa, 0x0, "gp_labels", "0x543310 / 0x543314 (after the load of both labels)")
 +CTGP_SITE(0x417714, 0x4194c4, Field, 20, 0x15, 0x7, "", "0x44b4d0")
 +CTGP_SITE(0x4172b8, 0x419068, Field, 20, 0x115, 0x7, "", "0x44b040")
 +CTGP_SITE(0x49e358, 0x4a16dc, Field, 21, 0x1a00114, 0x0, "", "0x4de824")
@@ -2478,31 +2923,39 @@ index 0000000000..071baa2ad8
 +CTGP_SITE(0x50af58, 0x50e66c, Field, 8, 0x143c0200, 0x3, "", "0x558780")
 +CTGP_SITE(0x87c0a8, 0x86f610, Field, 8, 0x1a00114, 0x4, "", "0x906df8")
 +CTGP_SITE(0x384850, 0x385cb4, Field, 8, 0x8, 0x6, "", "0x3ac31c")
-+CTGP_SITE(0x9b124, 0x9c07c, Call, 0, 0x6, 0x0, "bgm_index", "0xa4a4c (after the load of the course index: music settings course)")
-+CTGP_SITE(0x605c44, 0x5f8ea0, Call, 0, 0x7, 0x0, "music_path", "0x669480 (file open: track music and per-track streams)")
-+CTGP_SITE(0x62ff64, 0x6231c0, Call, 0, 0x8, 0x0, "mapobj_path", "0x6953e4 (course-local MapObj files)")
-+CTGP_SITE(0x10a49c, 0x10b95c, Call, 0, 0x9, 0x0, "speed_load", "0x11f830 (SpeedMultiplier from the course map)")
-+CTGP_SITE(0x39981c, 0x39b978, Call, 0, 0xa, 0x0, "timer_limit", "0x3c45bc (no time limit on CTGP tracks)")
-+CTGP_SITE(0x259cc, 0x261c8, Call, 2, 0xb, 0x0, "speed_scale", "0x278e8")
-+CTGP_SITE(0x20dac, 0x215a8, Call, 1, 0xc, 0x0, "speed_scale", "0x226f8")
-+CTGP_SITE(0x20f8c, 0x21788, Call, 0, 0xd, 0x0, "speed_scale", "0x227f8")
-+CTGP_SITE(0x2102c, 0x21828, Call, 1, 0xe, 0x0, "speed_scale", "0x22898")
-+CTGP_SITE(0x32bdc, 0x334b4, Call, 1, 0xf, 0x0, "speed_scale", "0x354f8")
-+CTGP_SITE(0x3796c, 0x38248, Call, 1, 0x10, 0x0, "speed_scale", "0x3a558")
-+CTGP_SITE(0x1818ac, 0x182e2c, Call, 1, 0x11, 0x0, "speed_scale", "0x19d648 (3.0.4 field 0x428, checked by hand)")
-+CTGP_SITE(0x0, 0x182e40, Call, 0, 0x12, 0x0, "speed_scale", "0x19d690 (path only in 4.0.1)")
-+CTGP_SITE(0x1818f4, 0x182e7c, Call, 0, 0x13, 0x0, "speed_scale", "0x19d690 (3.0.4 field 0x428, checked by hand)")
-+CTGP_SITE(0x4396f0, 0x43bb84, Call, 0, 0x14, 0x0, "cup_icon_set", "0x46fa74 (CupIcon::set, after the cup id is stored in the icon)")
-+CTGP_SITE(0x491b20, 0x494ff0, Call, 0, 0x15, 0x0, "cup_decided", "0x4d0b48 (cup chosen)")
-+CTGP_SITE(0x493238, 0x496708, Call, 0, 0x16, 0x0, "cup_input", "0x4d268c / 0x4d27fc.. (L/R paging; the game's line toggle moves to bit 9)")
++CTGP_SITE(0x9b124, 0x9c07c, Call, 0, 0xb, 0x0, "bgm_index", "0xa4a4c (after the load of the course index: music settings course)")
++CTGP_SITE(0x605c44, 0x5f8ea0, Call, 0, 0xc, 0x0, "music_path", "0x669480 (file open: track music and per-track streams)")
++CTGP_SITE(0x62ff64, 0x6231c0, Call, 0, 0xd, 0x0, "mapobj_path", "0x6953e4 (course-local MapObj files)")
++CTGP_SITE(0x10a49c, 0x10b95c, Call, 0, 0xe, 0x0, "speed_load", "0x11f830 (SpeedMultiplier from the course map)")
++CTGP_SITE(0x39981c, 0x39b978, Call, 0, 0xf, 0x0, "timer_limit", "0x3c45bc (no time limit on CTGP tracks)")
++CTGP_SITE(0x259cc, 0x261c8, Call, 2, 0x10, 0x0, "speed_scale", "0x278e8")
++CTGP_SITE(0x20dac, 0x215a8, Call, 1, 0x11, 0x0, "speed_scale", "0x226f8")
++CTGP_SITE(0x20f8c, 0x21788, Call, 0, 0x12, 0x0, "speed_scale", "0x227f8")
++CTGP_SITE(0x2102c, 0x21828, Call, 1, 0x13, 0x0, "speed_scale", "0x22898")
++CTGP_SITE(0x32bdc, 0x334b4, Call, 1, 0x14, 0x0, "speed_scale", "0x354f8")
++CTGP_SITE(0x3796c, 0x38248, Call, 1, 0x15, 0x0, "speed_scale", "0x3a558")
++CTGP_SITE(0x1818ac, 0x182e2c, Call, 1, 0x16, 0x0, "speed_scale", "0x19d648 (3.0.4 field 0x428, checked by hand)")
++CTGP_SITE(0x0, 0x182e40, Call, 0, 0x17, 0x0, "speed_scale", "0x19d690 (path only in 4.0.1)")
++CTGP_SITE(0x1818f4, 0x182e7c, Call, 0, 0x18, 0x0, "speed_scale", "0x19d690 (3.0.4 field 0x428, checked by hand)")
++CTGP_SITE(0x4396f0, 0x43bb84, Call, 0, 0x19, 0x0, "cup_icon_set", "0x46fa74 (CupIcon::set, after the cup id is stored in the icon)")
++CTGP_SITE(0x491b20, 0x494ff0, Call, 0, 0x1a, 0x0, "cup_decided", "0x4d0b48 (cup chosen)")
++CTGP_SITE(0x493238, 0x496708, Call, 0, 0x1b, 0x0, "cup_line_toggle", "0x4d27fc / 0x4d287c / 0x4d2848.. (the game's own line toggle moves to bit 9)")
++CTGP_SITE(0x490de8, 0x4942b8, Call, 0, 0x1c, 0x0, "cup_anims", "0x4cfde8 (FUNC: 12 animation groups, + CTGP's Scroll_RL / Scroll_LR)")
++CTGP_SITE(0x4931f8, 0x4966c8, Call, 0, 0x1d, 0x0, "cup_update", "0x4d268c (CTGP's L/R paging, FUN_17190)")
++CTGP_SITE(0x4e2e60, 0x4e6588, Call, 0, 0x1e, 0x0, "cup_page_create", "0x52b300 (cup page with Random button)")
++CTGP_SITE(0x494610, 0x497ae0, Call, 0, 0x1f, 0x0, "cup_page_create", "0x4d3c20")
++CTGP_SITE(0x4941ec, 0x4976bc, Call, 0, 0x20, 0x0, "cup_page_create", "0x4d37b0")
++CTGP_SITE(0x491890, 0x494d60, Call, 0, 0x21, 0x0, "cup_icons_set", "0x4d08e0 (CTGP's 8 icons: cups 0x18..0x1f)")
++CTGP_SITE(0x4c644c, 0x4c9958, Call, 0, 0x22, 0x0, "accept_mask", "0x50ad70")
++CTGP_SITE(0x4c64f8, 0x4c9a04, Call, 0, 0x23, 0x0, "accept_mask", "0x50ae04")
 +CTGP_SITE(0x403f54, 0x405fa4, Set, 3, 0x300, 0x0, "", "0x436928 (0x96 -> 0x300)")
 +CTGP_SITE(0x404740, 0x406794, Set, 3, 0x150, 0x0, "", "0x437144 (0x46 -> 0x150)")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
-index 0000000000..11a0a8b666
+index 0000000000..9d3bb0ff5f
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.cpp
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,188 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <array>
 +#include "core/arm/recomp/host_hooks.h"
@@ -2633,7 +3086,10 @@ index 0000000000..11a0a8b666
 +        if (trap.fn) {
 +            trap.fn(ctx);
 +        }
-+        ctx.pc = trap.real_lr;
++        // A trap function may send execution elsewhere itself (e.g. chain into the next guest call); otherwise return normally.
++        if (ctx.pc == pc) {
++            ctx.pc = trap.real_lr;
++        }
 +        return true;
 +    }
 +    if (!FilterMayContain(pc)) {
@@ -2690,7 +3146,7 @@ index 0000000000..11a0a8b666
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/host_hooks.h b/src/core/arm/recomp/host_hooks.h
 new file mode 100644
-index 0000000000..062b669ceb
+index 0000000000..0e0ebdf50a
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.h
 @@ -0,0 +1,60 @@
@@ -2744,7 +3200,7 @@ index 0000000000..062b669ceb
 +/// guest return address (x30) with a trap address no module owns, so the
 +/// callee's RET cannot chain straight back into the caller. When the trap is
 +/// reached, fn runs with x0 = the result, then execution resumes at the real
-+/// return address. Call from an entry hook only.
++/// return address (unless fn set pc itself). Call from an entry hook only.
 +void TrapReturn(HookContext& ctx, std::function<void(HookContext&)> fn);
 +
 +/// Fast check for the dispatcher; false until the first hook is installed.

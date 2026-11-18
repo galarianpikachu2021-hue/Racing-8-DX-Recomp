@@ -89,15 +89,17 @@
 0x1b4ac call name_getter
 # Names, platforms, pictures and cup data of CTGP's tracks (plugin installer 0x8ccc; agent_courseid analysis).
 0x4a6b70 clamp w8 | 0x4e40dc
+0x4a3a8c call scene_course | 0x4e1434 (the scene's own course index instead of the cup record's)
 0x4a3ab4 call scene_labels | 0x4e1454 (plugin swapped name/platform and skipped +1; intent kept)
 0x446154 field w0 x19+0xb4 name | 0x47aaf0
 0x446168 field w8 x19+0xb4 platform | 0x47ab04
 0x44617c field w0 x19+0xb4 platform | 0x47ab1c
 0x41fd6c call cup_label | 0x451f38 (function: cup name label)
 0x498408 call cup_select | 0x4d460c
-0x43c338 field w8 x20+0x0 platform | 0x470208
-0x43c34c field w0 x20+0x0 platform | 0x470224
-0x43c384 field w8 x20+0x0 name | 0x47025c
+0x43c304 call slot_course w8 | 0x4701e4 (after "ldr w8, [x20]": the course the listed one stands for)
+0x43c33c call slot_platform w8 | 0x470208
+0x43c350 call slot_platform w0 | 0x470224
+0x43c388 call slot_name w8 | 0x47025c
 0x4fb624 call gp_slot | 0x5432f8 (Grand Prix course list; after the load of the course index)
 0x4fb640 call gp_labels | 0x543310 / 0x543314 (after the load of both labels)
 0x4194c0 field x20 w21 picture | 0x44b4d0
@@ -131,7 +133,15 @@
 # Cup screen paging (plugin installers 0x8ccc / 0x94c4: FUN_166bc remap, FUN_17190 input; first version without the 8 extra icons).
 0x43bb84 call cup_icon_set | 0x46fa74 (CupIcon::set, after the cup id is stored in the icon)
 0x494ff0 call cup_decided | 0x4d0b48 (cup chosen)
-0x496708 call cup_input | 0x4d268c / 0x4d27fc.. (L/R paging; the game's line toggle moves to bit 9)
+0x496708 call cup_line_toggle | 0x4d27fc / 0x4d287c / 0x4d2848.. (the game's own line toggle moves to bit 9)
+0x4942b8 call cup_anims | 0x4cfde8 (FUNC: 12 animation groups, + CTGP's Scroll_RL / Scroll_LR)
+0x4966c8 call cup_update | 0x4d268c (CTGP's L/R paging, FUN_17190)
+0x4e6588 call cup_page_create | 0x52b300 (cup page with Random button)
+0x497ae0 call cup_page_create | 0x4d3c20
+0x4976bc call cup_page_create | 0x4d37b0
+0x494d60 call cup_icons_set | 0x4d08e0 (CTGP's 8 icons: cups 0x18..0x1f)
+0x4c9958 call accept_mask | 0x50ad70
+0x4c9a04 call accept_mask | 0x50ae04
 # Resource slot counts raised by the plugin (installer 0x94c4): the menu loads a picture for each of the 188 course ids.
 0x405fa4 set x3 0x300 | 0x436928 (0x96 -> 0x300)
 0x406794 set x3 0x150 | 0x437144 (0x46 -> 0x150)
