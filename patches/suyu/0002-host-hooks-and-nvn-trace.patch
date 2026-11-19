@@ -1120,7 +1120,7 @@ index 408daa6839..34d54f6ae8 100644
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..ee42c54a1b 100644
+index 67a55424e9..5e657c1f05 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -20,6 +20,15 @@
@@ -1305,7 +1305,17 @@ index 67a55424e9..ee42c54a1b 100644
          if (kSlowPathAbove != 0 && kSlowPathAbove < bridge.address_space_max &&
              TotalStaticBlocks() >= kSlowPathAfterBlocks) {
              bridge.address_space_max = kSlowPathAbove;
-@@ -1168,7 +1315,7 @@ struct ArmRecomp::Impl {
+@@ -1031,7 +1178,8 @@ struct ArmRecomp::Impl {
+     void ActivateGuardGen(Kernel::KProcess& process, u64 key) {
+         // Watch every page of each stable module's span: GG1 stores there go to
+         // HostStore, and Core::Memory reports writes and raw pointers there.
+-        auto& entries = process.GetPageTable().GetImpl().entries;
++        auto& entries = process.GetMemory().CurrentPageTable() ? process.GetMemory().CurrentPageTable()->entries
++                                                                : process.GetPageTable().GetImpl().entries;
+         const auto watch = [&entries](u64 va, u64 size) {
+             const u64 first = va >> Memory::YUZU_PAGEBITS;
+             const u64 last = (va + size - 1) >> Memory::YUZU_PAGEBITS;
+@@ -1168,7 +1316,7 @@ struct ArmRecomp::Impl {
      u64 ModuleBaseFor(Kernel::KThread* thread, u64 pc) {
          if (!modules_read) {
              modules_read = true;
@@ -1314,7 +1324,7 @@ index 67a55424e9..ee42c54a1b 100644
                  modules = FindModules(process);
                  g_counters.RecordModules(modules);
                  // Now that the loader has placed everything, tell each image
-@@ -1179,6 +1326,7 @@ struct ArmRecomp::Impl {
+@@ -1179,6 +1327,7 @@ struct ArmRecomp::Impl {
                      for (const auto& [module_base, name] : modules) {
                          setter(index++, name.c_str(), module_base);
                      }
@@ -1322,7 +1332,7 @@ index 67a55424e9..ee42c54a1b 100644
                  }
              }
          }
-@@ -1585,7 +1733,7 @@ struct ArmRecomp::Impl {
+@@ -1585,7 +1734,7 @@ struct ArmRecomp::Impl {
      }
  
      void SampleDiagnostics(Kernel::KThread* thread) {
@@ -1331,7 +1341,7 @@ index 67a55424e9..ee42c54a1b 100644
          auto* process = thread->GetOwnerProcess();
          if (!process) return;
          auto& memory = process->GetMemory();
-@@ -1626,7 +1774,7 @@ struct ArmRecomp::Impl {
+@@ -1626,7 +1775,7 @@ struct ArmRecomp::Impl {
      ExclusiveMonitor* exclusive_monitor{};
      // Last guest thread run on this core, so a reservation is voided on a real
      // context switch and left alone on an ordinary return to the host.
@@ -1340,7 +1350,7 @@ index 67a55424e9..ee42c54a1b 100644
      std::size_t core_index{};
      bool uses_wall_clock{};
  #ifndef SUYU_NO_JIT
-@@ -1636,6 +1784,24 @@ struct ArmRecomp::Impl {
+@@ -1636,6 +1785,24 @@ struct ArmRecomp::Impl {
      bool fallback_unavailable{false};
  };
  
@@ -1365,7 +1375,7 @@ index 67a55424e9..ee42c54a1b 100644
  ArmRecomp::ArmRecomp(System& system, bool uses_wall_clock, RecompLookupFn lookup,
                       Kernel::KProcess* process, ExclusiveMonitor* exclusive_monitor,
                       std::size_t core_index)
-@@ -1789,6 +1955,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
+@@ -1789,6 +1956,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
  #endif
  }
  
@@ -1376,7 +1386,7 @@ index 67a55424e9..ee42c54a1b 100644
  HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // A context switch voids any outstanding reservation. A thread preempted
      // between its LDXR and STXR would otherwise have the STXR succeed against a
-@@ -1798,8 +1968,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1798,8 +1969,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // Only on an actual switch: this backend returns to the host constantly
      // (chain budget, SVCs), so clearing on every entry would void reservations
      // the same thread is still in the middle of.
@@ -1389,7 +1399,7 @@ index 67a55424e9..ee42c54a1b 100644
          if (impl->exclusive_monitor) {
              impl->exclusive_monitor->ClearExclusive(impl->core_index);
          }
-@@ -1870,7 +2042,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1870,7 +2043,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // their per-entry check. Module bases are set by now (above, or by the
      // explicit prepare callback), and no block of this process has run yet.
      if (RecompGuardGen::Watching()) {
@@ -1398,7 +1408,7 @@ index 67a55424e9..ee42c54a1b 100644
              const u64 key = process->GetProcessId() | (u64{1} << 63);
              if (!RecompGuardGen::IsActive(key)) {
                  impl->ActivateGuardGen(*process, key);
-@@ -1904,18 +2076,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1904,18 +2077,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          impl->in_fallback = false;
      }
      if (impl->in_fallback) {
@@ -1426,7 +1436,7 @@ index 67a55424e9..ee42c54a1b 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +2105,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2106,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -1434,7 +1444,7 @@ index 67a55424e9..ee42c54a1b 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +2145,81 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1968,13 +2146,81 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -1517,7 +1527,7 @@ index 67a55424e9..ee42c54a1b 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2246,9 +2491,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2246,9 +2492,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               "recomp: no JIT fallback available at PC {:#x}; thread cannot "
                               "continue",
                               impl->ctx.pc);
@@ -1540,7 +1550,7 @@ index 67a55424e9..ee42c54a1b 100644
          }
  
          // Dump periodically: teardown is not guaranteed to run (the emulated
-@@ -2258,6 +2515,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2516,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -1550,7 +1560,7 @@ index 67a55424e9..ee42c54a1b 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2306,7 +2566,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2306,7 +2567,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              impl->ctx.pending_svc = kNoPendingSvc;
              // Forward the guest instruction-cache operation to each CPU interface.
              for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1559,7 +1569,7 @@ index 67a55424e9..ee42c54a1b 100644
              }
              impl->ctx.pc += 4;
              impl->ctx.halted = 0;
-@@ -2350,7 +2610,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2350,7 +2611,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               unsupported_opcode, impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -1569,7 +1579,7 @@ index 67a55424e9..ee42c54a1b 100644
          }
  
          if (impl->ctx.pending_svc != kNoPendingSvc) {
-@@ -2404,7 +2665,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+@@ -2404,7 +2666,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
          const u64 address = impl->ctx.pending_svc;
          impl->ctx.pending_svc = kNoPendingSvc;
          for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -1578,7 +1588,7 @@ index 67a55424e9..ee42c54a1b 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2798,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2799,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -7863,10 +7873,10 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
 new file mode 100644
-index 0000000000..49dabed072
+index 0000000000..e89c3c66c4
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.cpp
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,379 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +
@@ -7881,6 +7891,7 @@ index 0000000000..49dabed072
 +#include <vector>
 +
 +#include "common/host_memory.h"
++#include "common/page_table.h"
 +#include "common/logging/log.h"
 +#include "core/arm/arm_interface.h"
 +#include "core/arm/exclusive_monitor.h"
@@ -8006,6 +8017,8 @@ index 0000000000..49dabed072
 +
 +struct State {
 +    KProcess* process = nullptr;
++    /// The page table the recompiled code and Core::Memory read: the runtime's, filled by the backend (not the process's).
++    std::unique_ptr<Common::PageTable> page_table;
 +    std::unique_ptr<HostBackend> backend;
 +    PhysicalAllocator physical;
 +    std::unique_ptr<AddressSpace> memory;
@@ -8121,10 +8134,14 @@ index 0000000000..49dabed072
 +    l.stack_size = pt.GetStackRegionSize();
 +    l.kmap_start = GetInteger(pt.GetKernelMapRegionStart());
 +    l.kmap_size = pt.GetKernelMapRegionSize();
-+    st->backend = std::make_unique<HostBackend>(process.GetMemory(), pt.GetImpl(), system.DeviceMemory());
++    st->page_table = std::make_unique<Common::PageTable>();
++    st->page_table->Resize(39, Core::Memory::YUZU_PAGEBITS);
++    st->backend = std::make_unique<HostBackend>(process.GetMemory(), *st->page_table, system.DeviceMemory());
 +    TakeApplicationPool(kernel, st->physical);
 +    st->memory = std::make_unique<AddressSpace>(l, *st->backend, st->physical);
 +    ImportProcess(process, *st->memory);
++    // From here on the memory view is the runtime's table (every imported page was mapped into it just now).
++    process.GetMemory().SetCurrentPageTable(*st->page_table, true);
 +    st->scheduler = std::make_unique<CoreScheduler>(4, true); // each thread has its own runner: moves wait for its yield
 +    st->executor = std::make_unique<RecompExecutor>(system, process);
 +    st->scheduler->SetPreemptCallback([exec = st->executor.get()](CoreScheduler::Thread* t) { exec->Interrupt(t->Core()); });
@@ -14752,10 +14769,26 @@ index 3cc84acfdf..27d27fc74d 100644
      process.LoadModule(system.Kernel(), std::move(codeset), load_base);
      // Where this module's code starts, keyed by its build ID, so a recompiled
 diff --git a/src/core/memory.cpp b/src/core/memory.cpp
-index 37aa7a876e..5101ed3497 100644
+index 37aa7a876e..db43751dff 100644
 --- a/src/core/memory.cpp
 +++ b/src/core/memory.cpp
-@@ -759,6 +759,7 @@ struct Memory::Impl {
+@@ -50,9 +50,13 @@ struct Memory::Impl {
+     explicit Impl(Core::System& system_) : system{system_} {}
+ 
+     void SetCurrentPageTable(Kernel::KProcess& process) {
+-        current_page_table = &process.GetPageTable().GetImpl();
++        SetCurrentPageTable(process.GetPageTable().GetImpl(), process.IsApplication());
++    }
++
++    void SetCurrentPageTable(Common::PageTable& table, bool application) {
++        current_page_table = &table;
+ 
+-        if (process.IsApplication() && Settings::IsFastmemEnabled()) {
++        if (application && Settings::IsFastmemEnabled()) {
+             current_page_table->fastmem_arena = system.DeviceMemory().buffer.VirtualBasePointer();
+         } else {
+             current_page_table->fastmem_arena = nullptr;
+@@ -759,6 +763,7 @@ struct Memory::Impl {
                  [[likely]] {
                  return;
              }
@@ -14763,7 +14796,7 @@ index 37aa7a876e..5101ed3497 100644
              current_area = system.GPU().OnCPURead(address, size);
          });
      }
-@@ -791,7 +792,7 @@ struct Memory::Impl {
+@@ -791,7 +796,7 @@ struct Memory::Impl {
              if (current_area.last_address != subaddress) {
                  // Short circuit the need to check for address/size
                  auto const do_collection = (address != 0 && size != 0)
@@ -14772,7 +14805,7 @@ index 37aa7a876e..5101ed3497 100644
                  if (do_collection) {
                      current_area.last_address = subaddress;
                  } else {
-@@ -822,6 +823,7 @@ struct Memory::Impl {
+@@ -822,6 +827,7 @@ struct Memory::Impl {
                  sys_core_guard.unlock();
              }
          };
@@ -14780,6 +14813,36 @@ index 37aa7a876e..5101ed3497 100644
          auto& gpu = system.GPU();
          gpu_device_memory->ApplyOpOnPointer(
              p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size); });
+@@ -858,6 +864,14 @@ void Memory::SetCurrentPageTable(Kernel::KProcess& process) {
+     impl->SetCurrentPageTable(process);
+ }
+ 
++void Memory::SetCurrentPageTable(Common::PageTable& table, bool fastmem) {
++    impl->SetCurrentPageTable(table, fastmem);
++}
++
++Common::PageTable* Memory::CurrentPageTable() const {
++    return impl->current_page_table;
++}
++
+ void Memory::MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
+                              Common::PhysicalAddress target, Common::MemoryPermission perms,
+                              bool separate_heap) {
+diff --git a/src/core/memory.h b/src/core/memory.h
+index c1c6a6d3d5..66c0c05fba 100644
+--- a/src/core/memory.h
++++ b/src/core/memory.h
+@@ -80,6 +80,10 @@ public:
+      * @param process The process to use the page table of.
+      */
+     void SetCurrentPageTable(Kernel::KProcess& process);
++    /// kart-recomp: a page table that is not a kernel process's (the runtime kernel's own, docs/NATIVE_KERNEL.md).
++    void SetCurrentPageTable(Common::PageTable& table, bool fastmem);
++    /// The page table the memory view reads (null before a process is loaded).
++    [[nodiscard]] Common::PageTable* CurrentPageTable() const;
+ 
+     /**
+      * Maps an allocated buffer onto a region of the emulated process address space.
 diff --git a/src/core/memory/cheat_engine.cpp b/src/core/memory/cheat_engine.cpp
 index a7dc92a2e3..6a761feb42 100644
 --- a/src/core/memory/cheat_engine.cpp
@@ -17594,10 +17657,10 @@ index 0000000000..9e51c01115
 +| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
 diff --git a/src/kart_runtime/address_space.h b/src/kart_runtime/address_space.h
 new file mode 100644
-index 0000000000..62ba6c0346
+index 0000000000..d1c47d0a4c
 --- /dev/null
 +++ b/src/kart_runtime/address_space.h
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,518 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the game process's address space (docs/NATIVE_KERNEL.md, stage 1).
 +//
@@ -17822,11 +17885,12 @@ index 0000000000..62ba6c0346
 +        Set(addr, size, Block{size, state, perm, 0, 0, 0, phys, false});
 +        return MemResult::Success;
 +    }
-+    /// Pages the process already had before the runtime took over (its loaded code): recorded, mapped again with `perm`.
++    /// Pages the process already had before the runtime took over (its loaded code): recorded and mapped with `perm`.
 +    uint32_t Import(uint64_t addr, uint64_t size, uint64_t phys, uint32_t state, uint32_t perm, uint32_t attr) {
 +        std::scoped_lock lk{mutex};
 +        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
 +        if (!AllFree(addr, size)) return MemResult::InvalidCurrentMemory;
++        backend.Map(addr, size, phys, perm); // the host view the runtime owns gets them too
 +        Set(addr, size, Block{size, state, perm, attr, 0, 0, phys, false});
 +        return MemResult::Success;
 +    }
