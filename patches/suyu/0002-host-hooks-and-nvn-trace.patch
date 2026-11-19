@@ -6943,18 +6943,30 @@ index 87e5112a20..aee595e2ea 100644
      std::mutex m_dummy_thread_mutex{};
      std::condition_variable m_dummy_thread_cv{};
 diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
-index 6363a9e0ab..b613a6512a 100644
+index 6363a9e0ab..cfb4364eb9 100644
 --- a/src/core/hle/kernel/kernel.cpp
 +++ b/src/core/hle/kernel/kernel.cpp
-@@ -42,6 +42,7 @@
+@@ -41,7 +41,9 @@
+ #include "core/hle/kernel/k_system_resource.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/hle/kernel/k_worker_task_manager.h"
++#include "core/hle/kernel/native_game.h"
  #include "core/hle/kernel/kernel.h"
 +#include "core/hle/kernel/native_threads.h"
  #include "core/hle/kernel/physical_core.h"
  #include "core/hle/result.h"
  #include "core/hle/service/server_manager.h"
-@@ -924,6 +925,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
+@@ -255,6 +257,9 @@ struct KernelCore::Impl {
+     }
+ 
+     void InitializePreemption(KernelCore& kernel) {
++        // kart-recomp: on the runtime kernel (docs/NATIVE_KERNEL.md) the game's threads are not this scheduler's: no 10 ms
++        // preemption pass over an empty scheduler.
++        if (NativeGame::Enabled()) return;
+         preemption_event = Core::Timing::CreateEvent("PreemptionCallback", [this, &kernel](s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
+             {
+                 KScopedSchedulerLock lock(kernel);
+@@ -924,6 +929,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
  }
  
  size_t KernelCore::CurrentPhysicalCoreIndex() const {
