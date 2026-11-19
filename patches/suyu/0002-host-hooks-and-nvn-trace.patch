@@ -23226,3 +23226,430 @@ index 9c31896bde..6e59ab40b1 100644
          const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
          if (!shader_info) {
              const u32 start_address{shader_config.offset};
+diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
+new file mode 100644
+index 0000000000..e7b9857ec6
+--- /dev/null
++++ b/src/core/hle/kernel/native_game.cpp
+@@ -0,0 +1,364 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "core/hle/kernel/native_game.h"
++
++#include <array>
++#include <unistd.h>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <vector>
++
++#include "common/host_memory.h"
++#include "common/logging/log.h"
++#include "core/arm/arm_interface.h"
++#include "core/arm/exclusive_monitor.h"
++#include "core/arm/recomp/arm_recomp.h"
++#include "core/core.h"
++#include "core/core_timing.h"
++#include "core/device_memory.h"
++#include "core/hle/kernel/k_memory_block.h"
++#include "core/hle/kernel/k_memory_manager.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_shared_memory.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_services.h"
++#include "core/hle/kernel/native_sync.h"
++#include "core/memory.h"
++#include "kart_runtime/game_kernel.h"
++
++namespace Kernel::NativeGame {
++namespace {
++
++using namespace KartRuntime;
++
++/// Guest pages through the host-memory view the recompiled code reads (the process's page table).
++class HostBackend final : public AddressSpace::Backend {
++public:
++    HostBackend(Core::Memory::Memory& m, Common::PageTable& p, Core::DeviceMemory& d) : memory{m}, pt{p}, device{d} {}
++    void Map(u64 va, u64 size, u64 phys, u32 perm) override {
++        memory.MapMemoryRegion(pt, va, size, phys, Perm(perm), false);
++    }
++    void Unmap(u64 va, u64 size) override { memory.UnmapRegion(pt, va, size, false); }
++    void Protect(u64 va, u64 size, u32 perm) override { memory.ProtectRegion(pt, va, size, Perm(perm)); }
++    void Clear(u64 phys, u64 size) override {
++        // As the emulated kernel clears a heap it grows (KPageTableBase::SetHeapSize): punched out of the backing, so pages the
++        // game never touches cost nothing.
++        device.buffer.ClearBackingRegion(phys - Core::DramMemoryMap::Base, size, 0);
++    }
++
++private:
++    static Common::MemoryPermission Perm(u32 p) {
++        Common::MemoryPermission out{};
++        if (p & MemPerm::Read) out |= Common::MemoryPermission::Read;
++        if (p & MemPerm::Write) out |= Common::MemoryPermission::Write;
++        return out; // execute: only with native code execution, which this build never uses
++    }
++    Core::Memory::Memory& memory;
++    Common::PageTable& pt;
++    Core::DeviceMemory& device;
++};
++
++/// The recompiled-code runners: one per game thread, so a thread that gives its virtual core up in the middle of a host call (a
++/// host hook that waits, e.g. frame pacing) keeps its registers while other threads run on that core. (Sharing the process's
++/// per-core runners broke exactly there: the waiting thread came back with another thread's state.)
++class RecompExecutor final : public Executor {
++public:
++    RecompExecutor(Core::System& s, KProcess& p) : system{s}, process{p} {}
++    int Run(GuestThread& t, int core) override {
++        auto* cpu = Runner(t, core);
++        cpu->SetCoreIndex(static_cast<size_t>(core));
++        // Another thread on this core since its last run: its exclusive reservation goes, as a context switch clears it on the
++        // console (each thread has its own runner, so the runner's own "last thread" check never sees the switch).
++        if (running[static_cast<size_t>(core) % running.size()].exchange(cpu, std::memory_order_acq_rel) != cpu)
++            process.GetExclusiveMonitor().ClearExclusive(static_cast<size_t>(core));
++        Core::ArmRecomp::SetNativeThreadToken(&t);
++        Svc::ThreadContext ctx;
++        static_assert(sizeof(ctx) == sizeof(t.ctx));
++        std::memcpy(&ctx, &t.ctx, sizeof(ctx));
++        cpu->SetContext(ctx);
++        cpu->SetTpidrroEl0(t.tls);
++        const Core::HaltReason reason = cpu->RunThread(nullptr);
++        cpu->GetContext(ctx);
++        std::memcpy(static_cast<void*>(&t.ctx), &ctx, sizeof(ctx));
++        if (True(reason & Core::HaltReason::SupervisorCall)) return static_cast<int>(cpu->GetSvcNumber());
++        if (True(reason & (Core::HaltReason::DataAbort | Core::HaltReason::PrefetchAbort))) {
++            LOG_CRITICAL(Kernel, "native kernel: thread {} stopped at pc {:#x} (abort)", t.id, t.ctx.pc);
++            t.terminate = true;
++        }
++        return -1;
++    }
++    void Interrupt(int core) override {
++        if (auto* cpu = running[static_cast<size_t>(core) % running.size()].load(std::memory_order_acquire)) cpu->SignalInterrupt(nullptr);
++    }
++    void Ended(GuestThread& t) override {
++        auto* cpu = static_cast<Core::ArmRecomp*>(t.executor_data);
++        if (!cpu) return;
++        for (auto& r : running) {
++            Core::ArmInterface* expected = cpu;
++            r.compare_exchange_strong(expected, nullptr);
++        }
++        std::scoped_lock lk{lock};
++        std::erase_if(runners, [cpu](const auto& r) { return r.get() == cpu; });
++        t.executor_data = nullptr;
++    }
++
++private:
++    Core::ArmRecomp* Runner(GuestThread& t, int core) {
++        if (t.executor_data) return static_cast<Core::ArmRecomp*>(t.executor_data);
++        auto cpu = std::make_unique<Core::ArmRecomp>(system, true, Core::GetRecompLookup(), &process, &process.GetExclusiveMonitor(),
++                                                     static_cast<size_t>(core));
++        // The first runner (the main thread's) makes the relocation pass at boot; later ones take its result. A pass of their own
++        // in the middle of the game zeroes the relocation sizes of modules the game's loader has not relocated yet (modules
++        // loaded later), whose vtables then stay empty (a call to null in the SDK's graphics code, then a crash).
++        std::scoped_lock lk{lock};
++        for (const auto& r : runners) {
++            if (r->IsPrepared()) {
++                cpu->AdoptPreparedState(*r);
++                break;
++            }
++        }
++        t.executor_data = cpu.get();
++        runners.push_back(std::move(cpu));
++        // Which host thread is which game thread (core dumps name host threads).
++        LOG_INFO(Kernel, "native kernel: thread {:#x} runs on host thread {} (entry {:#x}, priority {}, core {}, stack {:#x})", t.id,
++                 static_cast<long>(::gettid()), t.ctx.pc, t.priority, core, t.ctx.sp);
++        return runners.back().get();
++    }
++
++    Core::System& system;
++    KProcess& process;
++    std::mutex lock;
++    std::vector<std::unique_ptr<Core::ArmRecomp>> runners;
++    std::array<std::atomic<Core::ArmInterface*>, Core::Hardware::NUM_CPU_CORES> running{};
++};
++
++struct State {
++    KProcess* process = nullptr;
++    std::unique_ptr<HostBackend> backend;
++    PhysicalAllocator physical;
++    std::unique_ptr<AddressSpace> memory;
++    std::unique_ptr<CoreScheduler> scheduler;
++    std::unique_ptr<RecompExecutor> executor;
++    std::unique_ptr<GameKernel> kernel;
++};
++State* g_state = nullptr;
++Core::System* g_system = nullptr;
++
++/// The application pool, taken from the kernel's page allocator in large continuous runs.
++void TakeApplicationPool(KernelCore& kernel, PhysicalAllocator& physical) {
++    auto& mm = kernel.MemoryManager();
++    const u32 option = KMemoryManager::EncodeOption(KMemoryManager::Pool::Application, KMemoryManager::Direction::FromFront);
++    size_t chunk_pages = (256u << 20) / PageSize;
++    u64 taken = 0;
++    while (chunk_pages > 0) {
++        const KPhysicalAddress at = mm.AllocateAndOpenContinuous(chunk_pages, 1, option);
++        if (GetInteger(at) == 0) {
++            chunk_pages /= 2;
++            continue;
++        }
++        physical.AddRange(GetInteger(at), chunk_pages * PageSize);
++        taken += chunk_pages * PageSize;
++    }
++    LOG_INFO(Kernel, "native kernel: {} MiB of the application pool for the game", taken >> 20);
++}
++
++/// The pages the loader mapped (the modules) become the runtime's.
++void ImportProcess(KProcess& process, AddressSpace& memory) {
++    auto& pt = process.GetPageTable();
++    u64 addr = 0, imported = 0;
++    const u64 end = memory.GetLayout().space_start + memory.GetLayout().space_size;
++    while (addr < end) {
++        KMemoryInfo info{};
++        Svc::PageInfo page{};
++        if (pt.QueryInfo(&info, &page, addr).IsError()) break;
++        const auto svc = info.GetSvcMemoryInfo();
++        const u64 base = svc.base_address, size = svc.size;
++        const u32 state = static_cast<u32>(svc.state);
++        if (state != MemState::Free && state != MemState::Inaccessible && base >= memory.GetLayout().space_start) {
++            // Runs of contiguous physical pages.
++            u64 run_va = base, run_pa = 0, run_len = 0;
++            for (u64 va = base; va < base + size; va += PageSize) {
++                KPhysicalAddress pa{};
++                if (!pt.GetBasePageTable().GetPhysicalAddress(&pa, va)) continue;
++                if (run_len && GetInteger(pa) == run_pa + run_len && va == run_va + run_len) {
++                    run_len += PageSize;
++                    continue;
++                }
++                if (run_len) memory.Import(run_va, run_len, run_pa, state, static_cast<u32>(svc.permission), static_cast<u32>(svc.attribute));
++                run_va = va;
++                run_pa = GetInteger(pa);
++                run_len = PageSize;
++            }
++            if (run_len) memory.Import(run_va, run_len, run_pa, state, static_cast<u32>(svc.permission), static_cast<u32>(svc.attribute));
++            imported += size;
++        }
++        if (base + size <= addr) break;
++        addr = base + size;
++    }
++    LOG_INFO(Kernel, "native kernel: {} KiB of loaded modules taken over", imported >> 10);
++}
++
++} // namespace
++
++bool Enabled() {
++    static const bool on = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_KERNEL");
++        return v && *v == '1';
++    }();
++    return on;
++}
++
++KartRuntime::GameKernel* Kernel() {
++    return g_state ? g_state->kernel.get() : nullptr;
++}
++KartRuntime::AddressSpace* Memory() {
++    return g_state ? g_state->memory.get() : nullptr;
++}
++bool OnGameThread() {
++    return g_state && KartRuntime::GameKernel::Current() != nullptr;
++}
++KProcess* Process() {
++    return g_state ? g_state->process : nullptr;
++}
++
++bool Start(Core::System& system, KProcess& process, s32 priority, u64 stack_size) {
++    if (!Enabled() || g_state) return false;
++    g_system = &system;
++    auto& kernel = system.Kernel();
++    auto* st = new State{};
++    st->process = &process;
++    auto& pt = process.GetPageTable();
++    AddressSpace::Layout l;
++    l.space_start = GetInteger(pt.GetAddressSpaceStart());
++    l.space_size = pt.GetAddressSpaceSize();
++    l.code_start = GetInteger(pt.GetAliasCodeRegionStart());
++    l.code_size = pt.GetAliasCodeRegionSize();
++    l.heap_start = GetInteger(pt.GetHeapRegionStart());
++    l.heap_size = pt.GetHeapRegionSize();
++    l.alias_start = GetInteger(pt.GetAliasRegionStart());
++    l.alias_size = pt.GetAliasRegionSize();
++    l.stack_start = GetInteger(pt.GetStackRegionStart());
++    l.stack_size = pt.GetStackRegionSize();
++    l.kmap_start = GetInteger(pt.GetKernelMapRegionStart());
++    l.kmap_size = pt.GetKernelMapRegionSize();
++    st->backend = std::make_unique<HostBackend>(process.GetMemory(), pt.GetImpl(), system.DeviceMemory());
++    TakeApplicationPool(kernel, st->physical);
++    st->memory = std::make_unique<AddressSpace>(l, *st->backend, st->physical);
++    ImportProcess(process, *st->memory);
++    st->scheduler = std::make_unique<CoreScheduler>(4, true); // each thread has its own runner: moves wait for its yield
++    st->executor = std::make_unique<RecompExecutor>(system, process);
++    st->scheduler->SetPreemptCallback([exec = st->executor.get()](CoreScheduler::Thread* t) { exec->Interrupt(t->Core()); });
++
++    GameKernel::Config cfg;
++    cfg.program_id = process.GetProgramId();
++    cfg.process_id = process.GetProcessId();
++    cfg.entry = GetInteger(process.GetEntryPoint());
++    cfg.main_stack_size = stack_size;
++    cfg.main_priority = priority;
++    cfg.main_core = process.GetIdealCoreId();
++    cfg.core_mask = process.GetCoreMask();
++    cfg.priority_mask = process.GetPriorityMask();
++    cfg.total_memory = process.GetTotalUserPhysicalMemorySize(kernel);
++    cfg.tick = [&system] { return system.CoreTiming().GetClockTicks(); };
++    cfg.host_word = [&process](u64 addr) { return reinterpret_cast<u32*>(process.GetMemory().GetPointerSilent(addr)); };
++    cfg.connect_port = [&kernel](const std::string& name) { return NativeServices::ConnectToNamedPort(kernel, name); };
++    cfg.unknown_svc = [](GuestThread& t, u32 svc) {
++        LOG_ERROR(Kernel, "native kernel: system call {:#x} is not implemented (thread {}, pc {:#x})", svc, t.id, t.ctx.pc);
++    };
++    cfg.on_break = [&kernel](GuestThread& t, u32 reason, u64 a, u64 b) {
++        LOG_CRITICAL(Debug_Emulated, "native kernel: thread {:#x} broke execution at pc {:#x} lr {:#x}: reason {:#x} info {:#x} {:#x}",
++                     t.id, t.ctx.pc, t.ctx.x[30], reason, a, b);
++        // The frame-pointer chain (x29 -> {previous x29, return address}), for the caller of the abort.
++        u64 fp = t.ctx.x[29];
++        for (int i = 0; i < 24 && fp; ++i) {
++            u64 frame[2]{};
++            if (!NativeServices::Runtime(kernel).Read(fp, frame, sizeof(frame))) break;
++            LOG_CRITICAL(Debug_Emulated, "native kernel:   #{} return {:#x} (frame {:#x})", i, frame[1], fp);
++            if (frame[0] <= fp) break;
++            fp = frame[0];
++        }
++    };
++    cfg.debug_output = [](const std::string& s) { LOG_INFO(Debug_Emulated, "game: {}", s); };
++    st->kernel = std::make_unique<GameKernel>(std::move(cfg), *st->memory, NativeServices::Runtime(kernel),
++                                              NativeSync::Instance(kernel), *st->scheduler, *st->executor);
++    st->kernel->used_memory = [st] { return st->physical.Used(); };
++    st->kernel->on_reset = [&kernel](KartRuntime::Event& e) { NativeServices::OnRuntimeReset(kernel, e); };
++    // KARTRECOMP_NATIVE_KERNEL_TRACE=<file>: every system call of the game with its arguments and results.
++    if (const char* v = std::getenv("KARTRECOMP_NATIVE_KERNEL_TRACE"); v && *v) {
++        static std::FILE* trace = std::fopen(v, "w");
++        static std::mutex trace_lock;
++        st->kernel->on_svc = [](GuestThread& t, u32 svc, const std::array<u64, 31>& a, bool entering) {
++            std::scoped_lock lk{trace_lock};
++            if (entering)
++                std::fprintf(trace, "%llx %02X in %llx %llx %llx %llx pc %llx\n", (unsigned long long)t.id, svc, (unsigned long long)a[0],
++                             (unsigned long long)a[1], (unsigned long long)a[2], (unsigned long long)a[3], (unsigned long long)t.ctx.pc);
++            else
++                std::fprintf(trace, "%llx %02X out %llx %llx %llx\n", (unsigned long long)t.id, svc, (unsigned long long)t.ctx.x[0],
++                             (unsigned long long)t.ctx.x[1], (unsigned long long)t.ctx.x[2]);
++            if (svc == 0x18 && entering && a[2] > 0 && a[2] <= 64) {
++                // The objects waited on: handle, kind and name.
++                u32 handles[64]{};
++                auto& rt = NativeServices::Runtime(g_system->Kernel());
++                rt.Read(a[1], handles, a[2] * 4);
++                std::fprintf(trace, "   wait");
++                for (u64 i = 0; i < a[2]; ++i) {
++                    const auto o = rt.Get(handles[i]);
++                    std::string what = o ? o->Kind() : "none";
++                    if (auto e = rt.GetAs<KartRuntime::Event>(handles[i]); e && !e->name.empty()) what += ":" + e->name;
++                    std::fprintf(trace, " %x=%s", handles[i], what.c_str());
++                }
++                std::fprintf(trace, "\n");
++            }
++            if (svc == 0x21) {
++                // The message (request before, reply after) and the session's service.
++                u32 w[16]{};
++                auto& rt = NativeServices::Runtime(g_system->Kernel());
++                rt.Read(t.tls, w, sizeof(w));
++                std::string name = "?";
++                if (auto session = rt.GetAs<KartRuntime::Session>(static_cast<u32>(a[0]))) {
++                    if (session->state->target) name = session->state->target->name;
++                    else if (!session->state->objects.empty()) name = "domain:" + session->state->objects.begin()->second->name;
++                }
++                std::fprintf(trace, "   %s %s:", entering ? "req" : "rep", name.c_str());
++                for (u32 v : w) std::fprintf(trace, " %08x", v);
++                std::fprintf(trace, "\n");
++            }
++            std::fflush(trace);
++        };
++    }
++    g_state = st;
++    const u32 r = st->kernel->StartMain();
++    LOG_INFO(Kernel, "native kernel: the game's main thread started on the runtime's kernel (result {:#x}, entry {:#x}, core {}, priority {})",
++             r, GetInteger(process.GetEntryPoint()), process.GetIdealCoreId(), priority);
++    return r == 0;
++}
++
++void Shutdown() {
++    if (g_state && g_state->kernel) g_state->kernel->Shutdown();
++}
++
++u32 AddSharedMemory(KSharedMemory& memory) {
++    auto& system = *g_system;
++    const u64 phys = GetInteger(system.DeviceMemory().GetPhysicalAddr(memory.GetPointer()));
++    return NativeServices::Runtime(system.Kernel())
++        .Add(std::make_shared<GameKernel::SharedMemory>(phys, memory.GetSize(), MemPerm::ReadWrite));
++}
++
++std::optional<std::pair<u64, u64>> TransferMemory(u32 handle) {
++    if (!g_state) return std::nullopt;
++    auto t = NativeServices::Runtime(g_system->Kernel()).GetAs<GameKernel::TransferMemory>(handle);
++    if (!t) return std::nullopt;
++    return std::pair{t->address, t->size};
++}
++
++bool LockDevice(u64 address, u64 size) {
++    return g_state && g_state->memory->LockDevice(address, size) == 0;
++}
++bool UnlockDevice(u64 address, u64 size) {
++    return g_state && g_state->memory->UnlockDevice(address, size) == 0;
++}
++
++} // namespace Kernel::NativeGame
+diff --git a/src/core/hle/kernel/native_game.h b/src/core/hle/kernel/native_game.h
+new file mode 100644
+index 0000000000..6f85a2a7d5
+--- /dev/null
++++ b/src/core/hle/kernel/native_game.h
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the game's process on the runtime's kernel (docs/NATIVE_KERNEL.md) - the suyu-side adapter of
++// kart_runtime/game_kernel.h. With KARTRECOMP_NATIVE_KERNEL=1 the game's threads are runtime threads (no KThread), its system
++// calls are answered by the runtime and its memory is the runtime's address space. The loaded process object stays as the
++// holder of the page table (the host-memory view the recompiled code reads) and the per-core code runners.
++#pragma once
++
++#include <memory>
++#include <optional>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++namespace KartRuntime {
++class GameKernel;
++class AddressSpace;
++}
++
++namespace Kernel {
++class KernelCore;
++class KProcess;
++class KSharedMemory;
++}
++
++namespace Kernel::NativeGame {
++
++bool Enabled();
++/// Process::Run: starts the game's main thread on the runtime's kernel (instead of KProcess::Run).
++bool Start(Core::System& system, KProcess& process, s32 priority, u64 stack_size);
++/// Engine shutdown: every game thread ends.
++void Shutdown();
++
++/// The runtime kernel while the game runs on it (null otherwise), and its address space.
++KartRuntime::GameKernel* Kernel();
++KartRuntime::AddressSpace* Memory();
++/// True on a game thread of the runtime kernel.
++bool OnGameThread();
++/// The game's process (the loaded process object).
++KProcess* Process();
++
++/// A runtime handle for an emulated shared-memory object (controller state, fonts) that the game maps.
++u32 AddSharedMemory(KSharedMemory& memory);
++/// The address and size behind a runtime transfer-memory handle.
++std::optional<std::pair<u64, u64>> TransferMemory(u32 handle);
++/// Device (GPU driver) locks on game memory.
++bool LockDevice(u64 address, u64 size);
++bool UnlockDevice(u64 address, u64 size);
++
++} // namespace Kernel::NativeGame
