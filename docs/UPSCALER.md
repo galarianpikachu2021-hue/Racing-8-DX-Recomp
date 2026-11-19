@@ -268,3 +268,16 @@ that have an upscale point and a game camera; menus, loading screens and the fir
 
 - `GPU frame time` log line (every 600 race frames): scripted race at 1440p on the RX 9070. FSR 3 at 100% (DLAA): 3.4-3.5 ms (scene 1.4-1.5, upscale + motion vectors + sharpening 1.9-2.0, HUD/present 0.1); FSR 3 at 67%: 2.4-2.6 ms; with HDR and the built-in frame generation 2.6-2.7 ms. The GPU is nowhere near the 16.7 ms budget, so the in-game frame drops are CPU-side (the recompiled game), not renderer-bound; GPU-side AMD/Mesa features (async compute, graphics pipeline libraries, ReBAR upload ring) would not change fps.
 - Time-trial clock: `KARTRECOMP_HITCH=<period>,<ms>[,<from frame>]` sleeps in the renderer. A `--time-trial` TAS run with a 120 ms hitch every 30 frames from frame 2000 reads the same race timer at the same frame numbers as the clean run (3-10 ms apart; one 51 ms outlier from load alignment), so the race clock is frame-based and hitches cannot change time-trial results. `tools/make-menu-tas.py --time-trial` picks Time Trials (Down at frame 615).
+
+## Split point fix: tonemap with depth bound (2026-11-19)
+
+User report: with render scale below 100% the race HUD (placement, map, laps, coins), the results list and the "Next Race" menu
+looked low-resolution, and jitter was very visible. Cause: the game's tonemap pass sometimes runs with the scene's depth target
+still bound (pass log `85/1:1920x1080dt`). `FindUpscalePoint` took the last depth pass as the end of the scene, so that tonemap
+pass counted as scene, the HUD pass counted as the tonemap, and the split landed after the HUD (HUD drawn at the scene scale and
+upscaled). The jitter (viewport shift on colour+depth passes) also shifted that full-screen tonemap draw every frame.
+Fix: a depth pass into the tonemap-format image is not a scene pass (unless no other depth pass exists: menus drawing 3D straight
+into it keep the old rule), and the tonemap pass (`tm_cmd`) is never jittered. Supersampling (`ss_cmd`) also uses the real scene now.
+Diagnostics: `KARTRECOMP_PASS_LOG=<n>` (every n frames) / `KARTRECOMP_PASS_LOG_FROM=<frame>` (20 frames from there) log each
+pass as `index/draws:WxH[d][t]` with `*` on the split, plus the upscale point's images and the targets after it.
+Checked: Cloudtop Cruise at 33% (HUD and results board sharp at 2560x1440, split on the 37-draw HUD pass).

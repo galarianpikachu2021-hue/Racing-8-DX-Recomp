@@ -16125,10 +16125,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..e4731b4b5c
+index 0000000000..79de250f37
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8392 @@
+@@ -0,0 +1,8443 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -19882,7 +19882,7 @@ index 0000000000..e4731b4b5c
 +        // passes (a color target plus a depth target, no shadow maps) get their viewport shifted by
 +        // a fraction of a pixel, which moves everything drawn like a jittered projection would.
 +        // HUD, post-processing and menus have no depth target and stay put.
-+        if (jitter_frame && !st.colors.empty() && st.colors[0] && st.depth && st.depth->info.format != VK_FORMAT_D16_UNORM) {
++        if (jitter_frame && !in_tonemap_pass && !st.colors.empty() && st.colors[0] && st.depth && st.depth->info.format != VK_FORMAT_D16_UNORM) {
 +            vp.x += jitter_x; // render pixels, whatever the scale
 +            vp.y += jitter_y;
 +            ++jitter_draws;
@@ -21277,6 +21277,7 @@ index 0000000000..e4731b4b5c
 +            const Command* cmd;
 +            std::optional<ImageKey> key;
 +            bool depth, tonemap_format;
++            u32 draws = 0;
 +        };
 +        const auto key_of = [&](const TextureDesc& t) -> std::optional<ImageKey> {
 +            if (!t.valid || t.width == 0) return std::nullopt;
@@ -21286,7 +21287,9 @@ index 0000000000..e4731b4b5c
 +        };
 +        std::vector<Pass> passes;
 +        size_t last_depth = SIZE_MAX;
++        size_t last_any_depth = SIZE_MAX;
 +        for (const FrameCommand& fc : frame.commands) {
++            if (fc.cmd->op == Op::Draw && !passes.empty()) ++passes.back().draws;
 +            if (fc.cmd->op != Op::SetRenderTargets) continue;
 +            const Command& c = *fc.cmd;
 +            Pass p{&c, std::nullopt, c.depth.valid, false};
@@ -21295,12 +21298,40 @@ index 0000000000..e4731b4b5c
 +                const auto info = MapFormat(c.colors[0].format);
 +                p.tonemap_format = info && info->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
 +                                   (c.colors[0].width == frame.present.width || c.colors[0].width == PictureWidth(frame));
-+                if (c.depth.valid) last_depth = passes.size(); // a 3D pass: colour and depth
++                // A 3D pass: colour and depth. The tonemap may run with the scene's depth target still bound (a "dt" pass): that
++                // is the tonemap, not the scene, or the split lands after the HUD (HUD, results and menus at the scene scale, and
++                // the full-screen tonemap draw jittered).
++                if (c.depth.valid) {
++                    last_any_depth = passes.size();
++                    if (!p.tonemap_format || last_depth == SIZE_MAX) last_depth = passes.size();
++                }
 +            }
 +            passes.push_back(p);
 +        }
++        // Only depth passes into the tonemap image: no separate scene pass (menus drawing 3D straight into it) keeps the old rule.
++        if (last_depth != SIZE_MAX && passes[last_depth].tonemap_format) last_depth = last_any_depth;
 +        frame_has_scene = last_depth != SIZE_MAX;
-+        if (!frame_has_scene) return;
++        // KARTRECOMP_PASS_LOG=<n>: every n frames, the frame's render passes (target size, depth, tonemap format) and the chosen
++        // upscale point (finding where UI is drawn before it).
++        static const u64 pass_log = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
++        // KARTRECOMP_PASS_LOG_FROM=<frame>: every frame for 20 frames from that one.
++        static const u64 pass_log_from = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG_FROM"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
++        struct PassLogGuard {
++            const std::vector<Pass>* passes;
++            const Command* const* hud;
++            u64 frame;
++            bool on;
++            ~PassLogGuard() {
++                if (!on) return;
++                std::string row;
++                for (size_t i = 0; i < passes->size(); ++i) {
++                    const Pass& p = (*passes)[i];
++                    row += fmt::format("{}{}/{}:{}x{}{}{} ", (p.cmd == *hud) ? "*" : "", i, p.draws, p.key ? std::get<3>(*p.key) : 0,
++                                       p.key ? std::get<4>(*p.key) : 0, p.depth ? "d" : "", p.tonemap_format ? "t" : "");
++                }
++                LOG_INFO(Frontend, "passes frame {} (* = upscale point): {}", frame, row);
++            }
++        } pass_log_guard{&passes, &hud_cmd, frames, (pass_log && frames % pass_log == 0) || (pass_log_from && frames >= pass_log_from && frames < pass_log_from + 20)};
 +        // Split-screen: each player's view is its own scene -> tonemap cycle into the same full-size image. The upscale point
 +        // takes one scene per frame (the last), which wiped the other views (only one of four drawn in 4-player). With more than
 +        // one cycle the frame renders at the output size with no upscale point: correct, though without render scale or a
@@ -21351,7 +21382,7 @@ index 0000000000..e4731b4b5c
 +        size_t t_index = 0;
 +        for (size_t i = last_depth + 1; i < passes.size(); ++i) {
 +            const Pass& p = passes[i];
-+            if (p.depth) continue;
++            if (p.depth && !(p.tonemap_format && !t)) continue;
 +            if (!t) {
 +                if (p.tonemap_format && p.key) {
 +                    t = p.key;
@@ -21359,6 +21390,7 @@ index 0000000000..e4731b4b5c
 +                }
 +            } else if (p.key == t) {
 +                hud_cmd = p.cmd;
++                tm_cmd = passes[t_index].cmd;
 +                tm_key = *t;
 +                return;
 +            }
@@ -21368,6 +21400,7 @@ index 0000000000..e4731b4b5c
 +            for (size_t i = t_index + 1; i < passes.size(); ++i) {
 +                if (passes[i].key && passes[i].key == present_key) {
 +                    hud_cmd = passes[i].cmd;
++                    tm_cmd = passes[t_index].cmd;
 +                    tm_key = *t;
 +                    return;
 +                }
@@ -21405,6 +21438,7 @@ index 0000000000..e4731b4b5c
 +        frame_upscaled = false;
 +        hdr_clean_valid = false;
 +        hud_cmd = nullptr;
++        tm_cmd = nullptr;
 +        ss_cmd = nullptr;
 +        ss_alias = nullptr;
 +        frame_has_scene = false;
@@ -21537,8 +21571,15 @@ index 0000000000..e4731b4b5c
 +        Image* low = GetImage(c.colors[0], false);
 +        post_phase = true;
 +        cur_scale = out_scale;
++        static const u64 up_log_from = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG_FROM"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
++        const bool up_log = up_log_from && frames >= up_log_from && frames < up_log_from + 20;
++        if (up_log)
++            LOG_INFO(Frontend, "upscale point frame {}: low {} {}x{} (guest {}x{}), needs image {}", frames, low ? "found" : "MISSING",
++                     low ? low->width : 0, low ? low->height : 0, low ? low->guest_width : 0, low ? low->guest_height : 0,
++                     low ? UpscalePointNeedsImage(low) : false);
 +        if (!low || !UpscalePointNeedsImage(low)) return;
 +        Image* up = EnsureUpImage(low);
++        if (up_log) LOG_INFO(Frontend, "upscale point frame {}: up image {}x{}", frames, up ? up->width : 0, up ? up->height : 0);
 +        if (!up) return;
 +        up_alias = up;
 +        frame_upscaled = true;
@@ -23473,7 +23514,15 @@ index 0000000000..e4731b4b5c
 +                if (hud_cmd && &c == hud_cmd && !post_phase) {
 +                    RunUpscalePoint(c); // the HUD starts: upscale the 3D composite first
 +                }
++                in_tonemap_pass = tm_cmd && &c == tm_cmd;
 +                ApplyRenderTargets(st, c, true);
++                {
++                    static const u64 rt_log_from = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG_FROM"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
++                    if (rt_log_from && post_phase && frames >= rt_log_from && frames < rt_log_from + 20 && !st.colors.empty() && st.colors[0])
++                        LOG_INFO(Frontend, "after upscale point frame {}: pass draws into {}x{} (guest {}x{}){}", frames, st.colors[0]->width,
++                                 st.colors[0]->height, st.colors[0]->guest_width, st.colors[0]->guest_height,
++                                 st.colors[0] == up_alias ? " = upscaled image" : "");
++                }
 +                break;
 +            case Op::ClearColor:
 +                if (c.index < st.colors.size() && st.colors[c.index] && !st.colors[c.index]->info.depth) {
@@ -24289,6 +24338,8 @@ index 0000000000..e4731b4b5c
 +    bool frame_upscaled = false;
 +    bool frame_has_scene = false;
 +    const Command* hud_cmd = nullptr; ///< the first pass of the HUD (the upscale point), or none
++    const Command* tm_cmd = nullptr;  ///< the tonemap pass (never jittered: it draws the finished scene full-screen)
++    bool in_tonemap_pass = false;     ///< the pass being recorded is tm_cmd
 +    ImageKey tm_key{};                ///< the 3D composite (tonemap output) the HUD draws over
 +    const Command* ss_cmd = nullptr;  ///< supersampling: the first pass after the 3D passes, or none
 +    TextureDesc ss_desc{};            ///< ... the scene colour those passes drew
