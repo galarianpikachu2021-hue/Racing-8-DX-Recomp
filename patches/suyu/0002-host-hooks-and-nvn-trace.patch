@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..34d54f6ae8 100644
+index 408daa6839..19e7e70b3f 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1114,11 +1114,103 @@ index 408daa6839..34d54f6ae8 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace)\\.cpp$")
-+    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp) # the scheduling parts, reduced (see the file)
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process)\\.cpp$")
++    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
+diff --git a/src/core/arm/debug.cpp b/src/core/arm/debug.cpp
+index 1a42742556..00842faedb 100644
+--- a/src/core/arm/debug.cpp
++++ b/src/core/arm/debug.cpp
+@@ -8,6 +8,8 @@
+ #include "core/arm/debug.h"
+ #include "core/arm/symbols.h"
+ #include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/native_game.h"
++#include "kart_runtime/address_space.h"
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/memory.h"
+ 
+@@ -218,17 +220,34 @@ std::string GetThreadState(const Kernel::KThread* thread) {
+     }
+ }
+ 
++namespace {
++/// kart-recomp: the memory map of the game - the runtime's address space when the runtime kernel runs it (docs/NATIVE_KERNEL.md),
++/// else the process's page table.
++Kernel::Svc::MemoryInfo QueryGameMemory(const Kernel::KProcess* process, VAddr addr) {
++    if (auto* rt = Kernel::NativeGame::Memory()) {
++        const auto info = rt->Query(addr);
++        Kernel::Svc::MemoryInfo out{};
++        out.base_address = info.base_address;
++        out.size = info.size;
++        out.state = static_cast<Kernel::Svc::MemoryState>(info.state);
++        out.attribute = static_cast<Kernel::Svc::MemoryAttribute>(info.attribute);
++        out.permission = static_cast<Kernel::Svc::MemoryPermission>(info.permission);
++        return out;
++    }
++    Kernel::KMemoryInfo mem_info{};
++    Kernel::Svc::PageInfo page_info{};
++    R_ASSERT(const_cast<Kernel::KProcess*>(process)->GetPageTable().QueryInfo(std::addressof(mem_info), std::addressof(page_info), addr));
++    return mem_info.GetSvcMemoryInfo();
++}
++} // namespace
++
+ Kernel::KProcessAddress GetModuleEnd(const Kernel::KProcess* process,
+                                      Kernel::KProcessAddress base) {
+-    Kernel::KMemoryInfo mem_info;
+     Kernel::Svc::MemoryInfo svc_mem_info;
+-    Kernel::Svc::PageInfo page_info;
+     VAddr cur_addr{GetInteger(base)};
+-    auto& page_table = process->GetPageTable();
+ 
+     // Expect: r-x Code (.text)
+-    R_ASSERT(page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info), cur_addr));
+-    svc_mem_info = mem_info.GetSvcMemoryInfo();
++    svc_mem_info = QueryGameMemory(process, cur_addr);
+     cur_addr = svc_mem_info.base_address + svc_mem_info.size;
+     if (svc_mem_info.state != Kernel::Svc::MemoryState::Code ||
+         svc_mem_info.permission != Kernel::Svc::MemoryPermission::ReadExecute) {
+@@ -236,8 +255,7 @@ Kernel::KProcessAddress GetModuleEnd(const Kernel::KProcess* process,
+     }
+ 
+     // Expect: r-- Code (.rodata)
+-    R_ASSERT(page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info), cur_addr));
+-    svc_mem_info = mem_info.GetSvcMemoryInfo();
++    svc_mem_info = QueryGameMemory(process, cur_addr);
+     cur_addr = svc_mem_info.base_address + svc_mem_info.size;
+     if (svc_mem_info.state != Kernel::Svc::MemoryState::Code ||
+         svc_mem_info.permission != Kernel::Svc::MemoryPermission::Read) {
+@@ -245,8 +263,7 @@ Kernel::KProcessAddress GetModuleEnd(const Kernel::KProcess* process,
+     }
+ 
+     // Expect: rw- CodeData (.data)
+-    R_ASSERT(page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info), cur_addr));
+-    svc_mem_info = mem_info.GetSvcMemoryInfo();
++    svc_mem_info = QueryGameMemory(process, cur_addr);
+     cur_addr = svc_mem_info.base_address + svc_mem_info.size;
+     return cur_addr - 1;
+ }
+@@ -254,17 +271,12 @@ Kernel::KProcessAddress GetModuleEnd(const Kernel::KProcess* process,
+ Loader::AppLoader::Modules FindModules(Kernel::KProcess* process) {
+     Loader::AppLoader::Modules modules;
+ 
+-    auto& page_table = process->GetPageTable();
+     auto& memory = process->GetMemory();
+     VAddr cur_addr = 0;
+ 
+     // Look for executable sections in Code or AliasCode regions.
+     while (true) {
+-        Kernel::KMemoryInfo mem_info{};
+-        Kernel::Svc::PageInfo page_info{};
+-        R_ASSERT(
+-            page_table.QueryInfo(std::addressof(mem_info), std::addressof(page_info), cur_addr));
+-        auto svc_mem_info = mem_info.GetSvcMemoryInfo();
++        auto svc_mem_info = QueryGameMemory(process, cur_addr);
+ 
+         if (svc_mem_info.permission == Kernel::Svc::MemoryPermission::ReadExecute &&
+             (svc_mem_info.state == Kernel::Svc::MemoryState::Code ||
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
 index 67a55424e9..5e657c1f05 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
@@ -6651,6 +6743,221 @@ index 67412738a7..2154413307 100644
  
      // Set up emulation context.
      this->InitializeInterfaces(kernel);
+diff --git a/src/core/hle/kernel/k_process_lite.cpp b/src/core/hle/kernel/k_process_lite.cpp
+new file mode 100644
+index 0000000000..dac6d13682
+--- /dev/null
++++ b/src/core/hle/kernel/k_process_lite.cpp
+@@ -0,0 +1,209 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the process object for a build where the game always runs on the runtime kernel (KARTRECOMP_RUNTIME_KERNEL_ONLY,
++// docs/NATIVE_KERNEL.md stage 6). It replaces k_process.cpp. The game's memory is the runtime's address space from the moment the
++// loader places the code (NativeGame::Prepare), modules are written straight into it (NativeGame::LoadModule), and Run starts the
++// runtime kernel; there is no emulated page table, main thread or handle table behind it. What stays is the object the rest of the
++// code holds on to: ids, name, flags, the code placement, the capabilities (core and priority masks), the memory view, the
++// exclusive monitor, the resource limit, and the thread list of the host-side kernel objects that name it as their owner.
++
++#include <algorithm>
++#include <ctime>
++#include <random>
++#include <span>
++
++#include "common/assert.h"
++#include "common/logging/log.h"
++#include "common/scope_exit.h"
++#include "common/settings.h"
++#include "core/arm/exclusive_monitor.h"
++#include "core/core.h"
++#include "core/file_sys/program_metadata.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_resource_limit.h"
++#include "core/hle/kernel/k_scoped_resource_reservation.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
++#include "core/hle/kernel/svc_results.h"
++
++namespace Kernel {
++
++namespace {
++void GenerateRandom(std::span<u64> out_random) {
++    std::mt19937 rng(Settings::values.rng_seed_enabled ? Settings::values.rng_seed.GetValue() : static_cast<u32>(std::time(nullptr)));
++    std::uniform_int_distribution<u64> distribution;
++    std::generate(out_random.begin(), out_random.end(), [&] { return distribution(rng); });
++}
++} // namespace
++
++KProcess::KProcess(KernelCore& kernel)
++    : KAutoObjectWithSlabHeapAndContainer(kernel), m_exclusive_monitor{}, m_memory{kernel.System()}, m_handle_table{kernel},
++      m_page_table{kernel}, m_state_lock{kernel}, m_list_lock{kernel}, m_cond_var{kernel.System()},
++      m_address_arbiter{kernel.System()} {}
++
++KProcess::~KProcess() = default;
++
++void KProcess::Finalize(KernelCore& kernel) {
++    if (m_resource_limit != nullptr) {
++        m_resource_limit->Close(kernel);
++        m_resource_limit = nullptr;
++    }
++    for (auto& interface : m_arm_interfaces) {
++        interface.reset();
++    }
++    m_exclusive_monitor.reset();
++    KSynchronizationObject::Finalize(kernel);
++}
++
++/// A process with no memory of its own (the services' context processes): ids, name and flags.
++Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParameter& params, KResourceLimit* res_limit, bool is_real) {
++    std::memcpy(m_name.data(), params.name.data(), sizeof(params.name));
++    m_name[sizeof(params.name)] = 0;
++    m_state = State::Created;
++    m_main_thread_stack_size = 0;
++    m_used_kernel_memory_size = 0;
++    m_ideal_core_id = 0;
++    m_flags = params.flags;
++    m_version = params.version;
++    m_program_id = params.program_id;
++    m_code_address = params.code_address;
++    m_code_size = params.code_num_pages * PageSize;
++    m_is_application = True(params.flags & Svc::CreateProcessFlag::IsApplication);
++    m_max_process_memory = 8ull << 30; // the 39-bit heap region
++    GenerateRandom(m_entropy);
++    m_num_running_threads = 0;
++    m_is_signaled = false;
++    m_exception_thread = nullptr;
++    m_is_suspended = false;
++    m_memory_release_hint = 0;
++    m_schedule_count = 0;
++    m_is_handle_table_initialized = false;
++    m_resource_limit = res_limit;
++    m_resource_limit->Open(kernel);
++    m_is_initialized = true;
++    R_SUCCEED();
++}
++
++Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMetadata& metadata, std::size_t code_size,
++                                  KProcessAddress aslr_space_start, size_t aslr_space_offset) {
++    // The game's pool, as the emulated kernel sized it (the resource limit answers the memory queries).
++    const auto pool = static_cast<KMemoryManager::Pool>(metadata.GetPoolPartition());
++    const auto physical_memory_size = kernel.MemoryManager().GetSize(pool);
++    auto* res_limit = Kernel::CreateResourceLimitForProcess(kernel.System(), physical_memory_size);
++    SCOPE_EXIT {
++        res_limit->Close(kernel);
++    };
++
++    Svc::CreateProcessFlag flag{};
++    if (pool == KMemoryManager::Pool::Application) {
++        flag |= Svc::CreateProcessFlag::IsApplication;
++    }
++    if (metadata.Is64BitProgram()) {
++        flag |= Svc::CreateProcessFlag::Is64Bit;
++    }
++    R_UNLESS(metadata.GetAddressSpaceType() == FileSys::ProgramAddressSpaceType::Is39Bit, ResultInvalidCombination);
++    flag |= Svc::CreateProcessFlag::AddressSpace64Bit;
++    // As the emulated kernel placed it: 2 GiB into the 39-bit space plus the loader's random offset.
++    const u64 code_address = 0x8000'0000 + aslr_space_offset + GetInteger(aslr_space_start);
++
++    Svc::CreateProcessParameter params{
++        .name = {},
++        .version = {},
++        .program_id = metadata.GetTitleID(),
++        .code_address = code_address,
++        .code_num_pages = static_cast<s32>(code_size / PageSize),
++        .flags = flag,
++        .reslimit = Svc::InvalidHandle,
++        .system_resource_num_pages = static_cast<s32>(metadata.GetSystemResourceSize() / PageSize),
++    };
++    const auto& name = metadata.GetName();
++    std::memcpy(params.name.data(), name.data(), sizeof(params.name));
++    R_TRY(this->Initialize(kernel, params, res_limit, false));
++
++    // Core and priority masks for the runtime's thread checks.
++    const auto& caps = metadata.GetKernelCapabilities();
++    R_TRY(m_capabilities.InitializeForUser(caps, std::addressof(m_page_table)));
++    m_process_id = kernel.CreateNewUserProcessID();
++    m_ideal_core_id = metadata.GetMainThreadCore();
++
++    // The game's address space and memory view (the runtime's), with the code region mapped.
++    R_UNLESS(NativeGame::Prepare(kernel.System(), *this, code_address, code_size), ResultOutOfMemory);
++    m_exclusive_monitor = Core::MakeExclusiveMonitor(this->GetMemory(), Core::Hardware::NUM_CPU_CORES);
++    R_SUCCEED();
++}
++
++void KProcess::LoadModule(KernelCore& kernel, CodeSet code_set, KProcessAddress base_addr) {
++    const std::array<std::pair<u64, u64>, 3> segments{{
++        {u64(GetInteger(code_set.CodeSegment().addr)), u64(code_set.CodeSegment().size)},
++        {u64(GetInteger(code_set.RODataSegment().addr)), u64(code_set.RODataSegment().size)},
++        {u64(GetInteger(code_set.DataSegment().addr)), u64(code_set.DataSegment().size)},
++    }};
++    NativeGame::LoadModule(kernel.System(), GetInteger(base_addr), code_set.memory.data(), code_set.memory.size(), segments);
++}
++
++Result KProcess::Run(KernelCore& kernel, s32 priority, size_t stack_size) {
++    // Service::Process::Run starts the runtime kernel itself (NativeGame::Start); there is no emulated main thread.
++    LOG_CRITICAL(Kernel, "KProcess::Run on the runtime-kernel-only build (the runtime kernel starts the game)");
++    R_THROW(ResultInvalidState);
++}
++
++Result KProcess::Terminate(KernelCore& kernel) {
++    m_state = State::Terminated;
++    R_SUCCEED();
++}
++
++Result KProcess::Reset(KernelCore& kernel) {
++    m_is_signaled = false;
++    R_SUCCEED();
++}
++
++Result KProcess::SetActivity(KernelCore& kernel, Svc::ProcessActivity activity) {
++    m_is_suspended = activity == Svc::ProcessActivity::Paused;
++    R_SUCCEED();
++}
++
++void KProcess::DoWorkerTaskImpl(KernelCore& kernel) {}
++
++size_t KProcess::GetTotalUserPhysicalMemorySize(KernelCore& kernel) const {
++    // The emulated formula at the game's start: what the pool still has plus the code, at most the heap region.
++    const size_t free_size = m_resource_limit->GetFreeValue(Svc::LimitableResource::PhysicalMemoryMax);
++    const size_t used_size = m_code_size + m_main_thread_stack_size;
++    return std::min(m_max_process_memory, used_size + free_size);
++}
++
++// Threads that name this process as their owner (host-side records only on this build).
++void KProcess::RegisterThread(KernelCore& kernel, KThread* thread) {
++    KScopedLightLock lk(m_list_lock);
++    m_thread_list.push_back(*thread);
++}
++void KProcess::UnregisterThread(KernelCore& kernel, KThread* thread) {
++    KScopedLightLock lk(m_list_lock);
++    m_thread_list.erase(m_thread_list.iterator_to(*thread));
++}
++void KProcess::IncrementRunningThreadCount(KernelCore& kernel) {
++    ++m_num_running_threads;
++}
++void KProcess::DecrementRunningThreadCount(KernelCore& kernel) {
++    --m_num_running_threads;
++}
++void KProcess::UnpinThread(KernelCore& kernel, KThread* thread) {}
++void KProcess::UnpinCurrentThread(KernelCore& kernel) {}
++bool KProcess::ReleaseUserException(KernelCore& kernel, KThread* thread) {
++    return false;
++}
++Result KProcess::CreateThreadLocalRegion(KernelCore& kernel, KProcessAddress* out) {
++    // Game threads get their TLS from the runtime kernel; nothing else should ask on this build.
++    LOG_ERROR(Kernel, "KProcess::CreateThreadLocalRegion on the runtime-kernel-only build");
++    R_THROW(ResultOutOfMemory);
++}
++Result KProcess::DeleteThreadLocalRegion(KernelCore& kernel, KProcessAddress addr) {
++    R_SUCCEED();
++}
++bool KProcess::InsertWatchpoint(KernelCore& kernel, KProcessAddress addr, u64 size, DebugWatchpointType type) {
++    return false;
++}
++bool KProcess::RemoveWatchpoint(KernelCore& kernel, KProcessAddress addr, u64 size, DebugWatchpointType type) {
++    return false;
++}
++
++} // namespace Kernel
 diff --git a/src/core/hle/kernel/k_readable_event.cpp b/src/core/hle/kernel/k_readable_event.cpp
 index b3e09f725d..c47d534bf4 100644
 --- a/src/core/hle/kernel/k_readable_event.cpp
@@ -7873,10 +8180,10 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
 new file mode 100644
-index 0000000000..e89c3c66c4
+index 0000000000..387aeb1bde
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.cpp
-@@ -0,0 +1,379 @@
+@@ -0,0 +1,430 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +
@@ -8114,12 +8421,62 @@ index 0000000000..e89c3c66c4
 +    return g_state ? g_state->process : nullptr;
 +}
 +
-+bool Start(Core::System& system, KProcess& process, s32 priority, u64 stack_size) {
++bool Prepare(Core::System& system, KProcess& process, u64 code_address, u64 code_size) {
 +    if (!Enabled() || g_state) return false;
 +    g_system = &system;
-+    auto& kernel = system.Kernel();
 +    auto* st = new State{};
 +    st->process = &process;
++    constexpr u64 GiB = 1ull << 30;
++    AddressSpace::Layout l;
++    l.space_start = 0;
++    l.space_size = 512 * GiB; // 39-bit
++    l.code_start = 0x800'0000;
++    l.code_size = l.space_size - l.code_start;
++    l.kmap_start = (code_address + code_size + 0x1f'ffff) & ~u64{0x1f'ffff};
++    l.kmap_size = 64 * GiB;
++    l.stack_start = l.kmap_start + l.kmap_size;
++    l.stack_size = 2 * GiB;
++    l.alias_start = l.stack_start + l.stack_size;
++    l.alias_size = 64 * GiB;
++    l.heap_start = l.alias_start + l.alias_size;
++    l.heap_size = 8 * GiB;
++    LOG_INFO(Kernel, "native kernel: layout code {:#x}+{:#x} kmap {:#x} stack {:#x} alias {:#x} heap {:#x}", code_address, code_size,
++             l.kmap_start, l.stack_start, l.alias_start, l.heap_start);
++    st->page_table = std::make_unique<Common::PageTable>();
++    st->page_table->Resize(39, Core::Memory::YUZU_PAGEBITS);
++    st->backend = std::make_unique<HostBackend>(process.GetMemory(), *st->page_table, system.DeviceMemory());
++    TakeApplicationPool(system.Kernel(), st->physical);
++    st->memory = std::make_unique<AddressSpace>(l, *st->backend, st->physical);
++    process.GetMemory().SetCurrentPageTable(*st->page_table, true);
++    if (const u32 r = st->memory->MapNew(code_address, code_size, MemState::Code, MemPerm::ReadWrite)) {
++        LOG_CRITICAL(Kernel, "native kernel: the code region {:#x}+{:#x} cannot be mapped ({:#x})", code_address, code_size, r);
++        return false;
++    }
++    g_state = st;
++    return true;
++}
++
++void LoadModule(Core::System& system, u64 base, const u8* data, u64 size, const std::array<std::pair<u64, u64>, 3>& segments) {
++    if (!g_state) return;
++    g_state->process->GetMemory().WriteBlock(base, data, size);
++    const u32 perms[3] = {MemPerm::Read | MemPerm::Execute, MemPerm::Read, MemPerm::ReadWrite};
++    for (size_t i = 0; i < 3; ++i) {
++        const auto [off, len] = segments[i];
++        const u64 aligned = (len + AddressSpace::PageSize - 1) & ~(AddressSpace::PageSize - 1);
++        if (aligned && g_state->memory->SetProcessPermission(base + off, aligned, perms[i]))
++            LOG_ERROR(Kernel, "native kernel: segment {} of the module at {:#x} cannot be protected", i, base);
++    }
++}
++
++bool Start(Core::System& system, KProcess& process, s32 priority, u64 stack_size) {
++    if (!Enabled()) return false;
++    g_system = &system;
++    auto& kernel = system.Kernel();
++    const bool prepared = g_state != nullptr && g_state->process == &process && !g_state->kernel;
++    if (g_state && !prepared) return false;
++    auto* st = prepared ? g_state : new State{};
++    st->process = &process;
++    if (!prepared) {
 +    auto& pt = process.GetPageTable();
 +    AddressSpace::Layout l;
 +    l.space_start = GetInteger(pt.GetAddressSpaceStart());
@@ -8142,6 +8499,7 @@ index 0000000000..e89c3c66c4
 +    ImportProcess(process, *st->memory);
 +    // From here on the memory view is the runtime's table (every imported page was mapped into it just now).
 +    process.GetMemory().SetCurrentPageTable(*st->page_table, true);
++    } // !prepared
 +    st->scheduler = std::make_unique<CoreScheduler>(4, true); // each thread has its own runner: moves wait for its yield
 +    st->executor = std::make_unique<RecompExecutor>(system, process);
 +    st->scheduler->SetPreemptCallback([exec = st->executor.get()](CoreScheduler::Thread* t) { exec->Interrupt(t->Core()); });
@@ -8258,10 +8616,10 @@ index 0000000000..e89c3c66c4
 +} // namespace Kernel::NativeGame
 diff --git a/src/core/hle/kernel/native_game.h b/src/core/hle/kernel/native_game.h
 new file mode 100644
-index 0000000000..6f85a2a7d5
+index 0000000000..eaece43c41
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,59 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the game's process on the runtime's kernel (docs/NATIVE_KERNEL.md) - the suyu-side adapter of
 +// kart_runtime/game_kernel.h. With KARTRECOMP_NATIVE_KERNEL=1 the game's threads are runtime threads (no KThread), its system
@@ -8269,7 +8627,9 @@ index 0000000000..6f85a2a7d5
 +// holder of the page table (the host-memory view the recompiled code reads) and the per-core code runners.
 +#pragma once
 +
++#include <array>
 +#include <memory>
++#include <utility>
 +#include <optional>
 +
 +#include "common/common_types.h"
@@ -8291,6 +8651,12 @@ index 0000000000..6f85a2a7d5
 +namespace Kernel::NativeGame {
 +
 +bool Enabled();
++/// Loading (runtime-kernel-only builds): the game's address space and memory view, built from its code placement, before any
++/// module is loaded (instead of the emulated process's page table). The layout follows the code: kernel-map region at the code's
++/// end (2 MiB aligned), then stack, alias and heap regions, as the emulated kernel placed them.
++bool Prepare(Core::System& system, KProcess& process, u64 code_address, u64 code_size);
++/// A module's bytes written at `base` and its segments protected (text read/execute, rodata read, data read/write).
++void LoadModule(Core::System& system, u64 base, const u8* data, u64 size, const std::array<std::pair<u64, u64>, 3>& segments);
 +/// Process::Run: starts the game's main thread on the runtime's kernel (instead of KProcess::Run).
 +bool Start(Core::System& system, KProcess& process, s32 priority, u64 stack_size);
 +/// Engine shutdown: every game thread ends.
@@ -17657,10 +18023,10 @@ index 0000000000..9e51c01115
 +| `direct_memory.h` | The game's address space as one host range read and written in place by the recompiled code, and the fault handler that gives bad pointers the old behaviour: unmapped memory reads as zeros, writes to it are dropped, pages without permission are opened. Linux x86-64. |
 diff --git a/src/kart_runtime/address_space.h b/src/kart_runtime/address_space.h
 new file mode 100644
-index 0000000000..d1c47d0a4c
+index 0000000000..392fc97c66
 --- /dev/null
 +++ b/src/kart_runtime/address_space.h
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,532 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the game process's address space (docs/NATIVE_KERNEL.md, stage 1).
 +//
@@ -17997,6 +18363,20 @@ index 0000000000..d1c47d0a4c
 +        if (!AllMatch(addr, size, [](const Block& b) { return MemState::IsData(b.state) && b.attr == 0; })) return MemResult::InvalidCurrentMemory;
 +        backend.Protect(addr, size, perm);
 +        Modify(addr, size, [&](Block& b) { b.perm = perm; });
++        return MemResult::Success;
++    }
++    /// The loader's segment protection (the kernel's SetProcessMemoryPermission): code pages become CodeData when made writable.
++    uint32_t SetProcessPermission(uint64_t addr, uint64_t size, uint32_t perm) {
++        std::scoped_lock lk{mutex};
++        if (!Aligned(addr, size) || !InSpace(addr, size)) return MemResult::InvalidAddress;
++        if (!AllMatch(addr, size, [](const Block& b) { return b.state == MemState::Code || b.state == MemState::CodeData; }))
++            return MemResult::InvalidCurrentMemory;
++        const uint32_t state = (perm & MemPerm::Write) ? MemState::CodeData : MemState::Code;
++        backend.Protect(addr, size, perm);
++        Modify(addr, size, [&](Block& b) {
++            b.perm = perm;
++            b.state = state;
++        });
 +        return MemResult::Success;
 +    }
 +    /// CreateTransferMemory: the owner's pages are locked and shown with `perm` until UnlockTransfer.
