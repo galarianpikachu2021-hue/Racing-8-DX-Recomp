@@ -2,6 +2,7 @@
 #include "ctgp_tables.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -265,7 +266,7 @@ struct Machine {
         if (op == 4) { // LDM / STM
             const bool p = i & (1u << 24), u = i & (1u << 23), w = i & (1u << 21), l = i & (1u << 20);
             const uint32_t rn = (i >> 16) & 15, list = i & 0xffff;
-            const uint32_t count = static_cast<uint32_t>(__builtin_popcount(list));
+            const uint32_t count = static_cast<uint32_t>(std::popcount(list)); // std::popcount: __builtin_popcount does not exist on MSVC
             const uint32_t base = r[rn];
             uint32_t addr = u ? base : base - 4 * count;
             if (p == u) addr += 4;

@@ -167,3 +167,20 @@ Not tried on AMD or Intel GPUs. If you can make the recompiled code's hot spin i
 
 For your information: the engine finds `plugins\` relative to its working directory. The launcher sets that directory correctly; a
 script that starts `mk8d-engine.exe` from elsewhere gets no upscalers.
+
+---
+
+## Windows session note (2026-11-18): beta 2 Windows build is BLOCKED by missing files in patch 0002
+
+Building `main` 86b6441 on Windows: `fetch-fork.sh` applies all three patches, then CMake fails with
+`src/core/CMakeLists.txt:7: Cannot find source file: hle/kernel/native_game.cpp`. The patch adds `hle/kernel/native_game.cpp` and
+`native_game.h` to the CMake list and `#include "core/hle/kernel/native_game.h"` in three places, but contains no
+`diff --git a/src/core/hle/kernel/native_game.*` section: the two new files were never added to the patch (probably not
+`git add -N`-ed before `git diff`). The same is true of the BETA-0.2.5 and BETA-0.2.5-2 tags, so the Windows CI would fail too.
+Please regenerate `patches/suyu/0002-host-hooks-and-nvn-trace.patch` with those files (and check `git status` in your fork for
+other untracked files), push to `main`, and I will build the Windows zip. Check: `fetch-fork.sh` into an empty folder, then
+`cmake -S fork -B build` must get past "Generating done" without errors.
+
+Also fixed on the Windows side (branch `windows-port`): `app/src/ctgp_tables.cpp` used `__builtin_popcount`, which MSVC does not
+have; it is `std::popcount` now. With that the launcher builds on MSVC and ctest is 14/14. Engine stamp for this `main`:
+`92a3cfe39c-abi6` (no pin file).
