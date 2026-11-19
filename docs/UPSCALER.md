@@ -281,3 +281,8 @@ into it keep the old rule), and the tonemap pass (`tm_cmd`) is never jittered. S
 Diagnostics: `KARTRECOMP_PASS_LOG=<n>` (every n frames) / `KARTRECOMP_PASS_LOG_FROM=<frame>` (20 frames from there) log each
 pass as `index/draws:WxH[d][t]` with `*` on the split, plus the upscale point's images and the targets after it.
 Checked: Cloudtop Cruise at 33% (HUD and results board sharp at 2560x1440, split on the 37-draw HUD pass).
+Also fixed (2026-11-19, found from the user's core dump on the rtk2 AppImage): at render scales above 100% (supersampling)
+`FindUpscalePoint` read `passes[last_depth + 1]` with `last_depth == SIZE_MAX` in frames with no 3D pass (boot, loading
+screens) and crashed at start-up. Debugging on the user's real install: `local/exp/userrun.sh`-style runs (the AppImage's
+engine started with the launcher's arguments and environment, working directory = the engine's folder or the plugins are
+not found; config/saves/nand/log backed up and restored).

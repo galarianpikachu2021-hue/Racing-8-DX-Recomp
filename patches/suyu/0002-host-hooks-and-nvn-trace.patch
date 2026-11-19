@@ -8168,7 +8168,7 @@ index 0000000000..cc6f1ac4ea
 +
 +} // namespace Kernel
 diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
-index 6363a9e0ab..54520450cd 100644
+index 6363a9e0ab..e8a6b4f715 100644
 --- a/src/core/hle/kernel/kernel.cpp
 +++ b/src/core/hle/kernel/kernel.cpp
 @@ -41,7 +41,9 @@
@@ -8239,6 +8239,19 @@ index 6363a9e0ab..54520450cd 100644
      const u32 core_id = impl->GetCurrentHostThreadID();
      if (core_id >= Core::Hardware::NUM_CPU_CORES) {
          return Core::Hardware::NUM_CPU_CORES - 1;
+@@ -1192,6 +1224,12 @@ const Kernel::KSharedMemory& KernelCore::GetHidBusSharedMem() const {
+ }
+ 
+ void KernelCore::SuspendEmulation(bool suspended) {
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    // The game's threads are runtime threads (NativeGame::Shutdown ends them); there are no emulated cores to stop, and the
++    // schedulers have no current thread, so the wait below dereferenced null at every quit (System::Pause / Shutdown).
++    (void)suspended;
++    return;
++#endif
+     const bool should_suspend{exception_exited || suspended};
+     auto processes = GetProcessList();
+ 
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
 index 0000000000..50ebedf63e

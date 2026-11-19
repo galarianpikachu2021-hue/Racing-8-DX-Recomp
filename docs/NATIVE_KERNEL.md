@@ -272,3 +272,7 @@ finished, and not reproduced since; `local/exp/hangcatch.sh` saves thread stacks
 
 What is left of the plan: deleting the files for every platform (needs the Windows test), Phase 7 (native memory model: the
 generator emitting plain pointer loads for guest VA == host VA) and the optional Phase 8.
+
+**Quit crash fixed (2026-11-19):** on the runtime-kernel-only build `KernelCore::SuspendEmulation` (called by `System::Pause`
+and shutdown) waited on the emulated schedulers' current threads, which are null there: every quit ended in SIGSEGV
+(coredumpctl showed it for each test run). It is a no-op on that build now (`NativeGame::Shutdown` ends the game's threads).

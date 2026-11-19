@@ -16125,10 +16125,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..79de250f37
+index 0000000000..aa191064f7
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8443 @@
+@@ -0,0 +1,8445 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -21373,7 +21373,9 @@ index 0000000000..79de250f37
 +                return;
 +            }
 +        }
-+        if (scene_ratio > 1.0001f && last_depth + 1 < passes.size() && passes[last_depth].key) {
++        // last_depth is SIZE_MAX in frames without a 3D pass (boot, loading screens): last_depth + 1 would wrap to 0 and read
++        // passes[SIZE_MAX] (the crash at 150%/200% on such frames).
++        if (scene_ratio > 1.0001f && last_depth != SIZE_MAX && last_depth + 1 < passes.size() && passes[last_depth].key) {
 +            ss_cmd = passes[last_depth + 1].cmd;
 +            ss_desc = passes[last_depth].cmd->colors[0];
 +            ss_key = *passes[last_depth].key;
