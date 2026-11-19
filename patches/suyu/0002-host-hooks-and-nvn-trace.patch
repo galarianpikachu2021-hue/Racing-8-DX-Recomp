@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..73c53ad7ff 100644
+index 408daa6839..c28cee533c 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1114,8 +1114,8 @@ index 408daa6839..73c53ad7ff 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process|k_page_table_base|k_memory_block_manager|k_thread_local_page)\\.cpp$")
-+    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp hle/kernel/k_page_table_lite.cpp) # the scheduling parts, reduced (see the file)
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process|k_page_table_base|k_memory_block_manager|k_thread_local_page|k_memory_manager|k_page_heap|k_memory_layout|k_page_buffer|k_system_resource)\\.cpp$")
++    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp hle/kernel/k_page_table_lite.cpp hle/kernel/k_memory_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
@@ -6723,6 +6723,301 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/init/init_slab_setup.cpp b/src/core/hle/kernel/init/init_slab_setup.cpp
+index 45801e0e5e..2545597254 100644
+--- a/src/core/hle/kernel/init/init_slab_setup.cpp
++++ b/src/core/hle/kernel/init/init_slab_setup.cpp
+@@ -1,3 +1,6 @@
++#include "common/logging/log.h"
++#include <memory>
++#include <cstring>
+ // SPDX-FileCopyrightText: Copyright 2026 suyu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+@@ -271,6 +274,31 @@ void InitializeSlabHeaps(Core::System& system, KMemoryLayout& memory_layout) {
+     }
+ }
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++void InitializeSlabHeapsHost(Core::System& system) {
++    auto& kernel = system.Kernel();
++    size_t total = 0;
++#define KR_SLAB_SIZE(NAME, COUNT, ...) total += Common::AlignUp(sizeof(NAME) * static_cast<size_t>(COUNT), 64) + 64;
++    FOREACH_SLAB_TYPE(KR_SLAB_SIZE)
++#undef KR_SLAB_SIZE
++    // Lives as long as the process (the slab heaps hand out objects from it until exit).
++    static std::unique_ptr<u8[]> backing;
++    backing = std::make_unique<u8[]>(total + 64);
++    std::memset(backing.get(), 0, total + 64);
++    u8* at = backing.get();
++#define KR_SLAB_INIT(NAME, COUNT, ...)                                                                                         \
++    if ((COUNT) > 0) {                                                                                                         \
++        const size_t sz = Common::AlignUp(sizeof(NAME) * static_cast<size_t>(COUNT), alignof(void*));                         \
++        at = reinterpret_cast<u8*>(Common::AlignUp(reinterpret_cast<uintptr_t>(at), 64));                                      \
++        NAME::InitializeSlabHeap(kernel, at, sz);                                                                              \
++        at += sz;                                                                                                              \
++    }
++    FOREACH_SLAB_TYPE(KR_SLAB_INIT)
++#undef KR_SLAB_INIT
++    LOG_INFO(Kernel, "slab heaps: {} KiB of host memory", total >> 10);
++}
++#endif
++
+ } // namespace Kernel::Init
+ 
+ namespace Kernel {
+diff --git a/src/core/hle/kernel/init/init_slab_setup.h b/src/core/hle/kernel/init/init_slab_setup.h
+index 5e22821bcc..2ff29a7cac 100644
+--- a/src/core/hle/kernel/init/init_slab_setup.h
++++ b/src/core/hle/kernel/init/init_slab_setup.h
+@@ -39,5 +39,9 @@ struct KSlabResourceCounts {
+ void InitializeSlabResourceCounts(KernelCore& kernel);
+ size_t CalculateTotalSlabHeapSize(const KernelCore& kernel);
+ void InitializeSlabHeaps(Core::System& system, KMemoryLayout& memory_layout);
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++/// kart-recomp: every slab heap in one host buffer (no console memory layout on this build, docs/NATIVE_KERNEL.md).
++void InitializeSlabHeapsHost(Core::System& system);
++#endif
+ 
+ } // namespace Kernel::Init
+diff --git a/src/core/hle/kernel/k_memory_lite.cpp b/src/core/hle/kernel/k_memory_lite.cpp
+new file mode 100644
+index 0000000000..d6a9419c3e
+--- /dev/null
++++ b/src/core/hle/kernel/k_memory_lite.cpp
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the lite physical memory manager (k_memory_manager_lite.h), KARTRECOMP_RUNTIME_KERNEL_ONLY builds.
++
++#include "common/alignment.h"
++#include "common/logging/log.h"
++#include "core/core.h"
++#include "core/device_memory.h"
++#include "core/hle/kernel/board/nintendo/nx/k_system_control.h"
++#include "core/hle/kernel/k_memory_manager.h"
++#include "core/hle/kernel/svc_results.h"
++
++namespace Kernel {
++
++namespace {
++constexpr u64 PageSize = 0x1000;
++constexpr u64 KernelReserve = 16ull << 20; ///< the front of device memory, left alone (the emulated kernel's own region)
++} // namespace
++
++KMemoryManager::KMemoryManager(Core::System& system) : m_system{system} {}
++
++void KMemoryManager::Initialize(KVirtualAddress management_region, size_t management_region_size) {
++    using Control = Board::Nintendo::Nx::KSystemControl::Init;
++    const u64 base = Core::DramMemoryMap::Base;
++    const u64 total = Control::GetIntendedMemorySize();
++    const u64 app = Control::GetApplicationPoolSize();
++    const u64 applet = Control::GetAppletPoolSize();
++    const u64 app_start = base + total - app;
++    const u64 applet_start = app_start - applet;
++    const u64 system_start = base + KernelReserve;
++    auto set = [this](Pool p, u64 s, u64 e) { m_pools[static_cast<size_t>(p)] = {s, e, s, e}; };
++    set(Pool::Application, app_start, base + total);
++    set(Pool::Applet, applet_start, app_start);
++    // System and non-secure system share the rest (secure-memory accounting is not modelled).
++    const u64 nonsecure = Control::GetMinimumNonSecureSystemPoolSize();
++    set(Pool::System, system_start, applet_start - nonsecure);
++    set(Pool::SystemNonSecure, applet_start - nonsecure, applet_start);
++    LOG_INFO(Kernel, "memory: {} MiB device memory; pools: game {} MiB, applet {} MiB, system {} MiB", total >> 20, app >> 20,
++             applet >> 20, (applet_start - system_start) >> 20);
++}
++
++Result KMemoryManager::InitializeOptimizedMemory(u64 process_id, Pool pool) {
++    R_SUCCEED();
++}
++void KMemoryManager::FinalizeOptimizedMemory(u64 process_id, Pool pool) {}
++
++KPhysicalAddress KMemoryManager::AllocateAndOpenContinuous(size_t num_pages, size_t align_pages, u32 option) {
++    const auto [pool, dir] = DecodeOption(option);
++    if (static_cast<size_t>(pool) >= m_pools.size() || num_pages == 0) return 0;
++    std::scoped_lock lk{m_lock};
++    auto& p = m_pools[static_cast<size_t>(pool)];
++    const u64 size = num_pages * PageSize;
++    const u64 align = std::max<u64>(align_pages, 1) * PageSize;
++    if (dir == Direction::FromBack) {
++        const u64 at = Common::AlignDown(p.back - std::min(p.back, size), align);
++        if (at < p.front || at + size > p.back) return 0;
++        p.back = at;
++        return at;
++    }
++    const u64 at = Common::AlignUp(p.front, align);
++    if (at + size > p.back) return 0;
++    p.front = at + size;
++    return at;
++}
++
++Result KMemoryManager::AllocateAndOpen(KPageGroup* out, size_t num_pages, u32 option) {
++    LOG_ERROR(Kernel, "memory: page-group allocation on the runtime-kernel-only build");
++    R_THROW(ResultOutOfMemory);
++}
++Result KMemoryManager::AllocateForProcess(KPageGroup* out, size_t num_pages, u32 option, u64 process_id, u8 fill_pattern) {
++    LOG_ERROR(Kernel, "memory: page-group allocation on the runtime-kernel-only build");
++    R_THROW(ResultOutOfMemory);
++}
++
++KMemoryManager::Pool KMemoryManager::GetPool(KPhysicalAddress address) const {
++    const u64 a = GetInteger(address);
++    for (size_t i = 0; i < m_pools.size(); ++i)
++        if (a >= m_pools[i].start && a < m_pools[i].end) return static_cast<Pool>(i);
++    return Pool::System;
++}
++
++size_t KMemoryManager::GetSize() {
++    size_t total = 0;
++    for (const auto& p : m_pools) total += p.end - p.start;
++    return total;
++}
++size_t KMemoryManager::GetSize(Pool pool) {
++    const auto& p = m_pools[static_cast<size_t>(pool)];
++    return p.end - p.start;
++}
++size_t KMemoryManager::GetFreeSize() {
++    std::scoped_lock lk{m_lock};
++    size_t total = 0;
++    for (const auto& p : m_pools) total += p.back - p.front;
++    return total;
++}
++size_t KMemoryManager::GetFreeSize(Pool pool) {
++    std::scoped_lock lk{m_lock};
++    const auto& p = m_pools[static_cast<size_t>(pool)];
++    return p.back - p.front;
++}
++
++} // namespace Kernel
+diff --git a/src/core/hle/kernel/k_memory_manager.h b/src/core/hle/kernel/k_memory_manager.h
+index 5097b6af53..2e108c0231 100644
+--- a/src/core/hle/kernel/k_memory_manager.h
++++ b/src/core/hle/kernel/k_memory_manager.h
+@@ -6,6 +6,11 @@
+ 
+ #pragma once
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++// kart-recomp: the lite manager (fixed pools; docs/NATIVE_KERNEL.md stage 6).
++#include "core/hle/kernel/k_memory_manager_lite.h"
++#else
++
+ #include <array>
+ #include <tuple>
+ 
+@@ -373,3 +378,5 @@ private:
+ };
+ 
+ } // namespace Kernel
++
++#endif // KARTRECOMP_RUNTIME_KERNEL_ONLY
+diff --git a/src/core/hle/kernel/k_memory_manager_lite.h b/src/core/hle/kernel/k_memory_manager_lite.h
+new file mode 100644
+index 0000000000..75c58e09fd
+--- /dev/null
++++ b/src/core/hle/kernel/k_memory_manager_lite.h
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the physical memory manager of a build where the game always runs on the runtime kernel (KARTRECOMP_RUNTIME_KERNEL_ONLY,
++// docs/NATIVE_KERNEL.md stage 6). Included by k_memory_manager.h instead of the emulated manager (page heaps over the console's
++// derived memory layout). Device memory is split into fixed pools with the board's sizes - system at the front, then applet, then
++// the game's pool at the end - and pages are handed out from either end of a pool. The runtime takes the game's pool whole at
++// load time; the rest serves the few kernel objects left (shared memory: fonts, controllers; the page-buffer slab).
++#pragma once
++
++#include <array>
++#include <mutex>
++#include <tuple>
++
++#include "common/common_funcs.h"
++#include "common/common_types.h"
++#include "core/hle/kernel/k_typed_address.h"
++#include "core/hle/result.h"
++
++namespace Core {
++class System;
++}
++
++namespace Kernel {
++
++class KPageGroup;
++
++class KMemoryManager {
++public:
++    enum class Pool : u32 {
++        Application = 0,
++        Applet = 1,
++        System = 2,
++        SystemNonSecure = 3,
++
++        Count,
++
++        Shift = 4,
++        Mask = (0xF << Shift),
++
++        // Aliases.
++        Unsafe = Application,
++        Secure = System,
++    };
++
++    enum class Direction : u32 {
++        FromFront = 0,
++        FromBack = 1,
++        Shift = 0,
++        Mask = (0xF << Shift),
++    };
++
++    explicit KMemoryManager(Core::System& system);
++
++    void Initialize(KVirtualAddress management_region, size_t management_region_size);
++
++    Result InitializeOptimizedMemory(u64 process_id, Pool pool);
++    void FinalizeOptimizedMemory(u64 process_id, Pool pool);
++
++    KPhysicalAddress AllocateAndOpenContinuous(size_t num_pages, size_t align_pages, u32 option);
++    Result AllocateAndOpen(KPageGroup* out, size_t num_pages, u32 option);
++    Result AllocateForProcess(KPageGroup* out, size_t num_pages, u32 option, u64 process_id, u8 fill_pattern);
++
++    Pool GetPool(KPhysicalAddress address) const;
++    void Open(KPhysicalAddress address, size_t num_pages) {}
++    void OpenFirst(KPhysicalAddress address, size_t num_pages) {}
++    /// Pages are not given back to a pool (the few kernel objects that allocate live as long as the game).
++    void Close(KPhysicalAddress address, size_t num_pages) {}
++
++    size_t GetSize();
++    size_t GetSize(Pool pool);
++    size_t GetFreeSize();
++    size_t GetFreeSize(Pool pool);
++    void DumpFreeList(Pool pool) {}
++
++    static size_t CalculateManagementOverheadSize(size_t region_size) {
++        return 0;
++    }
++
++    static constexpr u32 EncodeOption(Pool pool, Direction dir) {
++        return (static_cast<u32>(pool) << static_cast<u32>(Pool::Shift)) |
++               (static_cast<u32>(dir) << static_cast<u32>(Direction::Shift));
++    }
++    static constexpr Pool GetPool(u32 option) {
++        return static_cast<Pool>((option & static_cast<u32>(Pool::Mask)) >> static_cast<u32>(Pool::Shift));
++    }
++    static constexpr Direction GetDirection(u32 option) {
++        return static_cast<Direction>((option & static_cast<u32>(Direction::Mask)) >> static_cast<u32>(Direction::Shift));
++    }
++    static constexpr std::tuple<Pool, Direction> DecodeOption(u32 option) {
++        return std::make_tuple(GetPool(option), GetDirection(option));
++    }
++
++private:
++    struct PoolRange {
++        u64 start = 0, end = 0;   ///< physical [start, end)
++        u64 front = 0, back = 0;  ///< next free page from the front, end of the free part from the back
++    };
++    Core::System& m_system;
++    std::mutex m_lock;
++    std::array<PoolRange, static_cast<size_t>(Pool::Count)> m_pools{};
++};
++
++} // namespace Kernel
 diff --git a/src/core/hle/kernel/k_page_table_lite.cpp b/src/core/hle/kernel/k_page_table_lite.cpp
 new file mode 100644
 index 0000000000..9a6de08009
@@ -7446,6 +7741,65 @@ index c1b0dcd033..06e7f29e62 100644
      // Validate preconditions.
      ASSERT(CanSchedule(kernel));
      ASSERT(GetCurrentProcessPointer(kernel) != nullptr);
+diff --git a/src/core/hle/kernel/k_shared_memory.cpp b/src/core/hle/kernel/k_shared_memory.cpp
+index 852fead770..21a34d2639 100644
+--- a/src/core/hle/kernel/k_shared_memory.cpp
++++ b/src/core/hle/kernel/k_shared_memory.cpp
+@@ -45,9 +45,11 @@ Result KSharedMemory::Initialize(KernelCore& kernel, Core::DeviceMemory& device_
+     m_physical_address = kernel.MemoryManager().AllocateAndOpenContinuous(num_pages, 1, option);
+     R_UNLESS(m_physical_address != 0, ResultOutOfMemory);
+ 
++#ifndef KARTRECOMP_RUNTIME_KERNEL_ONLY
+     //! Insert the result into our page group.
+     m_page_group.emplace(kernel, std::addressof(kernel.GetSystemSystemResource().GetBlockInfoManager()));
+     m_page_group->AddBlock(m_physical_address, num_pages);
++#endif
+ 
+     // Commit our reservation.
+     memory_reservation.Commit();
+@@ -60,17 +62,24 @@ Result KSharedMemory::Initialize(KernelCore& kernel, Core::DeviceMemory& device_
+     m_is_initialized = true;
+ 
+     // Clear all pages in the memory.
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    // kart-recomp: one continuous range; the runtime maps it into the game (docs/NATIVE_KERNEL.md).
++    std::memset(m_device_memory->GetPointer<void>(m_physical_address), 0, num_pages * PageSize);
++#else
+     for (const auto& block : *m_page_group) {
+         std::memset(m_device_memory->GetPointer<void>(block.GetAddress()), 0, block.GetSize());
+     }
++#endif
+ 
+     R_SUCCEED();
+ }
+ 
+ void KSharedMemory::Finalize(KernelCore& kernel) {
+     // Close and finalize the page group.
+-    m_page_group->Close(kernel);
+-    m_page_group->Finalize();
++    if (m_page_group) {
++        m_page_group->Close(kernel);
++        m_page_group->Finalize();
++    }
+ 
+     // Release the memory reservation.
+     m_resource_limit->Release(kernel, LimitableResource::PhysicalMemoryMax, m_size);
+@@ -91,6 +100,7 @@ Result KSharedMemory::Map(KProcess& target_process, KProcessAddress address, std
+         R_UNLESS(map_perm == test_perm, ResultInvalidNewMemoryPermission);
+     }
+ 
++    R_UNLESS(m_page_group.has_value(), ResultInvalidCurrentMemory); // runtime-kernel-only: the runtime maps shared memory
+     R_RETURN(target_process.GetPageTable().MapPageGroup(
+         address, *m_page_group, KMemoryState::Shared, ConvertToKMemoryPermission(map_perm)));
+ }
+@@ -100,6 +110,7 @@ Result KSharedMemory::Unmap(KProcess& target_process, KProcessAddress address,
+     // Validate the size.
+     R_UNLESS(m_size == unmap_size, ResultInvalidSize);
+ 
++    R_UNLESS(m_page_group.has_value(), ResultInvalidCurrentMemory);
+     R_RETURN(
+         target_process.GetPageTable().UnmapPageGroup(address, *m_page_group, KMemoryState::Shared));
+ }
 diff --git a/src/core/hle/kernel/k_shared_memory.h b/src/core/hle/kernel/k_shared_memory.h
 index c64e1668ca..1e8db8872e 100644
 --- a/src/core/hle/kernel/k_shared_memory.h
@@ -7615,7 +7969,7 @@ index 87e5112a20..aee595e2ea 100644
      std::mutex m_dummy_thread_mutex{};
      std::condition_variable m_dummy_thread_cv{};
 diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
-index 6363a9e0ab..cfb4364eb9 100644
+index 6363a9e0ab..54520450cd 100644
 --- a/src/core/hle/kernel/kernel.cpp
 +++ b/src/core/hle/kernel/kernel.cpp
 @@ -41,7 +41,9 @@
@@ -7628,7 +7982,47 @@ index 6363a9e0ab..cfb4364eb9 100644
  #include "core/hle/kernel/physical_core.h"
  #include "core/hle/result.h"
  #include "core/hle/service/server_manager.h"
-@@ -255,6 +257,9 @@ struct KernelCore::Impl {
+@@ -94,6 +96,31 @@ struct KernelCore::Impl {
+         global_object_list_container.emplace(kernel);
+         global_scheduler_context.emplace(kernel);
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++        // kart-recomp: no console memory layout on this build (docs/NATIVE_KERNEL.md stage 6): fixed pools in device memory, the
++        // slab heaps in host memory, no page-table resource managers (the game's memory is the runtime's).
++        Init::InitializeSlabResourceCounts(kernel);
++        Init::InitializeSlabHeapsHost(system); // first: every kernel object below comes from them
++        memory_manager.emplace(system);
++        memory_manager->Initialize({}, 0);
++        {
++            system_resource_limit = KResourceLimit::Create(system.Kernel());
++            system_resource_limit->Initialize();
++            KResourceLimit::Register(kernel, system_resource_limit);
++            ASSERT(system_resource_limit->SetLimitValue(LimitableResource::PhysicalMemoryMax, memory_manager->GetSize()).IsSuccess());
++            ASSERT(system_resource_limit->SetLimitValue(LimitableResource::ThreadCountMax, 800).IsSuccess());
++            ASSERT(system_resource_limit->SetLimitValue(LimitableResource::EventCountMax, 900).IsSuccess());
++            ASSERT(system_resource_limit->SetLimitValue(LimitableResource::TransferMemoryCountMax, 200).IsSuccess());
++            ASSERT(system_resource_limit->SetLimitValue(LimitableResource::SessionCountMax, 1133).IsSuccess());
++        }
++        InitializeShutdownThreads();
++        InitializePhysicalCores();
++        InitializePreemption(kernel);
++        InitializeGlobalData(kernel);
++        page_buffer_slab_heap.Initialize(system);
++        InitializeHackSharedMemory(kernel);
++        RegisterHostThread(nullptr);
++#else
+         // Derive the initial memory layout from the emulated board
+         Init::InitializeSlabResourceCounts(kernel);
+         DeriveInitialMemoryLayout();
+@@ -116,6 +143,7 @@ struct KernelCore::Impl {
+ 
+         InitializeHackSharedMemory(kernel);
+         RegisterHostThread(nullptr);
++#endif
+     }
+ 
+     void TerminateAllProcesses() {
+@@ -255,6 +283,9 @@ struct KernelCore::Impl {
      }
  
      void InitializePreemption(KernelCore& kernel) {
@@ -7638,7 +8032,7 @@ index 6363a9e0ab..cfb4364eb9 100644
          preemption_event = Core::Timing::CreateEvent("PreemptionCallback", [this, &kernel](s64 time, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
              {
                  KScopedSchedulerLock lock(kernel);
-@@ -924,6 +929,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
+@@ -924,6 +955,7 @@ const Kernel::PhysicalCore& KernelCore::PhysicalCore(std::size_t id) const {
  }
  
  size_t KernelCore::CurrentPhysicalCoreIndex() const {
