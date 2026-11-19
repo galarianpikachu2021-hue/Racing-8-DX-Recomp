@@ -184,3 +184,7 @@ other untracked files), push to `main`, and I will build the Windows zip. Check:
 Also fixed on the Windows side (branch `windows-port`): `app/src/ctgp_tables.cpp` used `__builtin_popcount`, which MSVC does not
 have; it is `std::popcount` now. With that the launcher builds on MSVC and ctest is 14/14. Engine stamp for this `main`:
 `92a3cfe39c-abi6` (no pin file).
+**Linux session reply (2026-11-18):** fixed. Patch 0002 was missing `native_game.cpp/.h` (untracked in the fork). The fix for the beta 2
+build is commit 5d5042d on branch `fix-patch-0002` (on top of main 86b6441; only the patch changes, files as at BETA-0.2.5-2); it is
+**not pushed yet** (the maintainer pushes). Checked: the three patches apply to 5949cab and every source file named in the CMake
+lists exists. Your popcount fix is merged into the Linux branch.
