@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..77726fe1bb 100644
+index 408daa6839..1305e6d4a1 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1071,7 +1071,7 @@ index 408daa6839..77726fe1bb 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1380,31 @@ endif()
+@@ -1335,3 +1380,46 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -1102,6 +1102,21 @@ index 408daa6839..77726fe1bb 100644
 +    list(APPEND KR_CORE_SOURCES ${KR_KEEP})
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES})
 +    target_compile_definitions(core PRIVATE KARTRECOMP_DROP_UNUSED_SERVICES)
++endif()
++
++# kart-recomp: on Linux the game runs on the runtime kernel (docs/NATIVE_KERNEL.md, stages 5-6); the emulated kernel's system-call
++# handlers are only reached through its own cores and are left out (KARTRECOMP_NATIVE_KERNEL=0 is gone with them).
++if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
++    set(KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT ON)
++else()
++    set(KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT OFF)
++endif()
++option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
++if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
++    get_target_property(KR_CORE_SOURCES2 core SOURCES)
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$")
++    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
++    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
 index 67a55424e9..ee42c54a1b 100644
@@ -6811,7 +6826,7 @@ index c64e1668ca..1e8db8872e 100644
          return m_device_memory->GetPointer<u8>(m_physical_address + offset);
      }
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
-index b0f33b44c7..e907761889 100644
+index b0f33b44c7..147f8d1933 100644
 --- a/src/core/hle/kernel/k_thread.cpp
 +++ b/src/core/hle/kernel/k_thread.cpp
 @@ -33,6 +33,9 @@
@@ -6838,7 +6853,7 @@ index b0f33b44c7..e907761889 100644
          // Initialize emulation parameters.
          thread->m_host_context = std::make_shared<Common::Fiber>(std::move(init_func));
  
-@@ -307,7 +317,11 @@ namespace Kernel {
+@@ -307,13 +317,20 @@ namespace Kernel {
          system.Kernel().GlobalSchedulerContext().AddThread(thread);
          std::function<void()> func2{[&system, func_{std::move(func)}] {
              // Similar to UserModeThreadStarter.
@@ -6851,7 +6866,17 @@ index b0f33b44c7..e907761889 100644
  
              // Run the guest function.
              func_();
-@@ -444,6 +458,7 @@ namespace Kernel {
+ 
+             // Exit.
+-            Svc::ExitThread(system);
++            // Exit (Svc::ExitThread's body; the emulated system-call handlers are not in every build).
++            auto* const current_thread = GetCurrentThreadPointer(system.Kernel());
++            system.GlobalSchedulerContext().RemoveThread(current_thread);
++            current_thread->Exit(system.Kernel());
+         }};
+ 
+         R_RETURN(InitializeThread(system.Kernel(), thread, {}, {}, {}, prio, virt_core, owner, ThreadType::HighPriority,
+@@ -444,6 +461,7 @@ namespace Kernel {
              m_signaled = true;
              KSynchronizationObject::NotifyAvailable(kernel);
          }
@@ -6859,7 +6884,7 @@ index b0f33b44c7..e907761889 100644
  
          // Close the thread outside the scheduler lock. If this drops the last reference,
          // Finalize() runs here and unmaps the TLS page under the page table's KLightLock. A
-@@ -1285,6 +1300,9 @@ namespace Kernel {
+@@ -1285,6 +1303,9 @@ namespace Kernel {
              if (this->GetState() == ThreadState::Waiting) {
                  m_wait_queue->CancelWait(kernel, this, ResultTerminationRequested, true);
              }
@@ -6869,7 +6894,7 @@ index b0f33b44c7..e907761889 100644
          }
  
          return this->GetState();
-@@ -1318,7 +1336,7 @@ namespace Kernel {
+@@ -1318,7 +1339,7 @@ namespace Kernel {
  
      void KThread::RequestDummyThreadWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -6878,7 +6903,7 @@ index b0f33b44c7..e907761889 100644
  
          // We will block when the scheduler lock is released.
          std::scoped_lock lock{m_dummy_thread_mutex};
-@@ -1326,6 +1344,26 @@ namespace Kernel {
+@@ -1326,6 +1347,26 @@ namespace Kernel {
      }
  
      void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -6905,7 +6930,7 @@ index b0f33b44c7..e907761889 100644
          if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
              // Occurs in single core mode.
              return;
-@@ -1338,7 +1376,7 @@ namespace Kernel {
+@@ -1338,7 +1379,7 @@ namespace Kernel {
  
      void KThread::DummyThreadEndWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -7597,10 +7622,10 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
 new file mode 100644
-index 0000000000..79e22b3a6d
+index 0000000000..49dabed072
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.cpp
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,372 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +
@@ -7810,7 +7835,10 @@ index 0000000000..79e22b3a6d
 +    static const bool on = [] {
 +        // Default on Linux since 2026-11-18 (KARTRECOMP_NATIVE_KERNEL=0: the emulated kernel); opt-in elsewhere.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_KERNEL");
-+#ifdef __linux__
++#if defined(KARTRECOMP_RUNTIME_KERNEL_ONLY)
++        (void)v;
++        return true; // the emulated kernel's system calls are not in this build
++#elif defined(__linux__)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -10350,6 +10378,22 @@ index 0000000000..6412740164
 +[[noreturn]] void ExitCurrent(KernelCore& kernel, KThread* thread);
 +
 +} // namespace Kernel::NativeThreads
+diff --git a/src/core/hle/kernel/physical_core.cpp b/src/core/hle/kernel/physical_core.cpp
+index 24ba9c97b1..93f3fdac28 100644
+--- a/src/core/hle/kernel/physical_core.cpp
++++ b/src/core/hle/kernel/physical_core.cpp
+@@ -167,7 +167,11 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
+         // Handle system calls.
+         if (supervisor_call) {
+             // Perform call.
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++            UNREACHABLE_MSG("emulated system call on the runtime-kernel-only build");
++#else
+             Svc::Call(system, interface->GetSvcNumber());
++#endif
+             return;
+         }
+ 
 diff --git a/src/core/hle/kernel/svc.cpp b/src/core/hle/kernel/svc.cpp
 index f9807d1e4e..7411bd813c 100644
 --- a/src/core/hle/kernel/svc.cpp
@@ -11062,6 +11106,37 @@ index 8b7a1b642e..0b3cbf15f9 100644
      const FileSys::PatchManager pm{title_id, fsc, content_provider};
  
      auto base =
+diff --git a/src/core/hle/service/glue/time/standard_steady_clock_resource.cpp b/src/core/hle/service/glue/time/standard_steady_clock_resource.cpp
+index 5ebaa33e00..a291c46590 100644
+--- a/src/core/hle/service/glue/time/standard_steady_clock_resource.cpp
++++ b/src/core/hle/service/glue/time/standard_steady_clock_resource.cpp
+@@ -1,3 +1,4 @@
++#include <thread>
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+@@ -40,9 +41,7 @@ void StandardSteadyClockResource::Initialize(Common::UUID* out_source_id,
+         if (res == ResultSuccess) {
+             break;
+         }
+-        Kernel::Svc::SleepThread(m_system, std::chrono::duration_cast<std::chrono::nanoseconds>(
+-                                               std::chrono::milliseconds(1))
+-                                               .count());
++        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // a host thread (was Svc::SleepThread)
+     }
+ 
+     if (i < NUM_TRIES) {
+@@ -114,9 +113,7 @@ void StandardSteadyClockResource::UpdateTime() {
+         if (res == ResultSuccess) {
+             break;
+         }
+-        Kernel::Svc::SleepThread(m_system, std::chrono::duration_cast<std::chrono::nanoseconds>(
+-                                               std::chrono::milliseconds(1))
+-                                               .count());
++        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // a host thread (was Svc::SleepThread)
+     }
+ }
+ 
 diff --git a/src/core/hle/service/hle_ipc.cpp b/src/core/hle/service/hle_ipc.cpp
 index db80205a42..7bac09862b 100644
 --- a/src/core/hle/service/hle_ipc.cpp
@@ -12141,6 +12216,30 @@ index ac2e821e11..eef44770a1 100644
      Kernel::KClientSession* client_session{};
      auto result = GetServiceImpl(&client_session, ctx);
      if (ctx.GetIsDeferred()) {
+diff --git a/src/core/hle/service/sm/sm.h b/src/core/hle/service/sm/sm.h
+index 900e9a5d25..a9286af7a7 100644
+--- a/src/core/hle/service/sm/sm.h
++++ b/src/core/hle/service/sm/sm.h
+@@ -6,6 +6,8 @@
+ 
+ #pragma once
+ 
++#include <thread>
++
+ #include <chrono>
+ #include <memory>
+ #include <mutex>
+@@ -78,9 +80,7 @@ public:
+             using namespace std::literals::chrono_literals;
+             while (it == registered_services.end()) {
+                 l.unlock();
+-                Kernel::Svc::SleepThread(
+-                    kernel.System(),
+-                    std::chrono::duration_cast<std::chrono::nanoseconds>(100ms).count());
++                std::this_thread::sleep_for(100ms); // host threads ask here (was Svc::SleepThread)
+                 l.lock();
+                 it = registered_services.find(name);
+             }
 diff --git a/src/core/hle/service/sockets/bsd.cpp b/src/core/hle/service/sockets/bsd.cpp
 index 6e5de1ade6..36b7aceaef 100644
 --- a/src/core/hle/service/sockets/bsd.cpp
