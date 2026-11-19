@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..c7bb52557f 100644
+index 408daa6839..34d54f6ae8 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1114,7 +1114,7 @@ index 408daa6839..c7bb52557f 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$")
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace)\\.cpp$")
 +    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
@@ -5991,7 +5991,7 @@ index 9e5a9f3dc4..166b30895f 100644
      void PrepareReschedule(u32 core_index);
  
 diff --git a/src/core/cpu_manager.cpp b/src/core/cpu_manager.cpp
-index 315b273ae8..780bfd9449 100644
+index 315b273ae8..f460cdf809 100644
 --- a/src/core/cpu_manager.cpp
 +++ b/src/core/cpu_manager.cpp
 @@ -4,6 +4,12 @@
@@ -6028,7 +6028,19 @@ index 315b273ae8..780bfd9449 100644
      gpu_barrier.emplace(num_cores + 1);
      for (std::size_t core = 0; core < num_cores; core++)
          core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
-@@ -176,6 +189,29 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
+@@ -64,7 +77,11 @@ void CpuManager::ShutdownThreadFunction(Kernel::KernelCore& kernel) {
+ 
+ void CpuManager::HandleInterrupt(Kernel::KernelCore& kernel) {
+     auto core_index = kernel.CurrentPhysicalCoreIndex();
++#ifndef KARTRECOMP_RUNTIME_KERNEL_ONLY
+     Kernel::KInterruptManager::HandleInterrupt(kernel, s32(core_index));
++#else
++    (void)core_index;
++#endif
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -176,6 +193,29 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
      std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};
      Common::SetCurrentThreadName(name.c_str());
      Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
@@ -6058,7 +6070,7 @@ index 315b273ae8..780bfd9449 100644
  #ifdef __ANDROID__
      // Aimed specifically for Snapdragon 8 Elite devices
      // This kills performance on desktop, but boosts perf for UMA devices
-@@ -195,7 +231,7 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
+@@ -195,7 +235,7 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
          return;
      }
  
@@ -7045,7 +7057,7 @@ index c64e1668ca..1e8db8872e 100644
          return m_device_memory->GetPointer<u8>(m_physical_address + offset);
      }
 diff --git a/src/core/hle/kernel/k_thread.cpp b/src/core/hle/kernel/k_thread.cpp
-index b0f33b44c7..147f8d1933 100644
+index b0f33b44c7..3e698a5395 100644
 --- a/src/core/hle/kernel/k_thread.cpp
 +++ b/src/core/hle/kernel/k_thread.cpp
 @@ -33,6 +33,9 @@
@@ -7103,7 +7115,17 @@ index b0f33b44c7..147f8d1933 100644
  
          // Close the thread outside the scheduler lock. If this drops the last reference,
          // Finalize() runs here and unmaps the TLS page under the page table's KLightLock. A
-@@ -1285,6 +1303,9 @@ namespace Kernel {
+@@ -1277,7 +1295,9 @@ namespace Kernel {
+                 // NOTE: We do not mask the "current core", because this code may not actually be
+                 //       executing from the thread representing the "current core".
+                 if (const u64 core_mask = m_physical_affinity_mask.GetAffinityMask(); core_mask != 0) {
++#ifndef KARTRECOMP_RUNTIME_KERNEL_ONLY
+                     Kernel::KInterruptManager::SendInterProcessorInterrupt(kernel, core_mask);
++#endif
+                 }
+             }
+ 
+@@ -1285,6 +1305,9 @@ namespace Kernel {
              if (this->GetState() == ThreadState::Waiting) {
                  m_wait_queue->CancelWait(kernel, this, ResultTerminationRequested, true);
              }
@@ -7113,7 +7135,7 @@ index b0f33b44c7..147f8d1933 100644
          }
  
          return this->GetState();
-@@ -1318,7 +1339,7 @@ namespace Kernel {
+@@ -1318,7 +1341,7 @@ namespace Kernel {
  
      void KThread::RequestDummyThreadWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -7122,7 +7144,7 @@ index b0f33b44c7..147f8d1933 100644
  
          // We will block when the scheduler lock is released.
          std::scoped_lock lock{m_dummy_thread_mutex};
-@@ -1326,6 +1347,26 @@ namespace Kernel {
+@@ -1326,6 +1349,26 @@ namespace Kernel {
      }
  
      void KThread::DummyThreadBeginWait(KernelCore& kernel) {
@@ -7149,7 +7171,7 @@ index b0f33b44c7..147f8d1933 100644
          if (!this->IsDummyThread() || kernel.IsPhantomModeForSingleCore()) {
              // Occurs in single core mode.
              return;
-@@ -1338,7 +1379,7 @@ namespace Kernel {
+@@ -1338,7 +1381,7 @@ namespace Kernel {
  
      void KThread::DummyThreadEndWait(KernelCore& kernel) {
          ASSERT(KScheduler::IsSchedulerLockedByCurrentThread(kernel));
@@ -9011,10 +9033,10 @@ index 0000000000..a903b68ecc
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..77eac02b7d
+index 0000000000..12f7e29d1b
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,444 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services.h"
 +
@@ -9208,6 +9230,10 @@ index 0000000000..77eac02b7d
 +            if (ch >= ' ' && ch <= '~') service.push_back(ch);
 +        if (const auto h = OpenService(kernel, service)) return c.PushMoveHandle(*h);
 +        // Not a runtime service: a session to the emulated one.
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++        LOG_ERROR(Service, "native services: {} is not answered by the runtime (no emulated services in this build)", service);
++        return c.SetResult(0xE401); // sm: not registered
++#endif
 +        Kernel::KClientPort* port{};
 +        if (const Result r = kernel.System().ServiceManager().GetServicePort(&port, service); r.IsError()) {
 +            LOG_ERROR(Service, "native services: unknown service {}", service);
@@ -11357,7 +11383,7 @@ index 5ebaa33e00..a291c46590 100644
  }
  
 diff --git a/src/core/hle/service/hle_ipc.cpp b/src/core/hle/service/hle_ipc.cpp
-index db80205a42..7bac09862b 100644
+index db80205a42..d7431d98ae 100644
 --- a/src/core/hle/service/hle_ipc.cpp
 +++ b/src/core/hle/service/hle_ipc.cpp
 @@ -30,7 +30,7 @@
@@ -11369,6 +11395,17 @@ index db80205a42..7bac09862b 100644
  
  SessionRequestHandler::~SessionRequestHandler() = default;
  
+@@ -511,6 +511,10 @@ bool HLERequestContext::CanWriteBuffer(std::size_t buffer_index) const {
+ void HLERequestContext::AddMoveInterface(SessionRequestHandlerPtr s) {
+     ASSERT(Kernel::GetCurrentProcess(kernel).GetResourceLimit()->Reserve(kernel, Kernel::LimitableResource::SessionCountMax, 1));
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
++    return;
++#endif
+     auto* session = Kernel::KSession::Create(kernel);
+     session->Initialize(kernel, nullptr, 0);
+     Kernel::KSession::Register(kernel, session);
 diff --git a/src/core/hle/service/hle_ipc.h b/src/core/hle/service/hle_ipc.h
 index 08e78c9b0c..9059761f32 100644
 --- a/src/core/hle/service/hle_ipc.h
@@ -11386,6 +11423,21 @@ index 08e78c9b0c..9059761f32 100644
  };
  
  using SessionRequestHandlerWeakPtr = std::weak_ptr<SessionRequestHandler>;
+diff --git a/src/core/hle/service/ipc_helpers.h b/src/core/hle/service/ipc_helpers.h
+index 55168cf875..8b1b818728 100644
+--- a/src/core/hle/service/ipc_helpers.h
++++ b/src/core/hle/service/ipc_helpers.h
+@@ -118,6 +118,10 @@ struct ResponseBuilder {
+         } else {
+             ASSERT(Kernel::GetCurrentProcess(ctx.kernel).GetResourceLimit()->Reserve(ctx.kernel, Kernel::LimitableResource::SessionCountMax, 1));
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++            UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
++            return;
++#endif
+             auto* session = Kernel::KSession::Create(ctx.kernel);
+             session->Initialize(ctx.kernel, nullptr, 0);
+             Kernel::KSession::Register(ctx.kernel, session);
 diff --git a/src/core/hle/service/mii/mii_database_manager.cpp b/src/core/hle/service/mii/mii_database_manager.cpp
 index 1dec5ab984..e8ee5a0089 100644
 --- a/src/core/hle/service/mii/mii_database_manager.cpp
@@ -12059,7 +12111,7 @@ index d201247466..74eb776a52 100644
  
      // Mark as started.
 diff --git a/src/core/hle/service/server_manager.cpp b/src/core/hle/service/server_manager.cpp
-index 00937db8ab..47bb8444fd 100644
+index 00937db8ab..799b13c235 100644
 --- a/src/core/hle/service/server_manager.cpp
 +++ b/src/core/hle/service/server_manager.cpp
 @@ -18,6 +18,7 @@
@@ -12078,7 +12130,51 @@ index 00937db8ab..47bb8444fd 100644
      auto* session = new Session(m_system.Kernel(), server_session, std::move(manager));
  
      // Begin tracking the server session.
-@@ -432,6 +434,7 @@ Result ServerManager::OnDeferralEvent() {
+@@ -186,6 +188,9 @@ Result ServerManager::RegisterNamedService(const std::string& service_name,
+ Result ServerManager::ManageNamedPort(const std::string& service_name,
+                                       SessionRequestHandlerFactory&& handler_factory,
+                                       u32 max_sessions) {
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    R_THROW(ResultUnknown); // no emulated IPC in this build
++#endif
+     // Create a new port.
+     auto* port = Kernel::KPort::Create(m_system.Kernel());
+     port->Initialize(m_system.Kernel(), max_sessions, false, 0);
+@@ -332,6 +337,10 @@ Result ServerManager::LoopProcessImpl() {
+ }
+ 
+ Result ServerManager::OnPortEvent(Port* server) {
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    UNREACHABLE_MSG("emulated IPC port on the runtime-kernel-only build");
++    R_THROW(ResultUnknown);
++#endif
+     // Accept a new server session.
+     auto* server_port = static_cast<Kernel::KServerPort*>(server->GetNativeHandle());
+     Kernel::KServerSession* server_session = server_port->AcceptSession(m_system.Kernel());
+@@ -354,6 +363,10 @@ Result ServerManager::OnPortEvent(Port* server) {
+ Result ServerManager::OnSessionEvent(Session* session) {
+     Result res = ResultSuccess;
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
++    R_THROW(ResultUnknown);
++#endif
+     // Try to receive a message.
+     auto* server_session = static_cast<Kernel::KServerSession*>(session->GetNativeHandle());
+     res = server_session->ReceiveRequestHLE(m_system.Kernel(), &session->GetContext(), session->GetManager());
+@@ -393,7 +406,11 @@ Result ServerManager::CompleteSyncRequest(Session* session) {
+     }
+ 
+     // Send the reply.
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    UNREACHABLE_MSG("emulated IPC reply on the runtime-kernel-only build");
++#else
+     res = server_session->SendReplyHLE(m_system.Kernel());
++#endif
+ 
+     // If the session has been closed, we're done.
+     if (res == Kernel::ResultSessionClosed || service_res == IPC::ResultSessionClosed) {
+@@ -432,6 +449,7 @@ Result ServerManager::OnDeferralEvent() {
  }
  
  void ServerManager::DestroySession(Session* session) {
@@ -12404,7 +12500,7 @@ index ae07565196..3cd1665b8a 100644
  
  Result ISystemSettingsServer::SetLanguageCode(LanguageCode language_code) {
 diff --git a/src/core/hle/service/sm/sm.cpp b/src/core/hle/service/sm/sm.cpp
-index ac2e821e11..eef44770a1 100644
+index ac2e821e11..653527bd94 100644
 --- a/src/core/hle/service/sm/sm.cpp
 +++ b/src/core/hle/service/sm/sm.cpp
 @@ -18,6 +18,7 @@
@@ -12415,7 +12511,31 @@ index ac2e821e11..eef44770a1 100644
  #include "core/hle/service/sm/sm_controller.h"
  
  namespace Service::SM {
-@@ -129,7 +130,19 @@ void SM::Initialize(HLERequestContext& ctx) {
+@@ -63,6 +64,15 @@ Result ServiceManager::RegisterService(Kernel::KServerPort** out_server_port, st
+         return Service::SM::ResultAlreadyRegistered;
+     }
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    // The runtime answers every service request (docs/NATIVE_KERNEL.md): the registry keeps the library objects, no IPC port.
++    registered_services.emplace(name, handler);
++    if (deferral_event) {
++        deferral_event->Signal(kernel);
++    }
++    *out_server_port = nullptr;
++    R_SUCCEED();
++#else
+     auto* port = Kernel::KPort::Create(kernel);
+     port->Initialize(kernel, ServerSessionCountMax, false, 0);
+ 
+@@ -80,6 +90,7 @@ Result ServiceManager::RegisterService(Kernel::KServerPort** out_server_port, st
+ 
+     // We succeeded.
+     R_SUCCEED();
++#endif
+ }
+ 
+ Result ServiceManager::UnregisterService(const std::string& name) {
+@@ -129,7 +140,19 @@ void SM::Initialize(HLERequestContext& ctx) {
      rb.Push(ResultSuccess);
  }
  
@@ -12435,6 +12555,17 @@ index ac2e821e11..eef44770a1 100644
      Kernel::KClientSession* client_session{};
      auto result = GetServiceImpl(&client_session, ctx);
      if (ctx.GetIsDeferred()) {
+@@ -195,6 +218,10 @@ Result SM::GetServiceImpl(Kernel::KClientSession** out_client_session, HLEReques
+ 
+     // Create a new session.
+     Kernel::KClientSession* session{};
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    (void)client_port;
++    return Service::SM::ResultNotRegistered; // no emulated IPC in this build
++#endif
+     if (const auto result = client_port->CreateSession(kernel, &session); result.IsError()) {
+         LOG_ERROR(Service_SM, "called service={} -> error 0x{:08X}", name, result.raw);
+         return result;
 diff --git a/src/core/hle/service/sm/sm.h b/src/core/hle/service/sm/sm.h
 index 900e9a5d25..a9286af7a7 100644
 --- a/src/core/hle/service/sm/sm.h
@@ -12459,6 +12590,21 @@ index 900e9a5d25..a9286af7a7 100644
                  l.lock();
                  it = registered_services.find(name);
              }
+diff --git a/src/core/hle/service/sm/sm_controller.cpp b/src/core/hle/service/sm/sm_controller.cpp
+index cb1c068dbb..bef96c4f37 100644
+--- a/src/core/hle/service/sm/sm_controller.cpp
++++ b/src/core/hle/service/sm/sm_controller.cpp
+@@ -40,6 +40,10 @@ void Controller::CloneCurrentObject(HLERequestContext& ctx) {
+     Kernel::KScopedResourceReservation session_reservation(system.Kernel(), Kernel::GetCurrentProcessPointer(kernel), Kernel::LimitableResource::SessionCountMax);
+     ASSERT(session_reservation.Succeeded());
+ 
++#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
++    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
++    return;
++#endif
+     // Create the session.
+     Kernel::KSession* session = Kernel::KSession::Create(kernel);
+     ASSERT(session != nullptr);
 diff --git a/src/core/hle/service/sockets/bsd.cpp b/src/core/hle/service/sockets/bsd.cpp
 index 6e5de1ade6..36b7aceaef 100644
 --- a/src/core/hle/service/sockets/bsd.cpp
