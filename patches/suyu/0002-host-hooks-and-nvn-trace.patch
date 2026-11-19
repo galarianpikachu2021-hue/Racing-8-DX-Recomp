@@ -9177,10 +9177,10 @@ index 0000000000..cbf23ef782
 +} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..622fedfbe8
+index 0000000000..3e9f0834bf
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,277 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +#include "core/hle/kernel/native_threads.h"
@@ -9246,6 +9246,7 @@ index 0000000000..622fedfbe8
 +/// KARTRECOMP_PIN=<cpu>,<cpu>,<cpu>,<cpu>: virtual core N's threads run on the Nth listed host CPU (as the emulated-core threads
 +/// did). A hand-off between two threads of one core then stays on one CPU: the next thread starts where the last one stopped,
 +/// with its caches warm, instead of being woken on some other CPU.
++#ifdef __linux__ // (only PinToCore below uses it, and that is Linux-only)
 +int PinnedCpu(int core) {
 +    static const std::array<int, 4> cpus = [] {
 +        std::array<int, 4> out{-1, -1, -1, -1};
@@ -9263,6 +9264,7 @@ index 0000000000..622fedfbe8
 +    }();
 +    return core >= 0 && core < 4 ? cpus[static_cast<std::size_t>(core)] : -1;
 +}
++#endif
 +
 +void PinToCore(int core) {
 +#ifdef __linux__
@@ -19578,7 +19580,7 @@ index 0000000000..bb6e117de8
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/display.h b/src/kart_runtime/services/display.h
 new file mode 100644
-index 0000000000..dd18851237
+index 0000000000..cf1db4d43e
 --- /dev/null
 +++ b/src/kart_runtime/services/display.h
 @@ -0,0 +1,343 @@
@@ -19806,7 +19808,7 @@ index 0000000000..dd18851237
 +        s->On(101, [](Context& c) { c.PushInterface(std::make_shared<Service>("ISystemDisplayService")); });
 +        s->On(102, [](Context& c) { c.PushInterface(std::make_shared<Service>("IManagerDisplayService")); });
 +        s->On(103, [this](Context& c) { c.PushInterface(Binder()); });                                   // GetIndirectDisplayTransactionService
-+        s->On(1010, [this](Context& c) { // OpenDisplay(name)
++        s->On(1010, [](Context& c) { // OpenDisplay(name)
 +            auto name = c.Pop<std::array<char, 0x40>>();
 +            name.back() = 0;
 +            const auto id = DisplayId(name.data());
@@ -19927,7 +19929,7 @@ index 0000000000..dd18851237
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/filesystem.h b/src/kart_runtime/services/filesystem.h
 new file mode 100644
-index 0000000000..decd1fcf75
+index 0000000000..3a3ae27860
 --- /dev/null
 +++ b/src/kart_runtime/services/filesystem.h
 @@ -0,0 +1,248 @@
@@ -20071,13 +20073,13 @@ index 0000000000..decd1fcf75
 +            if (const uint32_t r = fs->GetEntryType(Path(c), &type); r != 0) return c.SetResult(r);
 +            c.Push<uint32_t>(type);
 +        });
-+        s->On(8, [this, fs](Context& c) { // OpenFile(mode)
++        s->On(8, [fs](Context& c) { // OpenFile(mode)
 +            const auto mode = c.Pop<uint32_t>();
 +            std::shared_ptr<FsFile> f;
 +            if (const uint32_t r = fs->OpenFile(Path(c), mode, &f); r != 0) return c.SetResult(r);
 +            c.PushInterface(File(f));
 +        });
-+        s->On(9, [this, fs](Context& c) { // OpenDirectory(mode)
++        s->On(9, [fs](Context& c) { // OpenDirectory(mode)
 +            const auto mode = c.Pop<uint32_t>();
 +            std::shared_ptr<FsDirectory> d;
 +            if (const uint32_t r = fs->OpenDirectory(Path(c), mode, &d); r != 0) return c.SetResult(r);
@@ -20479,10 +20481,10 @@ index 0000000000..bbb135c5a5
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/time.h b/src/kart_runtime/services/time.h
 new file mode 100644
-index 0000000000..ee746c03f8
+index 0000000000..db8798382f
 --- /dev/null
 +++ b/src/kart_runtime/services/time.h
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,179 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the clock services ("time:u", "time:a", "time:s") on the host clock (docs/NATIVE_ENGINE.md, "native services").
 +//
@@ -20545,15 +20547,35 @@ index 0000000000..ee746c03f8
 +    static bool ToCalendar(int64_t posix, CalendarTime& out, CalendarAdditionalInfo& info) {
 +        const std::time_t t = static_cast<std::time_t>(posix);
 +        std::tm tm{};
++#ifdef _WIN32
++        if (localtime_s(&tm, &t) != 0) return false;
++#else
 +        if (!localtime_r(&t, &tm)) return false;
++#endif
 +        out = {static_cast<int16_t>(tm.tm_year + 1900), static_cast<int8_t>(tm.tm_mon + 1), static_cast<int8_t>(tm.tm_mday),
 +               static_cast<int8_t>(tm.tm_hour), static_cast<int8_t>(tm.tm_min), static_cast<int8_t>(tm.tm_sec), 0};
 +        info = {};
 +        info.day_of_week = tm.tm_wday;
 +        info.day_of_year = tm.tm_yday;
++#ifdef _WIN32
++        // The CRT's struct tm has no zone name or offset: take them from the CRT's time zone (seconds west of UTC, DST bias).
++        {
++            char zone[64]{};
++            size_t n = 0;
++            if (_get_tzname(&n, zone, sizeof(zone), tm.tm_isdst > 0 ? 1 : 0) == 0 && n > 0) {
++                std::memcpy(info.name, zone, std::min<size_t>(std::strlen(zone), sizeof(info.name)));
++            }
++            long west = 0, dst_bias = 0;
++            _get_timezone(&west);
++            _get_dstbias(&dst_bias);
++            info.is_dst = tm.tm_isdst > 0;
++            info.ut_offset = static_cast<int32_t>(-west - (info.is_dst ? dst_bias : 0));
++        }
++#else
 +        if (tm.tm_zone) std::memcpy(info.name, tm.tm_zone, std::min(std::strlen(tm.tm_zone), sizeof(info.name)));
 +        info.is_dst = tm.tm_isdst > 0;
 +        info.ut_offset = static_cast<int32_t>(tm.tm_gmtoff);
++#endif
 +        return true;
 +    }
 +
@@ -20644,10 +20666,10 @@ index 0000000000..ee746c03f8
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/sync_arbiter.h b/src/kart_runtime/sync_arbiter.h
 new file mode 100644
-index 0000000000..a5c0ed8498
+index 0000000000..21432bd1a1
 --- /dev/null
 +++ b/src/kart_runtime/sync_arbiter.h
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,355 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the console's user-mode synchronisation system calls, natively (docs/NATIVE_ENGINE.md, "native kernel").
 +//
@@ -20777,7 +20799,7 @@ index 0000000000..a5c0ed8498
 +            uint32_t prev = Load(word);
 +            for (;;) {
 +                const uint32_t next = prev == 0 ? w->tag : (prev | HandleWaitMask);
-+                if (__atomic_compare_exchange_n(word, &prev, next, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) break;
++                if (CompareExchange(word, prev, next)) break;
 +            }
 +            if (prev == 0) {
 +                Wake(*w, Result::Success);
@@ -20807,7 +20829,7 @@ index 0000000000..a5c0ed8498
 +            if (type == WaitType::DecrementAndLessThan) {
 +                uint32_t expected = static_cast<uint32_t>(current);
 +                while (static_cast<int32_t>(expected) < value &&
-+                       !__atomic_compare_exchange_n(word, &expected, expected - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
++                       !CompareExchange(word, expected, expected - 1)) {
 +                }
 +                current = static_cast<int32_t>(expected);
 +            }
@@ -20850,8 +20872,7 @@ index 0000000000..a5c0ed8498
 +            }
 +            uint32_t expected = static_cast<uint32_t>(value);
 +            if (new_value != value) {
-+                __atomic_compare_exchange_n(word, &expected, static_cast<uint32_t>(new_value), false, __ATOMIC_SEQ_CST,
-+                                            __ATOMIC_SEQ_CST);
++                CompareExchange(word, expected, static_cast<uint32_t>(new_value));
 +            } else {
 +                expected = Load(word);
 +            }
@@ -20925,8 +20946,12 @@ index 0000000000..a5c0ed8498
 +    };
 +    using Queue = std::list<Waiter*>;
 +
-+    static uint32_t Load(uint32_t* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
-+    static void Store(uint32_t* p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
++    // std::atomic_ref (not the GCC __atomic builtins, which MSVC lacks): the words are 4-byte aligned guest memory.
++    static uint32_t Load(uint32_t* p) { return std::atomic_ref<uint32_t>(*p).load(std::memory_order_seq_cst); }
++    static void Store(uint32_t* p, uint32_t v) { std::atomic_ref<uint32_t>(*p).store(v, std::memory_order_seq_cst); }
++    static bool CompareExchange(uint32_t* p, uint32_t& expected, uint32_t desired) {
++        return std::atomic_ref<uint32_t>(*p).compare_exchange_strong(expected, desired, std::memory_order_seq_cst);
++    }
 +
 +    static void Insert(Queue& q, Waiter* w) {
 +        auto it = q.begin();
@@ -23228,15 +23253,20 @@ index 9c31896bde..6e59ab40b1 100644
              const u32 start_address{shader_config.offset};
 diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
 new file mode 100644
-index 0000000000..e7b9857ec6
+index 0000000000..b9441d04ec
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.cpp
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,374 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_game.h"
 +
 +#include <array>
++#ifdef _WIN32
++// (not <windows.h>: it defines a Yield macro that breaks kart_runtime's Yield methods)
++extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
++#else
 +#include <unistd.h>
++#endif
 +#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
@@ -23357,8 +23387,13 @@ index 0000000000..e7b9857ec6
 +        t.executor_data = cpu.get();
 +        runners.push_back(std::move(cpu));
 +        // Which host thread is which game thread (core dumps name host threads).
++#ifdef _WIN32
++        const long host_tid = static_cast<long>(::GetCurrentThreadId());
++#else
++        const long host_tid = static_cast<long>(::gettid());
++#endif
 +        LOG_INFO(Kernel, "native kernel: thread {:#x} runs on host thread {} (entry {:#x}, priority {}, core {}, stack {:#x})", t.id,
-+                 static_cast<long>(::gettid()), t.ctx.pc, t.priority, core, t.ctx.sp);
++                 host_tid, t.ctx.pc, t.priority, core, t.ctx.sp);
 +        return runners.back().get();
 +    }
 +
