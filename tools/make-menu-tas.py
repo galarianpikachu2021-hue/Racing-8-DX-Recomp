@@ -25,7 +25,8 @@ race lacks.
 --wireless[=N] opens Wireless Play (local wireless; in the engine it runs over a multiplayer room, docs/NATIVE_ENGINE.md) from the
 main menu and taps A N more times (default 2), then waits there without input - for checking the ldn:u service.
 
---no-pause-toggle leaves out the pause-menu Smart Steering toggle (for whole Grand Prix runs with the saved --smart-steering
+--pause-toggle toggles Smart Steering from the pause menu (off by default since 2026-11-18: the save has it on; --no-pause-toggle is
+the old name of the default). Previously: --no-pause-toggle left out the pause-menu Smart Steering toggle (for whole Grand Prix runs with the saved --smart-steering
 setting).
 
 --taps-from=F taps A once a second from frame F instead of holding it (to get from a finished race into the next one).
@@ -116,10 +117,9 @@ def main() -> int:
     # still on the opening straight; 80 frames of margin if a load is slower. While paused the kart does not move.
     # --no-pause-toggle: no Smart Steering toggle from the pause menu (with --smart-steering, whose character-select toggle is saved
     # and so holds for every race of a Grand Prix; the pause toggle only lasts one race).
-    if "--no-pause-toggle" in sys.argv:
-        centre_stick_pause = False
-    else:
-        centre_stick_pause = centre_stick
+    # 2026-11-18 (user): Smart Steering is saved on in the save, so by default nothing toggles it (a toggle would turn it off);
+    # --pause-toggle brings the pause-menu toggle back for a save without it.
+    centre_stick_pause = centre_stick and "--pause-toggle" in sys.argv and "--no-pause-toggle" not in sys.argv
     pause_window = range(2290, 2480) if centre_stick_pause else range(0)
     pause_toggle = {2300: "KEY_PLUS", 2370: "KEY_L", 2450: "KEY_PLUS"}
     # --taps-from=F: from frame F on, tap A once a second instead of holding it (results screen, "Next Race", the next race's start).
