@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..c28cee533c 100644
+index 408daa6839..31ab4e3847 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1114,8 +1114,8 @@ index 408daa6839..c28cee533c 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process|k_page_table_base|k_memory_block_manager|k_thread_local_page|k_memory_manager|k_page_heap|k_memory_layout|k_page_buffer|k_system_resource)\\.cpp$")
-+    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp hle/kernel/k_page_table_lite.cpp hle/kernel/k_memory_lite.cpp) # the scheduling parts, reduced (see the file)
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process|k_page_table_base|k_memory_block_manager|k_thread_local_page|k_memory_manager|k_page_heap|k_memory_layout|k_page_buffer|k_system_resource|k_thread)\\.cpp$|^hle/kernel/board/nintendo/nx/k_memory_layout\\.cpp$")
++    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp hle/kernel/k_page_table_lite.cpp hle/kernel/k_memory_lite.cpp hle/kernel/k_thread_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
@@ -7968,6 +7968,205 @@ index 87e5112a20..aee595e2ea 100644
      bool m_dummy_thread_runnable{true};
      std::mutex m_dummy_thread_mutex{};
      std::condition_variable m_dummy_thread_cv{};
+diff --git a/src/core/hle/kernel/k_thread_lite.cpp b/src/core/hle/kernel/k_thread_lite.cpp
+new file mode 100644
+index 0000000000..cc6f1ac4ea
+--- /dev/null
++++ b/src/core/hle/kernel/k_thread_lite.cpp
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: thread records for a build where the game always runs on the runtime kernel (KARTRECOMP_RUNTIME_KERNEL_ONLY,
++// docs/NATIVE_KERNEL.md stage 6). It replaces k_thread.cpp (1500 lines). The game's threads are runtime threads; KThread objects
++// are only records: one per host thread that touches a kernel object (identity for the kernel's locks, its dispatch count, its
++// owner), and the per-core main / idle / shutdown records the kernel set-up creates. None of them is scheduled or switched
++// (no fibers), none waits on emulated objects (host-side waits check and sleep, k_runtime_lite.cpp).
++
++#include <cstring>
++
++#include "common/assert.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_process.h"
++#include "core/hle/kernel/k_resource_limit.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/k_thread_queue.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/svc_results.h"
++#include "core/memory.h"
++
++namespace Kernel {
++
++// ---- the current thread ---------------------------------------------------------------------------------------------------------
++
++void SetCurrentThread(KernelCore& kernel, KThread* thread) {
++    kernel.SetCurrentEmuThread(thread);
++}
++KThread* GetCurrentThreadPointer(KernelCore& kernel) {
++    return kernel.GetCurrentEmuThread();
++}
++KThread& GetCurrentThread(KernelCore& kernel) {
++    return *GetCurrentThreadPointer(kernel);
++}
++KProcess* GetCurrentProcessPointer(KernelCore& kernel) {
++    return GetCurrentThread(kernel).GetOwnerProcess();
++}
++KProcess& GetCurrentProcess(KernelCore& kernel) {
++    return *GetCurrentProcessPointer(kernel);
++}
++s32 GetCurrentCoreId(KernelCore& kernel) {
++    return GetCurrentThread(kernel).GetCurrentCore();
++}
++Core::Memory::Memory& GetCurrentMemory(KernelCore& kernel) {
++    return GetCurrentProcess(kernel).GetMemory();
++}
++
++KScopedDisableDispatch::~KScopedDisableDispatch() {
++    if (m_kernel.IsShuttingDown()) {
++        return;
++    }
++    GetCurrentThread(m_kernel).EnableDispatch(m_kernel);
++}
++
++// ---- records ------------------------------------------------------------------------------------------------------------------
++
++KThread::KThread(KernelCore& kernel) : KAutoObjectWithSlabHeapAndContainer{kernel}, m_activity_pause_lock{kernel} {}
++KThread::~KThread() = default;
++
++void KThread::PostDestroy(KernelCore& kernel, uintptr_t arg) {
++    // No thread-count reservation is taken for these records, so only the owner reference goes.
++    if (KProcess* owner = reinterpret_cast<KProcess*>(arg & ~1ULL); owner != nullptr) {
++        owner->Close(kernel);
++    }
++}
++
++void KThread::Finalize(KernelCore& kernel) {
++    if (m_parent != nullptr) {
++        m_parent->UnregisterThread(kernel, this);
++    }
++    KSynchronizationObject::Finalize(kernel);
++}
++
++Result KThread::Initialize(KernelCore& kernel, KThreadFunction func, uintptr_t arg, KProcessAddress user_stack_top, s32 prio,
++                           s32 virt_core, KProcess* owner, ThreadType type) {
++    ASSERT(0 <= virt_core && virt_core < static_cast<s32>(Common::BitSize<u64>()));
++    const s32 phys_core = Core::Hardware::VirtualToPhysicalCoreMap[virt_core];
++    m_thread_type = type;
++    m_virtual_ideal_core_id = virt_core;
++    m_physical_ideal_core_id = phys_core;
++    m_virtual_affinity_mask = 1ULL << virt_core;
++    m_physical_affinity_mask.SetAffinity(phys_core, true);
++    m_thread_state = ThreadState::Runnable;
++    m_tls_address = 0;
++    m_parent = nullptr;
++    m_condvar_tree = nullptr;
++    m_signaled = false;
++    m_termination_requested = false;
++    m_wait_cancelled = false;
++    m_cancellable = false;
++    m_core_id = phys_core;
++    m_wait_result = ResultNoSynchronizationObject;
++    m_priority = prio;
++    m_base_priority = prio;
++    m_wait_queue = nullptr;
++    m_suspend_request_flags = 0;
++    m_suspend_allowed_flags = static_cast<u32>(ThreadState::SuspendFlagMask);
++    m_debug_attached = false;
++    m_priority_inheritance_count = 0;
++    m_schedule_count = -1;
++    m_last_scheduled_tick = 0;
++    m_light_ipc_data = nullptr;
++    m_waiting_lock_info = nullptr;
++    m_num_core_migration_disables = 0;
++    m_num_kernel_waiters = 0;
++    m_current_core_id = phys_core;
++    m_resource_limit_release_hint = false;
++    m_cpu_time = 0;
++    m_stack_top = user_stack_top;
++    m_argument = arg;
++    std::memset(static_cast<void*>(std::addressof(this->GetStackParameters())), 0, sizeof(StackParameters));
++    if (owner != nullptr) {
++        m_parent = owner;
++        m_parent->Open(kernel);
++    }
++    StackParameters& sp = this->GetStackParameters();
++    sp.cur_thread = this;
++    sp.disable_count = 1;
++    m_thread_id = kernel.CreateNewThreadID();
++    m_initialized = true;
++    if (m_parent != nullptr) {
++        m_parent->RegisterThread(kernel, this);
++    }
++    R_SUCCEED();
++}
++
++Result KThread::InitializeThread(KernelCore& kernel, KThread* thread, KThreadFunction func, uintptr_t arg,
++                                 KProcessAddress user_stack_top, s32 prio, s32 core, KProcess* owner, ThreadType type,
++                                 std::function<void()>&& init_func) {
++    R_RETURN(thread->Initialize(kernel, func, arg, user_stack_top, prio, core, owner, type));
++}
++
++Result KThread::InitializeDummyThread(Core::System& system, KThread* thread, KProcess* owner) {
++    R_TRY(thread->Initialize(system.Kernel(), {}, {}, {}, DummyThreadPriority, 3, owner, ThreadType::Dummy));
++    thread->m_stack_parameters.disable_count = 0;
++    R_SUCCEED();
++}
++Result KThread::InitializeMainThread(Core::System& system, KThread* thread, s32 virt_core) {
++    R_RETURN(thread->Initialize(system.Kernel(), {}, {}, {}, IdleThreadPriority, virt_core, {}, ThreadType::Main));
++}
++Result KThread::InitializeIdleThread(Core::System& system, KThread* thread, s32 virt_core) {
++    R_RETURN(thread->Initialize(system.Kernel(), {}, {}, {}, IdleThreadPriority, virt_core, {}, ThreadType::Main));
++}
++Result KThread::InitializeHighPriorityThread(Core::System& system, KThread* thread, KThreadFunction func, uintptr_t arg,
++                                             s32 virt_core) {
++    R_RETURN(thread->Initialize(system.Kernel(), func, arg, {}, Svc::HighestThreadPriority, virt_core, {}, ThreadType::HighPriority));
++}
++Result KThread::InitializeServiceThread(Core::System& system, KThread* thread, std::function<void()>&& func, s32 prio, s32 virt_core,
++                                        KProcess* owner) {
++    // Emulated service threads run on the emulated cores, which this build does not have.
++    R_THROW(ResultNotImplemented);
++}
++
++Result KThread::Run(KernelCore& kernel) {
++    this->SetState(kernel, ThreadState::Runnable);
++    R_SUCCEED();
++}
++
++void KThread::Exit(KernelCore& kernel) {
++    KScopedSchedulerLock sl{kernel};
++    m_signaled = true;
++    this->SetState(kernel, ThreadState::Terminated);
++}
++
++void KThread::RequestSuspend(KernelCore& kernel, SuspendType type) {}
++void KThread::Resume(KernelCore& kernel, SuspendType type) {}
++void KThread::RequestDummyThreadWait(KernelCore& kernel) {}
++void KThread::DoWorkerTaskImpl(KernelCore& kernel) {}
++
++bool KThread::IsSignaled(KernelCore& kernel) const {
++    return m_signaled;
++}
++
++void KThread::BeginWait(KernelCore& kernel, KThreadQueue* queue) {
++    this->SetState(kernel, ThreadState::Waiting);
++    m_wait_queue = queue;
++}
++void KThread::EndWait(KernelCore& kernel, Result wait_result) {
++    KScopedSchedulerLock sl(kernel);
++    if (this->GetState() == ThreadState::Waiting && m_wait_queue != nullptr) {
++        m_wait_queue->EndWait(kernel, this, wait_result);
++    }
++}
++
++void KThread::SetState(KernelCore& kernel, ThreadState state) {
++    const ThreadState old_state = m_thread_state.load(std::memory_order_relaxed);
++    m_thread_state.store(static_cast<ThreadState>((old_state & ~ThreadState::Mask) | (state & ThreadState::Mask)),
++                         std::memory_order_relaxed);
++}
++
++std::shared_ptr<Common::Fiber>& KThread::GetHostContext() {
++    return m_host_context;
++}
++
++} // namespace Kernel
 diff --git a/src/core/hle/kernel/kernel.cpp b/src/core/hle/kernel/kernel.cpp
 index 6363a9e0ab..54520450cd 100644
 --- a/src/core/hle/kernel/kernel.cpp
