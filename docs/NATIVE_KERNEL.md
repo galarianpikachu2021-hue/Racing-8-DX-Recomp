@@ -221,3 +221,26 @@ Order:
   kernel tested on Windows (COOPERATE.md asks the Windows session).
 
 None of this changes what the player sees; it removes code and threads. Expected size: several sessions.
+
+## Stage 6, first cut done; the scheduler cannot go yet (2026-11-18)
+
+Done: with `KARTRECOMP_RUNTIME_KERNEL_ONLY` (CMake option, default on for Linux) the emulated system-call handlers
+(`hle/kernel/svc.cpp` + 41 `svc/svc_*.cpp`) are not built, the runtime kernel is always on, and the three callers that named them
+(worker-thread exit, time-service retry sleep, service-manager wait) do the same work directly. `local/exp/nkcheck.sh <label>`
+runs the four standard checks; all pass (1P 4.0.1 race 57-59 fps, CTGP DX on 3.0.4 with switch/speedometer/cups, Setup's test boot,
+Wireless Play over a hosted room).
+
+Tried and reverted: also dropping `physical_core`, `k_scheduler`, `global_scheduler_context`, `k_hardware_timer`,
+`k_thread_queue`, `k_light_lock`, `k_condition_variable`, `k_address_arbiter`, `k_synchronization_object`. The link fails with ~900
+undefined references, nearly all `KLightLock::Lock/Unlock` (375) and `KScheduler::DisableScheduling/EnableScheduling/
+UpdateHighestPriorityThreads` (309): every kept kernel object (`KEvent`, `KReadableEvent`, `KSharedMemory`, `KTransferMemory`,
+`KProcess`, `KThread` for host threads, the handle table) takes a `KScopedSchedulerLock`. So the scheduler stays until those
+objects stop being used by the libraries.
+
+What that needs (stage 5b, not started, several sessions): replace the library-facing kernel objects with plain classes in
+`kart_runtime` (events: signal state + runtime mirrors, created in `ServiceContext::CreateEvent`, 33 creation sites, ~150
+Signal/Clear/GetReadableEvent uses across audio_core, hid_core, nvdrv, the hid/audio shells; shared and transfer memory for hid,
+fonts and audio; process access for memory reads and device locks). Only after that do `KThread`, the scheduler, `KernelCore` and
+the memory manager have no users, and the loader plus `Core::Memory`'s page table move to the runtime (stages 2 and "own memory
+view"). Doing it in one pass without a way to run the audio and controller paths after every file would break the game, so it
+should be done event type by event type with `nkcheck.sh` after each.
