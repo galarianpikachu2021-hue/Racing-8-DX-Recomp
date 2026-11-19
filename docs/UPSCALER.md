@@ -322,3 +322,9 @@ Now the scene's opaque draws carry exact vectors:
   Fine texture detail (hair) stays grainy at 33%: FSR 3 rebuilds 9 output pixels from 1 there while the kart moves.
 - **Not covered:** instanced draws, programs with tessellation/geometry stages, transparent draws (no depth write): they keep
   the camera/matching vectors. Ideas to cut the cost: skip draws whose clip positions only move with the camera.
+
+**Jitter follows the upscaler (2026-11-19):** with the menu row hidden (normal), camera jitter is on exactly when a temporal
+upscaler plugin is active (FSR 3, DLSS; not Off / FSR 1 / passthrough); `KARTRECOMP_DEV_MENU=1` shows the row and lets it decide,
+`KARTRECOMP_JITTER` still forces it. And nothing is jittered after the upscale point any more: the end-of-Grand-Prix results
+board is drawn with a depth target bound, so it got the sub-pixel shift every frame (user report: "jitter is very visible" on
+the results screen; seen live as the board's text outlines changing between consecutive screenshots).

@@ -16309,10 +16309,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..01a8981a11
+index 0000000000..f7433b2a6e
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8876 @@
+@@ -0,0 +1,8889 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -20172,7 +20172,9 @@ index 0000000000..01a8981a11
 +        // a fraction of a pixel, which moves everything drawn like a jittered projection would.
 +        // HUD, post-processing and menus have no depth target and stay put.
 +        const VkViewport vp_plain = vp; // before the jitter shift (object motion maps last frame's positions with it)
-+        if (jitter_frame && !in_tonemap_pass && !st.colors.empty() && st.colors[0] && st.depth && st.depth->info.format != VK_FORMAT_D16_UNORM) {
++        // Never after the upscale point: nothing smooths it out there (the results board is drawn with a depth target bound).
++        if (jitter_frame && !post_phase && !in_tonemap_pass && !st.colors.empty() && st.colors[0] && st.depth &&
++            st.depth->info.format != VK_FORMAT_D16_UNORM) {
 +            vp.x += jitter_x; // render pixels, whatever the scale
 +            vp.y += jitter_y;
 +            ++jitter_draws;
@@ -23802,7 +23804,18 @@ index 0000000000..01a8981a11
 +    /// Halton(2,3) sub-pixel offsets in [-0.5, 0.5), the sequence FSR and DLSS expect; 8 phases.
 +    void UpdateJitter() {
 +        static const char* mode = std::getenv("KARTRECOMP_JITTER");
-+        jitter_enabled = mode != nullptr || (overlay && overlay->Settings().jitter);
++        // Jitter follows the upscaler: a temporal upscaler (FSR 3, DLSS, ...) needs it to add detail, nothing else uses it. The
++        // menu row (hidden unless KARTRECOMP_DEV_MENU=1) decides only when it is shown.
++        static const bool dev_menu = [] { const char* v = std::getenv("KARTRECOMP_DEV_MENU"); return v && *v == '1'; }();
++        bool temporal = false;
++        if (overlay) {
++            const int up = overlay->Settings().upscaler;
++            if (up > 0 && static_cast<size_t>(up) < overlay_upscaler_ids.size()) {
++                const std::string& id = overlay_upscaler_ids[static_cast<size_t>(up)];
++                temporal = id != "fsr1" && id != "passthrough" && upscaler.Enabled();
++            }
++        }
++        jitter_enabled = mode != nullptr || (overlay && (dev_menu ? overlay->Settings().jitter : temporal));
 +        if (!jitter_enabled) {
 +            return;
 +        }
