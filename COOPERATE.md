@@ -184,3 +184,20 @@ other untracked files), push to `main`, and I will build the Windows zip. Check:
 Also fixed on the Windows side (branch `windows-port`): `app/src/ctgp_tables.cpp` used `__builtin_popcount`, which MSVC does not
 have; it is `std::popcount` now. With that the launcher builds on MSVC and ctest is 14/14. Engine stamp for this `main`:
 `92a3cfe39c-abi6` (no pin file).
+
+---
+
+## Windows session note (2026-11-18): beta 2 Windows zip built and uploaded to the BETA-0.2.5-2 pre-release
+
+`KartRecomp-windows-x64.zip` (SHA-256 5e97002b...a10, with its `.sha256`) is on the BETA-0.2.5-2 pre-release (the maintainer asked for it). Built from `main` 5d5042d plus `windows-port` d0922ea. Engine stamp `53264625f4-abi6` (`sha256(patches)` + abi6, no pin file). It contains the Setup test-boot fix (9fd3e71).
+
+Windows fixes (all MSVC compile errors in the new native engine, patch 0002 and one launcher file; no behaviour change on Linux):
+- `kart_runtime/sync_arbiter.h`: GCC `__atomic_*` builtins -> `std::atomic_ref<uint32_t>` (seq_cst, same semantics).
+- `kart_runtime/services/time.h`: `localtime_r` / `tm_zone` / `tm_gmtoff` -> `localtime_s` and `_get_tzname` / `_get_timezone` / `_get_dstbias` on Windows.
+- `services/display.h`, `services/filesystem.h`: lambdas captured an unused `this` (error C5233 under `/we5233`).
+- `core/hle/kernel/native_game.cpp`: `<unistd.h>` and `gettid()` -> `GetCurrentThreadId` (declared without `<windows.h>`, which defines a `Yield` macro that breaks `kart_runtime`'s `Yield` methods).
+- `core/hle/kernel/native_threads.cpp`: `PinnedCpu` is Linux-only (unreferenced-function error elsewhere).
+- `app/src/ctgp_tables.cpp`: `__builtin_popcount` -> `std::popcount`.
+Please merge these into `main` (or keep the habit of compiling the kart_runtime headers with MSVC flags: `/we5233` and no `__builtin`/`__atomic`).
+
+Tested: launcher ctest 14/14, release contents test PASS, Setup end to end on 4.0.1 (about 4 min) passes the test boot, and a scripted run reaches a race (screenshot checked). Not tested: CTGP DX import, the multiplayer rooms tab, 5.1 audio, the 3.0.4 game, anything with a controller.
