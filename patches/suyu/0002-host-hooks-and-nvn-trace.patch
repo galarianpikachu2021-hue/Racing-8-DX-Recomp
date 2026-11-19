@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..1305e6d4a1 100644
+index 408daa6839..c7bb52557f 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1071,7 +1071,7 @@ index 408daa6839..1305e6d4a1 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1380,46 @@ endif()
+@@ -1335,3 +1380,47 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -1114,7 +1114,8 @@ index 408daa6839..1305e6d4a1 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$")
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$")
++    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
@@ -6699,6 +6700,224 @@ index 7c9f734660..ade18287f2 100644
  
  private:
      bool m_is_signaled{};
+diff --git a/src/core/hle/kernel/k_runtime_lite.cpp b/src/core/hle/kernel/k_runtime_lite.cpp
+new file mode 100644
+index 0000000000..6c593d8a02
+--- /dev/null
++++ b/src/core/hle/kernel/k_runtime_lite.cpp
+@@ -0,0 +1,212 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the emulated kernel's scheduling parts for a build where the game always runs on the runtime kernel
++// (KARTRECOMP_RUNTIME_KERNEL_ONLY, docs/NATIVE_KERNEL.md stage 6). The game's threads are runtime threads, so the emulated scheduler,
++// its virtual cores, its hardware timer and its wait queues have nothing to schedule. What still uses the kernel objects are host
++// threads (the library code: audio, controllers, the graphics driver, the service OS layer), which only need the objects' locks and
++// signal state. This file replaces physical_core, k_scheduler, global_scheduler_context, k_hardware_timer, k_thread_queue,
++// k_light_lock, k_condition_variable, k_address_arbiter and k_synchronization_object with that much:
++// - the scheduler lock is a plain recursive lock (KAbstractSchedulerLock in its header) plus each host thread's dispatch count;
++// - the light lock is a lock on its tag word;
++// - waiting on kernel objects (the service OS layer's multi-wait and mutex) checks them and sleeps on the host;
++// - virtual cores, preemption and kernel timer interrupts do nothing.
++
++#include <chrono>
++#include <thread>
++
++#include "common/assert.h"
++#include "core/core.h"
++#include "core/core_timing.h"
++#include "core/hle/kernel/global_scheduler_context.h"
++#include "core/hle/kernel/k_address_arbiter.h"
++#include "core/hle/kernel/k_condition_variable.h"
++#include "core/hle/kernel/k_hardware_timer.h"
++#include "core/hle/kernel/k_light_lock.h"
++#include "core/hle/kernel/k_scheduler.h"
++#include "core/hle/kernel/k_synchronization_object.h"
++#include "core/hle/kernel/k_thread.h"
++#include "core/hle/kernel/k_thread_queue.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/physical_core.h"
++#include "core/hle/kernel/svc_results.h"
++
++namespace Kernel {
++
++// ---- scheduler: no scheduling, only the dispatch counts the scheduler lock keeps on the current (host) thread ---------------------
++
++KScheduler::KScheduler(KernelCore& kernel) {}
++KScheduler::~KScheduler() = default;
++void KScheduler::Initialize(KernelCore& kernel, KThread* main_thread, KThread* idle_thread, s32 core_id) {
++    m_idle_thread = idle_thread;
++    m_core_id = core_id;
++}
++void KScheduler::Activate(KernelCore& kernel) {
++    m_is_active = true;
++}
++void KScheduler::OnThreadStart(KernelCore& kernel) {
++    GetCurrentThread(kernel).EnableDispatch(kernel);
++}
++void KScheduler::RequestScheduleOnInterrupt(KernelCore& kernel) {}
++void KScheduler::PreemptSingleCore(KernelCore& kernel) {}
++void KScheduler::RescheduleCurrentCore(KernelCore& kernel) {
++    GetCurrentThread(kernel).EnableDispatch(kernel);
++}
++void KScheduler::RescheduleCurrentHLEThread(KernelCore& kernel) {
++    GetCurrentThread(kernel).EnableDispatch(kernel);
++}
++void KScheduler::ClearPreviousThread(KernelCore& kernel, KThread* thread) {}
++void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, ThreadState old_state) {}
++void KScheduler::OnThreadPriorityChanged(KernelCore& kernel, KThread* thread, s32 old_priority) {}
++void KScheduler::OnThreadAffinityMaskChanged(KernelCore& kernel, KThread* thread, const KAffinityMask& old_affinity, s32 old_core) {}
++void KScheduler::DisableScheduling(KernelCore& kernel) {
++    GetCurrentThread(kernel).DisableDispatch(kernel);
++}
++void KScheduler::EnableScheduling(KernelCore& kernel, u64 cores_needing_scheduling) {
++    GetCurrentThread(kernel).EnableDispatch(kernel);
++}
++u64 KScheduler::UpdateHighestPriorityThreads(KernelCore& kernel) {
++    ClearSchedulerUpdateNeeded(kernel);
++    return 0;
++}
++
++GlobalSchedulerContext::GlobalSchedulerContext(KernelCore& kernel) : m_scheduler_lock{kernel} {}
++GlobalSchedulerContext::~GlobalSchedulerContext() = default;
++void GlobalSchedulerContext::AddThread(KThread* thread) noexcept {
++    std::scoped_lock lock{m_global_list_guard};
++    m_thread_list.push_back(thread);
++}
++void GlobalSchedulerContext::RemoveThread(KThread* thread) noexcept {
++    std::scoped_lock lock{m_global_list_guard};
++    if (const auto it = std::ranges::find(m_thread_list, thread); it != m_thread_list.end()) m_thread_list.erase(it);
++}
++void GlobalSchedulerContext::PreemptThreads(KernelCore& kernel) noexcept {}
++bool GlobalSchedulerContext::IsLocked() const noexcept {
++    return m_scheduler_lock.IsLockedByCurrentThread();
++}
++void GlobalSchedulerContext::RegisterDummyThreadForWakeup(KThread* thread) noexcept {}
++void GlobalSchedulerContext::UnregisterDummyThreadForWakeup(KThread* thread) noexcept {}
++void GlobalSchedulerContext::WakeupWaitingDummyThreads(KernelCore& kernel) noexcept {}
++
++// ---- light lock: a lock on the tag word (owner thread pointer), waiting on the word ----------------------------------------------
++
++void KLightLock::Lock() {
++    const uintptr_t cur = reinterpret_cast<uintptr_t>(GetCurrentThreadPointer(m_kernel));
++    for (;;) {
++        uintptr_t expected = 0;
++        if (m_tag.compare_exchange_weak(expected, cur, std::memory_order_acquire)) return;
++        if (expected != 0) m_tag.wait(expected, std::memory_order_relaxed);
++    }
++}
++void KLightLock::Unlock() {
++    m_tag.store(0, std::memory_order_release);
++    m_tag.notify_one();
++}
++bool KLightLock::LockSlowPath(uintptr_t owner, uintptr_t cur_thread) {
++    return true;
++}
++void KLightLock::UnlockSlowPath(uintptr_t cur_thread) {}
++bool KLightLock::IsLockedByCurrentThread() const {
++    return m_tag.load() == reinterpret_cast<uintptr_t>(GetCurrentThreadPointer(m_kernel));
++}
++
++// ---- hardware timer: the time base only ------------------------------------------------------------------------------------------
++
++void KHardwareTimer::Initialize() {}
++void KHardwareTimer::Finalize() {}
++s64 KHardwareTimer::GetTick() const {
++    return m_kernel.System().CoreTiming().GetGlobalTimeNs().count();
++}
++void KHardwareTimer::EnableInterrupt(s64 wakeup_time) {
++    m_wakeup_time = wakeup_time;
++}
++void KHardwareTimer::DisableInterrupt() {
++    m_wakeup_time = (std::numeric_limits<s64>::max)();
++}
++bool KHardwareTimer::GetInterruptEnabled() {
++    return m_wakeup_time != (std::numeric_limits<s64>::max)();
++}
++void KHardwareTimer::DoTask() {}
++
++// ---- thread queues (no emulated waits exist; kept for the thread records' own bookkeeping) ---------------------------------------
++
++void KThreadQueue::NotifyAvailable(KernelCore& kernel, KThread* waiting_thread, KSynchronizationObject* signaled_object, Result wait_result) {}
++void KThreadQueue::EndWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result) {
++    waiting_thread->SetWaitResult(wait_result);
++    waiting_thread->SetState(kernel, ThreadState::Runnable);
++    waiting_thread->ClearWaitQueue();
++}
++void KThreadQueue::CancelWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result, bool cancel_timer_task) {
++    waiting_thread->SetWaitResult(wait_result);
++    waiting_thread->SetState(kernel, ThreadState::Runnable);
++    waiting_thread->ClearWaitQueue();
++}
++void KThreadQueueWithoutEndWait::EndWait(KernelCore& kernel, KThread* waiting_thread, Result wait_result) {}
++
++// ---- synchronization objects: signal state; host-side waits check and sleep ------------------------------------------------------
++
++KSynchronizationObject::KSynchronizationObject(KernelCore& kernel) : KAutoObjectWithList{kernel} {}
++KSynchronizationObject::~KSynchronizationObject() = default;
++void KSynchronizationObject::Finalize(KernelCore& kernel) {
++    this->OnFinalizeSynchronizationObject();
++    KAutoObject::Finalize(kernel);
++}
++void KSynchronizationObject::NotifyAvailable(KernelCore& kernel, Result result) {}
++Result KSynchronizationObject::Wait(KernelCore& kernel, s32* out_index, KSynchronizationObject** objects, const s32 num_objects,
++                                    s64 timeout) {
++    // timeout: absolute tick (KHardwareTimer::GetTick), 0 = poll, < 0 = forever
++    const auto& timer = kernel.HardwareTimer();
++    for (;;) {
++        {
++            KScopedSchedulerLock sl(kernel);
++            for (s32 i = 0; i < num_objects; ++i) {
++                if (objects[i]->IsSignaled(kernel)) {
++                    *out_index = i;
++                    R_SUCCEED();
++                }
++            }
++        }
++        if (timeout == 0 || (timeout > 0 && timer.GetTick() >= timeout)) R_THROW(ResultTimedOut);
++        std::this_thread::sleep_for(std::chrono::microseconds(500));
++    }
++}
++std::vector<KThread*> KSynchronizationObject::GetWaitingThreadsForDebugging(KernelCore& kernel) const {
++    return {};
++}
++
++// ---- virtual cores: none run --------------------------------------------------------------------------------------------------
++
++PhysicalCore::PhysicalCore(KernelCore& kernel, std::size_t core_index) : m_core_index{core_index} {}
++PhysicalCore::~PhysicalCore() = default;
++void PhysicalCore::RunThread(KernelCore& kernel, KThread* thread) {
++    UNREACHABLE_MSG("emulated core on the runtime-kernel-only build");
++}
++void PhysicalCore::LoadContext(const KThread* thread) {}
++void PhysicalCore::LoadSvcArguments(const KProcess& process, std::span<const uint64_t, 8> args) {}
++void PhysicalCore::SaveContext(KThread* thread) const {}
++void PhysicalCore::SaveSvcArguments(KProcess& process, std::span<uint64_t, 8> args) const {}
++void PhysicalCore::CloneFpuStatus(KThread* dst) const {}
++void PhysicalCore::LogBacktrace(KernelCore& kernel) {}
++void PhysicalCore::Idle() {
++    std::unique_lock lk{m_guard};
++    m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
++}
++void PhysicalCore::Interrupt() {
++    std::scoped_lock lk{m_guard};
++    m_is_interrupted = true;
++    m_on_interrupt.notify_all();
++}
++void PhysicalCore::ClearInterrupt() {
++    std::scoped_lock lk{m_guard};
++    m_is_interrupted = false;
++}
++bool PhysicalCore::IsInterrupted() const {
++    return m_is_interrupted;
++}
++
++// ---- process-wide arbitration objects (the runtime answers the game's arbitration) -----------------------------------------------
++
++KAddressArbiter::KAddressArbiter(Core::System& system_) : system{system_} {}
++KAddressArbiter::~KAddressArbiter() = default;
++KConditionVariable::KConditionVariable(Core::System& system) : m_system{system} {}
++KConditionVariable::~KConditionVariable() = default;
++
++} // namespace Kernel
 diff --git a/src/core/hle/kernel/k_scheduler.cpp b/src/core/hle/kernel/k_scheduler.cpp
 index c1b0dcd033..06e7f29e62 100644
 --- a/src/core/hle/kernel/k_scheduler.cpp
