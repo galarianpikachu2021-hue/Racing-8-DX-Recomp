@@ -146,7 +146,8 @@ The hook (`KARTRECOMP_UPSCALER=...` or the overlay's Upscaler row, with the 3D r
 - **Debug and tuning:** `KARTRECOMP_MV_DEBUG=1` paints the vectors (grey = still, red/green = right/down, 8 px saturates),
   `=2` paints only the object layer's corrections; `KARTRECOMP_MV_NOMATCH=1` turns the object layer off;
   `KARTRECOMP_MV_MINBAD=<n>` changes the tile trigger.
-- **Tried and dropped:** marking the kart's draws (stencil written by the renderer). The draws before the game's first
+- **Superseded (2026-11-19):** per-object vectors from the game's own vertex shaders, next section. Old note:
+  marking the kart's draws (stencil written by the renderer). The draws before the game's first
   stencil-enabled draw include the road ahead and scenery, so the mask was far too wide; the game's draws carry nothing that
   identifies the kart. True per-object vectors would need each draw's previous transform (a second vertex pass), which the
   recompiled shaders don't offer.
@@ -286,3 +287,35 @@ Also fixed (2026-11-19, found from the user's core dump on the rtk2 AppImage): a
 screens) and crashed at start-up. Debugging on the user's real install: `local/exp/userrun.sh`-style runs (the AppImage's
 engine started with the launcher's arguments and environment, working directory = the engine's folder or the plugins are
 not found; config/saves/nand/log backed up and restored).
+
+## Per-object motion vectors (2026-11-19)
+
+User report: below 100% render scale the picture looked blocky, "not like it's using the upscaler". Measured on the user's
+install: FSR 3 ran, and the scenery was smoothed, but the player's kart and character were blocky. The motion-vector debug
+view showed why: on the kart the patch-matching layer guessed noisy vectors (pink/purple specks, worst on dark low-detail
+surfaces), so FSR 3 dropped its history there every frame and showed the raw low-resolution pixels.
+
+Now the scene's opaque draws carry exact vectors:
+- **Shader recompiler:** `RuntimeInfo::xfb_position` decorates the vertex position for transform feedback (buffer 0, 16 bytes).
+  `TranslateProgramStages` emits that variant of the vertex stage for vertex + fragment programs (`TranslatedShader::spirv_xfb`,
+  same bindings); the renderer makes `module_xfb` from it.
+- **Renderer (`vk_shadow_backend.cpp`, "per-object motion vectors"):** on race frames with a temporal upscaler, every opaque
+  draw (depth test + write) into the screen-size scene with a vertex + fragment program, triangles, one instance, is kept
+  (`RecordObjMvDraw`: motion pipeline, descriptor set or a copy of its push-descriptor writes, push constants, viewport with and
+  without jitter, scissor, depth bias, vertex/index buffers). At the upscale point, after `mv.comp`, `RunObjectMotion` draws them
+  again with the motion pipeline (`CreatePipeline(..., motion = true)`: the capture variant of the vertex stage + `objmv.frag`, no
+  attachments) while transform feedback writes each triangle's 3 clip positions into this frame's capture buffer (3 rotating 64 MB
+  buffers). The fragment shader keeps only the visible surface (its depth equals the scene depth within `KARTRECOMP_OBJMV_TOL`,
+  default 4e-7), takes the same triangle from last frame's capture of the same draw (`gl_PrimitiveID`, perspective-correct
+  `gl_BaryCoordEXT`), maps it with the unjittered viewport and writes prev - cur into the motion image and 0 into the mismatch
+  mask. Draws are matched across frames by programs, index buffer address, counts, base vertex, topology, vertex buffer
+  addresses and occurrence number (uniform data is left out: it is what changes); the triangle count must agree.
+- **Needs** `VK_EXT_transform_feedback`, `VK_KHR_fragment_shader_barycentric`, `fragmentStoresAndAtomics`, `geometryShader`
+  (primitive id); without them, or with `KARTRECOMP_OBJMV=0`, the camera and matching layers work as before.
+- **Shader source:** `tools/mv-shaders/objmv.frag`, `tools/make-objmv-shader.sh > <fork>/src/suyu_cmd/native_gpu/objmv_spv.h`.
+- **Measured (user's install, Mario Kart Stadium, 33%, RX 9070):** 160-335 draws kept per frame, ~99% matched to last frame;
+  the debug view (`KARTRECOMP_MV_DEBUG=1`, object layer tinted blue) is clean on the kart and the ground; the kart's outline at 33%
+  lost most of its 3-pixel steps and the background got sharper. Cost about 1 ms GPU per frame (1.4 -> 2.3-2.7 ms total).
+  Fine texture detail (hair) stays grainy at 33%: FSR 3 rebuilds 9 output pixels from 1 there while the kart moves.
+- **Not covered:** instanced draws, programs with tessellation/geometry stages, transparent draws (no depth write): they keep
+  the camera/matching vectors. Ideas to cut the cost: skip draws whose clip positions only move with the camera.
