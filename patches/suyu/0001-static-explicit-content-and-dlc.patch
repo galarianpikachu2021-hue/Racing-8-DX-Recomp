@@ -16309,10 +16309,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..f7433b2a6e
+index 0000000000..1021ea6073
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8889 @@
+@@ -0,0 +1,8896 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -20173,7 +20173,12 @@ index 0000000000..f7433b2a6e
 +        // HUD, post-processing and menus have no depth target and stay put.
 +        const VkViewport vp_plain = vp; // before the jitter shift (object motion maps last frame's positions with it)
 +        // Never after the upscale point: nothing smooths it out there (the results board is drawn with a depth target bound).
-+        if (jitter_frame && !post_phase && !in_tonemap_pass && !st.colors.empty() && st.colors[0] && st.depth &&
++        // Not into a screen-size tonemap-format image either: those passes are tonemap / post-processing of the finished scene
++        // (some screens run several of them with the depth target still bound).
++        const bool into_tonemap_image = !st.colors.empty() && st.colors[0] && !st.color_formats.empty() &&
++                                        st.color_formats[0] == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
++                                        st.colors[0]->guest_width == current_frame->present.width;
++        if (jitter_frame && !post_phase && !in_tonemap_pass && !into_tonemap_image && !st.colors.empty() && st.colors[0] && st.depth &&
 +            st.depth->info.format != VK_FORMAT_D16_UNORM) {
 +            vp.x += jitter_x; // render pixels, whatever the scale
 +            vp.y += jitter_y;
@@ -21687,19 +21692,21 @@ index 0000000000..f7433b2a6e
 +        }
 +        std::optional<ImageKey> t;
 +        size_t t_index = 0;
++        // The tonemap candidate is the latest tonemap-format pass into a new image (the end-of-Grand-Prix screen tonemaps into
++        // one image, post-processes, then into another that the results board is drawn on); the HUD is the first later pass
++        // without depth into the candidate's image.
 +        for (size_t i = last_depth + 1; i < passes.size(); ++i) {
 +            const Pass& p = passes[i];
-+            if (p.depth && !(p.tonemap_format && !t)) continue;
-+            if (!t) {
-+                if (p.tonemap_format && p.key) {
-+                    t = p.key;
-+                    t_index = i;
-+                }
-+            } else if (p.key == t) {
++            if (t && p.key == t) {
++                if (p.depth) continue;
 +                hud_cmd = p.cmd;
 +                tm_cmd = passes[t_index].cmd;
 +                tm_key = *t;
 +                return;
++            }
++            if (p.tonemap_format && p.key) {
++                t = p.key;
++                t_index = i;
 +            }
 +        }
 +        if (t) {

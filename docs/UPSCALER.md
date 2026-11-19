@@ -328,3 +328,9 @@ upscaler plugin is active (FSR 3, DLSS; not Off / FSR 1 / passthrough); `KARTREC
 `KARTRECOMP_JITTER` still forces it. And nothing is jittered after the upscale point any more: the end-of-Grand-Prix results
 board is drawn with a depth target bound, so it got the sub-pixel shift every frame (user report: "jitter is very visible" on
 the results screen; seen live as the board's text outlines changing between consecutive screenshots).
+**End-of-Grand-Prix screen (2026-11-19, from the user's pass log):** `226 d | 227 dt 1 | 228 1 | 229 dt 1 | 230 t | 231 t 40 (board) |
+... | *234 present`. The first tonemap-format pass (227) writes a different image than the board passes, so the search never found
+"a later pass into the same image" and fell back to the present pass: everything at the scene scale. Now the tonemap candidate
+moves to each tonemap-format pass into a new image, and the HUD is the first later pass without depth into the candidate's image.
+Also never jittered: any pass into a screen-size tonemap-format (A2B10G10R10) image (227/229 kept the depth target bound and
+shifted the whole picture every frame).
