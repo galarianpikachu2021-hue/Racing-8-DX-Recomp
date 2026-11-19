@@ -16309,10 +16309,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..d966370dc7
+index 0000000000..01a8981a11
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8866 @@
+@@ -0,0 +1,8876 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -19089,6 +19089,16 @@ index 0000000000..d966370dc7
 +                return entry;
 +            }
 +            entry.stages.push_back({t.stage, module, t.info, t.data, t.spirv, ConstantsAddress(t.data)});
++            // KARTRECOMP_OBJMV_DUMP=1: every capture variant (and its normal shader) into log/objmv_spv/, to check with spirv-val.
++            static const bool objmv_dump = [] { const char* v = std::getenv("KARTRECOMP_OBJMV_DUMP"); return v && *v == '1'; }();
++            if (objmv_dump && !t.spirv_xfb.empty()) {
++                const auto dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::LogDir) / "objmv_spv";
++                std::filesystem::create_directories(dir);
++                std::ofstream(dir / fmt::format("{:x}_xfb.spv", t.data), std::ios::binary)
++                    .write(reinterpret_cast<const char*>(t.spirv_xfb.data()), static_cast<std::streamsize>(t.spirv_xfb.size() * 4));
++                std::ofstream(dir / fmt::format("{:x}.spv", t.data), std::ios::binary)
++                    .write(reinterpret_cast<const char*>(t.spirv.data()), static_cast<std::streamsize>(t.spirv.size() * 4));
++            }
 +            if (objmv_supported && !t.spirv_xfb.empty()) {
 +                VkShaderModuleCreateInfo xci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
 +                xci.codeSize = t.spirv_xfb.size() * sizeof(u32);

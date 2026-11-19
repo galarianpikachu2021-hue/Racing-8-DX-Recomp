@@ -17615,10 +17615,10 @@ index 0000000000..3d78e2fddb
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/shader_translate.cpp b/src/core/nvn_host/shader_translate.cpp
 new file mode 100644
-index 0000000000..7bfc050c2c
+index 0000000000..ec39920a18
 --- /dev/null
 +++ b/src/core/nvn_host/shader_translate.cpp
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,394 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/shader_translate.h"
 +
@@ -17859,6 +17859,48 @@ index 0000000000..7bfc050c2c
 +    return out;
 +}
 +
++/// The same vertex shader with its position captured by transform feedback (buffer 0, 16 bytes per vertex): the finished
++/// SPIR-V gets the TransformFeedback capability, the Xfb execution mode and three decorations on the Position output, and is
++/// otherwise identical word for word (emitting the program a second time is not guaranteed to give the same code). Empty when
++/// the shader has no standalone Position output.
++static std::vector<u32> AddPositionCapture(const std::vector<u32>& in) {
++    constexpr u32 OpCapability = 17, OpEntryPoint = 15, OpExecutionMode = 16, OpDecorate = 71;
++    constexpr u32 CapTransformFeedback = 53, ModeXfb = 11, DecBuiltIn = 11, BuiltInPosition = 0, DecOffset = 35, DecXfbBuffer = 36,
++                  DecXfbStride = 37;
++    if (in.size() < 5) return {};
++    u32 pos_id = 0, main_id = 0;
++    for (size_t i = 5; i < in.size();) {
++        const u32 op = in[i] & 0xFFFF, wc = in[i] >> 16;
++        if (wc == 0 || i + wc > in.size()) return {};
++        if (op == OpEntryPoint && wc >= 3) main_id = in[i + 2];
++        if (op == OpDecorate && wc == 4 && in[i + 2] == DecBuiltIn && in[i + 3] == BuiltInPosition) pos_id = in[i + 1];
++        if (op == OpCapability && wc == 2 && in[i + 1] == CapTransformFeedback) return {}; // already has transform feedback
++        i += wc;
++    }
++    if (!pos_id || !main_id) return {};
++    std::vector<u32> out(in.begin(), in.begin() + 5);
++    out.reserve(in.size() + 32);
++    bool cap_done = false, mode_done = false;
++    for (size_t i = 5; i < in.size();) {
++        const u32 op = in[i] & 0xFFFF, wc = in[i] >> 16;
++        if (!cap_done && op != OpCapability) {
++            out.insert(out.end(), {(2u << 16) | OpCapability, CapTransformFeedback});
++            cap_done = true;
++        }
++        out.insert(out.end(), in.begin() + static_cast<std::ptrdiff_t>(i), in.begin() + static_cast<std::ptrdiff_t>(i + wc));
++        if (!mode_done && op == OpEntryPoint) {
++            out.insert(out.end(), {(3u << 16) | OpExecutionMode, main_id, ModeXfb});
++            mode_done = true;
++        }
++        if (op == OpDecorate && wc == 4 && in[i + 1] == pos_id && in[i + 2] == DecBuiltIn && in[i + 3] == BuiltInPosition) {
++            out.insert(out.end(), {(4u << 16) | OpDecorate, pos_id, DecXfbBuffer, 0u, (4u << 16) | OpDecorate, pos_id, DecXfbStride, 16u,
++                                   (4u << 16) | OpDecorate, pos_id, DecOffset, 0u});
++        }
++        i += wc;
++    }
++    return out;
++}
++
 +std::vector<TranslatedShader> TranslateProgramStages(const GpuReader& read,
 +                                                     const std::vector<u64>& datas,
 +                                                     const CbufQuery& cbuf, u32 uint_outputs) {
@@ -17922,20 +17964,12 @@ index 0000000000..7bfc050c2c
 +            if (st.program.stage == Shader::Stage::VertexB) {
 +                runtime.convert_depth_mode = true; // NVN default depth range is GL-style [-1, 1]
 +            }
-+            // Vertex + fragment only: the vertex stage's position is what reaches the rasterizer, so it can be captured.
-+            const bool capture = st.program.stage == Shader::Stage::VertexB && stages.size() == 2 &&
-+                                 stages.back().program.stage == Shader::Stage::Fragment;
-+            if (capture) {
-+                Shader::Backend::Bindings xfb_bindings = bindings; // the emitter numbers bindings: both variants get the same
-+                Shader::RuntimeInfo xfb_runtime = runtime;
-+                xfb_runtime.xfb_position = true;
-+                try {
-+                    t.spirv_xfb = Shader::Backend::SPIRV::EmitSPIRV(profile, xfb_runtime, st.program, xfb_bindings);
-+                } catch (const std::exception&) {
-+                    t.spirv_xfb.clear(); // no capture for this program; the normal variant below decides whether it draws
-+                }
-+            }
 +            t.spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, st.program, bindings);
++            // Vertex + fragment only: the vertex stage's position is what reaches the rasterizer, so it can be captured.
++            if (st.program.stage == Shader::Stage::VertexB && stages.size() == 2 &&
++                stages.back().program.stage == Shader::Stage::Fragment) {
++                t.spirv_xfb = AddPositionCapture(t.spirv);
++            }
 +            t.stage = st.program.stage;
 +            t.data = st.data;
 +            t.info = st.program.info;
@@ -25255,21 +25289,8 @@ index 0000000000..7c95a9160f
 +    Network::Shutdown();
 +    return 0;
 +}
-diff --git a/src/shader_recompiler/backend/spirv/emit_spirv.cpp b/src/shader_recompiler/backend/spirv/emit_spirv.cpp
-index c68ef9eddf..903ae5cbda 100644
---- a/src/shader_recompiler/backend/spirv/emit_spirv.cpp
-+++ b/src/shader_recompiler/backend/spirv/emit_spirv.cpp
-@@ -392,7 +392,7 @@ void SetupSignedNanCapabilities(const Profile& profile, const IR::Program& progr
- }
- 
- void SetupTransformFeedbackCapabilities(EmitContext& ctx, Id main_func) {
--    if (ctx.runtime_info.xfb_count == 0) {
-+    if (ctx.runtime_info.xfb_count == 0 && !ctx.runtime_info.xfb_position) {
-         return;
-     }
-     ctx.AddCapability(spv::Capability::TransformFeedback);
 diff --git a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
-index 8fd46dffa7..bdcdc84145 100644
+index 8fd46dffa7..1870c99abe 100644
 --- a/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 +++ b/src/shader_recompiler/backend/spirv/spirv_emit_context.cpp
 @@ -1444,7 +1444,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
@@ -25281,32 +25302,6 @@ index 8fd46dffa7..bdcdc84145 100644
          invocation_id = DefineInput(*this, U32[1], false, spv::BuiltIn::InvocationId);
      }
      if (info.uses_invocation_info &&
-@@ -1625,6 +1625,11 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
-     if (runtime_info.convert_depth_mode || info.stores.AnyComponent(IR::Attribute::PositionX) ||
-         stage == Stage::VertexB) {
-         output_position = DefineOutput(*this, F32[4], invocations, spv::BuiltIn::Position);
-+        if (runtime_info.xfb_position && stage == Stage::VertexB) {
-+            Decorate(output_position, spv::Decoration::XfbBuffer, 0U);
-+            Decorate(output_position, spv::Decoration::XfbStride, 16U);
-+            Decorate(output_position, spv::Decoration::Offset, 0U);
-+        }
-     }
-     if (info.stores[IR::Attribute::PointSize] || runtime_info.fixed_state_point_size) {
-         if (stage == Stage::Fragment) {
-diff --git a/src/shader_recompiler/runtime_info.h b/src/shader_recompiler/runtime_info.h
-index 757ab3bd48..19adb52986 100644
---- a/src/shader_recompiler/runtime_info.h
-+++ b/src/shader_recompiler/runtime_info.h
-@@ -108,6 +108,9 @@ struct RuntimeInfo {
-     /// Transform feedback state for each varying
-     std::array<TransformFeedbackVarying, 256> xfb_varyings{};
-     u32 xfb_count{0};
-+    /// kart-recomp: capture the vertex position (clip space, vec4) into transform feedback buffer 0 (stride 16), for the
-+    /// renderer's per-object motion vectors.
-+    bool xfb_position{};
- 
-     /// Output types for each color attachment
-     std::array<AttributeType, 8> color_output_types{};
 diff --git a/src/video_core/engines/draw_manager.cpp b/src/video_core/engines/draw_manager.cpp
 index dabd7bb558..1e1ce04a0b 100644
 --- a/src/video_core/engines/draw_manager.cpp

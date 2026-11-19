@@ -296,9 +296,12 @@ view showed why: on the kart the patch-matching layer guessed noisy vectors (pin
 surfaces), so FSR 3 dropped its history there every frame and showed the raw low-resolution pixels.
 
 Now the scene's opaque draws carry exact vectors:
-- **Shader recompiler:** `RuntimeInfo::xfb_position` decorates the vertex position for transform feedback (buffer 0, 16 bytes).
-  `TranslateProgramStages` emits that variant of the vertex stage for vertex + fragment programs (`TranslatedShader::spirv_xfb`,
-  same bindings); the renderer makes `module_xfb` from it.
+- **Capture variant of the vertex shader:** `AddPositionCapture` (core/nvn_host/shader_translate.cpp) patches the finished
+  SPIR-V of a vertex + fragment program's vertex stage: TransformFeedback capability, Xfb execution mode, XfbBuffer 0 /
+  XfbStride 16 / Offset 0 on the Position output; otherwise word-for-word the normal shader (`TranslatedShader::spirv_xfb`, the
+  renderer's `module_xfb`). A first version emitted the program a second time with a recompiler flag; replaced because a second
+  emission is not guaranteed identical. `KARTRECOMP_OBJMV_DUMP=1` writes every pair to `log/objmv_spv/`: a full race gave 2200
+  capture shaders, all valid (`spirv-val --target-env vulkan1.3 --uniform-buffer-standard-layout --scalar-block-layout`).
 - **Renderer (`vk_shadow_backend.cpp`, "per-object motion vectors"):** on race frames with a temporal upscaler, every opaque
   draw (depth test + write) into the screen-size scene with a vertex + fragment program, triangles, one instance, is kept
   (`RecordObjMvDraw`: motion pipeline, descriptor set or a copy of its push-descriptor writes, push constants, viewport with and
