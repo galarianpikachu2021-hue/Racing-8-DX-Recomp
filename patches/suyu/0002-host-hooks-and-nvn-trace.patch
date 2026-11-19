@@ -972,7 +972,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..19e7e70b3f 100644
+index 408daa6839..73c53ad7ff 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,27 @@ add_library(core STATIC
@@ -1114,8 +1114,8 @@ index 408daa6839..19e7e70b3f 100644
 +option(KARTRECOMP_RUNTIME_KERNEL_ONLY "The game always runs on the runtime kernel; emulated kernel parts it never uses are left out" ${KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT})
 +if (KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +    get_target_property(KR_CORE_SOURCES2 core SOURCES)
-+    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process)\\.cpp$")
-+    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp) # the scheduling parts, reduced (see the file)
++    list(FILTER KR_CORE_SOURCES2 EXCLUDE REGEX "^hle/kernel/svc/svc_[a-z_0-9]+\\.cpp$|^hle/kernel/svc\\.cpp$|^hle/kernel/(physical_core|k_scheduler|global_scheduler_context|k_hardware_timer|k_thread_queue|k_light_lock|k_condition_variable|k_address_arbiter|k_synchronization_object)\\.cpp$|^hle/kernel/(k_client_port|k_client_session|k_light_client_session|k_light_server_session|k_light_session|k_port|k_server_port|k_server_session|k_session|k_session_request|k_code_memory|k_device_address_space|k_interrupt_manager|k_lock_trace|k_process|k_page_table_base|k_memory_block_manager|k_thread_local_page)\\.cpp$")
++    list(APPEND KR_CORE_SOURCES2 hle/kernel/k_runtime_lite.cpp hle/kernel/k_process_lite.cpp hle/kernel/k_page_table_lite.cpp) # the scheduling parts, reduced (see the file)
 +    set_property(TARGET core PROPERTY SOURCES ${KR_CORE_SOURCES2})
 +    target_compile_definitions(core PUBLIC KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +endif()
@@ -6723,6 +6723,95 @@ index 6ec13ff094..cbe24685e3 100644
  }
  
  } // namespace Core::Frontend
+diff --git a/src/core/hle/kernel/k_page_table_lite.cpp b/src/core/hle/kernel/k_page_table_lite.cpp
+new file mode 100644
+index 0000000000..9a6de08009
+--- /dev/null
++++ b/src/core/hle/kernel/k_page_table_lite.cpp
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: the emulated page table for a build where the game always runs on the runtime kernel (KARTRECOMP_RUNTIME_KERNEL_ONLY,
++// docs/NATIVE_KERNEL.md stage 6). It replaces k_page_table_base.cpp (6000 lines), k_memory_block_manager.cpp and
++// k_thread_local_page.cpp. The game's memory is the runtime's address space (kart_runtime/address_space.h), which owns the page
++// table the recompiled code reads; what is left here are the entry points other kept code still names:
++// - QueryInfo answers from the runtime's memory map;
++// - the capabilities' IO / static / region mappings have nothing to map (the game has no device registers);
++// - mapping page groups or pages and device-address-space locks belong to the emulated system calls and driver paths, which the
++//   runtime replaced, so they refuse.
++
++#include "common/logging/log.h"
++#include "core/core.h"
++#include "core/hle/kernel/k_memory_block.h"
++#include "core/hle/kernel/k_memory_block_manager.h"
++#include "core/hle/kernel/k_page_table_base.h"
++#include "core/hle/kernel/kernel.h"
++#include "core/hle/kernel/native_game.h"
++#include "core/hle/kernel/svc_results.h"
++#include "kart_runtime/address_space.h"
++
++namespace Kernel {
++
++KMemoryBlockManager::KMemoryBlockManager() = default;
++
++KPageTableBase::KPageTableBase(KernelCore& kernel)
++    : m_system(kernel.System()), m_general_lock(kernel), m_map_physical_memory_lock(kernel), m_device_map_lock(kernel) {}
++KPageTableBase::~KPageTableBase() = default;
++
++Result KPageTableBase::QueryInfo(KMemoryInfo* out_info, Svc::PageInfo* out_page_info, KProcessAddress addr) const {
++    auto* rt = NativeGame::Memory();
++    R_UNLESS(rt != nullptr, ResultInvalidCurrentMemory);
++    const auto info = rt->Query(GetInteger(addr));
++    *out_info = KMemoryInfo{};
++    out_info->m_address = info.base_address;
++    out_info->m_size = info.size;
++    out_info->m_state = static_cast<KMemoryState>(info.state); // the Svc state; GetSvcMemoryInfo masks the flags off anyway
++    out_info->m_permission = static_cast<KMemoryPermission>(info.permission);
++    out_info->m_attribute = static_cast<KMemoryAttribute>(info.attribute);
++    out_info->m_ipc_lock_count = static_cast<u16>(info.ipc_count);
++    out_info->m_device_use_count = static_cast<u16>(info.device_count);
++    out_page_info->flags = 0;
++    R_SUCCEED();
++}
++
++Result KPageTableBase::MapRegion(KMemoryRegionType region_type, KMemoryPermission perm) {
++    R_SUCCEED();
++}
++Result KPageTableBase::MapIo(KPhysicalAddress phys_addr, size_t size, KMemoryPermission perm) {
++    R_SUCCEED();
++}
++Result KPageTableBase::MapStatic(KPhysicalAddress phys_addr, size_t size, KMemoryPermission perm) {
++    R_SUCCEED();
++}
++
++KProcessAddress KPageTableBase::GetRegionAddress(Svc::MemoryState state) const {
++    return 0;
++}
++size_t KPageTableBase::GetRegionSize(Svc::MemoryState state) const {
++    return 0;
++}
++
++Result KPageTableBase::MapPages(KProcessAddress* out_addr, size_t num_pages, size_t alignment, KPhysicalAddress phys_addr,
++                                bool is_pa_valid, KProcessAddress region_start, size_t region_num_pages, KMemoryState state,
++                                KMemoryPermission perm) {
++    LOG_ERROR(Kernel, "emulated page-table mapping on the runtime-kernel-only build");
++    R_THROW(ResultOutOfMemory);
++}
++Result KPageTableBase::MapPageGroup(KProcessAddress address, const KPageGroup& pg, KMemoryState state, KMemoryPermission perm) {
++    LOG_ERROR(Kernel, "emulated page-group mapping on the runtime-kernel-only build");
++    R_THROW(ResultInvalidCurrentMemory);
++}
++Result KPageTableBase::UnmapPageGroup(KProcessAddress address, const KPageGroup& pg, KMemoryState state) {
++    R_THROW(ResultInvalidCurrentMemory);
++}
++Result KPageTableBase::LockForMapDeviceAddressSpace(bool* out_is_io, KProcessAddress address, size_t size, KMemoryPermission perm,
++                                                    bool is_aligned, bool check_heap) {
++    R_THROW(ResultInvalidCurrentMemory);
++}
++Result KPageTableBase::UnlockForDeviceAddressSpace(KProcessAddress address, size_t size) {
++    R_THROW(ResultInvalidCurrentMemory);
++}
++
++} // namespace Kernel
 diff --git a/src/core/hle/kernel/k_process.cpp b/src/core/hle/kernel/k_process.cpp
 index 67412738a7..2154413307 100644
 --- a/src/core/hle/kernel/k_process.cpp
