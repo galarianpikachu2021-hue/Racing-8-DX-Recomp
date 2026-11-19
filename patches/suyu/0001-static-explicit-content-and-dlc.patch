@@ -16309,10 +16309,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..1021ea6073
+index 0000000000..39c6402233
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,8896 @@
+@@ -0,0 +1,8976 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -18887,6 +18887,7 @@ index 0000000000..1021ea6073
 +            case Op::SetRenderTargets:
 +                if (ss_cmd && &c == ss_cmd) RunSupersamplePoint(false);
 +                if (hud_cmd && &c == hud_cmd) PrepareUpscalePoint(c);
++                ApplyUiScale(c);
 +                ApplyRenderTargets(st, c, false);
 +                break;
 +            case Op::BindProgram:
@@ -21636,8 +21637,10 @@ index 0000000000..1021ea6073
 +                std::string row;
 +                for (size_t i = 0; i < passes->size(); ++i) {
 +                    const Pass& p = (*passes)[i];
-+                    row += fmt::format("{}{}/{}:{}x{}{}{} ", (p.cmd == *hud) ? "*" : "", i, p.draws, p.key ? std::get<3>(*p.key) : 0,
-+                                       p.key ? std::get<4>(*p.key) : 0, p.depth ? "d" : "", p.tonemap_format ? "t" : "");
++                    // #<id>: which image (low bits of its pool ^ offset), to see which passes share a target.
++                    row += fmt::format("{}{}/{}:{}x{}{}{}#{:x} ", (p.cmd == *hud) ? "*" : "", i, p.draws, p.key ? std::get<3>(*p.key) : 0,
++                                       p.key ? std::get<4>(*p.key) : 0, p.depth ? "d" : "", p.tonemap_format ? "t" : "",
++                                       p.key ? ((std::get<0>(*p.key) ^ std::get<1>(*p.key)) >> 8) & 0xFFFF : 0);
 +                }
 +                LOG_INFO(Frontend, "passes frame {} (* = upscale point): {}", frame, row);
 +            }
@@ -21692,6 +21695,57 @@ index 0000000000..1021ea6073
 +        }
 +        std::optional<ImageKey> t;
 +        size_t t_index = 0;
++        // UI composited into the final image: the end-of-Grand-Prix screen draws the results board into the final image BEFORE
++        // the 3D, tonemaps the 3D (trophy) into an image of its own, then composites that into the final image. There only the 3D
++        // image is upscaled (right before the composite), and the final image, board included, is drawn at the output size.
++        // Race frames only clear the final image before the 3D, so they keep the usual split.
++        ui_key.reset();
++        {
++            size_t first_depth = SIZE_MAX;
++            for (size_t i = 0; i < passes.size(); ++i) {
++                if (passes[i].depth) {
++                    first_depth = i;
++                    break;
++                }
++            }
++            std::vector<ImageKey> early;
++            for (size_t i = 0; i < first_depth && i < passes.size(); ++i) {
++                const Pass& p = passes[i];
++                if (p.tonemap_format && p.key && p.draws > 0 && std::find(early.begin(), early.end(), *p.key) == early.end())
++                    early.push_back(*p.key);
++            }
++            if (!early.empty() && last_depth != SIZE_MAX) {
++                const auto is_early = [&](const std::optional<ImageKey>& k) {
++                    return k && std::find(early.begin(), early.end(), *k) != early.end();
++                };
++                size_t cand = SIZE_MAX;
++                for (size_t i = last_depth + 1; i < passes.size(); ++i) {
++                    const Pass& p = passes[i];
++                    if (cand == SIZE_MAX) {
++                        if (p.tonemap_format && p.key && !is_early(p.key)) cand = i;
++                    } else if (is_early(p.key)) {
++                        hud_cmd = p.cmd;
++                        tm_cmd = passes[cand].cmd;
++                        tm_key = *passes[cand].key;
++                        tm_desc = passes[cand].cmd->colors[0];
++                        ui_key = *p.key;
++                        return;
++                    }
++                }
++            }
++        }
++        // Screens that tonemap into two different images after the scene (end of a Grand Prix): KARTRECOMP_DUMP_MULTI_TONEMAP=1
++        // dumps two of their frames (pass by pass) for debugging.
++        {
++            std::optional<ImageKey> first_t;
++            multi_tonemap_frame = false;
++            for (size_t i = last_depth + 1; i < passes.size(); ++i) {
++                const Pass& p = passes[i];
++                if (!p.tonemap_format || !p.key || !p.depth) continue;
++                if (!first_t) first_t = p.key;
++                else if (*first_t != *p.key) multi_tonemap_frame = true;
++            }
++        }
 +        // The tonemap candidate is the latest tonemap-format pass into a new image (the end-of-Grand-Prix screen tonemaps into
 +        // one image, post-processes, then into another that the results board is drawn on); the HUD is the first later pass
 +        // without depth into the candidate's image.
@@ -21700,6 +21754,7 @@ index 0000000000..1021ea6073
 +            if (t && p.key == t) {
 +                if (p.depth) continue;
 +                hud_cmd = p.cmd;
++                tm_desc = passes[t_index].cmd->colors[0];
 +                tm_cmd = passes[t_index].cmd;
 +                tm_key = *t;
 +                return;
@@ -21714,6 +21769,7 @@ index 0000000000..1021ea6073
 +            for (size_t i = t_index + 1; i < passes.size(); ++i) {
 +                if (passes[i].key && passes[i].key == present_key) {
 +                    hud_cmd = passes[i].cmd;
++                    tm_desc = passes[t_index].cmd->colors[0];
 +                    tm_cmd = passes[t_index].cmd;
 +                    tm_key = *t;
 +                    return;
@@ -21753,6 +21809,8 @@ index 0000000000..1021ea6073
 +        hdr_clean_valid = false;
 +        hud_cmd = nullptr;
 +        tm_cmd = nullptr;
++        tm_desc = {};
++        ui_key.reset();
 +        ss_cmd = nullptr;
 +        ss_alias = nullptr;
 +        frame_has_scene = false;
@@ -21875,6 +21933,18 @@ index 0000000000..1021ea6073
 +    }
 +
 +    /// Does the upscale point need its own output image? Not when nothing upscales and the sizes already match.
++    /// Before the upscale point: passes into the UI image (ui_key) are drawn at the output size, the rest at the scene scale.
++    void ApplyUiScale(const Command& c) {
++        if (post_phase || !ui_key) return;
++        bool ui = false;
++        if (!c.colors.empty() && c.colors[0].valid && c.colors[0].width) {
++            if (const auto info = MapFormat(c.colors[0].format)) {
++                ui = ImageKey{c.colors[0].pool, c.colors[0].offset, TexelClass(info->format), c.colors[0].width, c.colors[0].height} == *ui_key;
++            }
++        }
++        cur_scale = ui ? out_scale : frame_scene_scale;
++    }
++
 +    bool UpscalePointNeedsImage(const Image* low) const {
 +        return fsr1_selected || upscaler.Enabled() || hdr_active ||
 +               low->width != ScaleDim(low->guest_width, out_scale * cur_wide) || low->height != ScaleDim(low->guest_height, out_scale);
@@ -21882,7 +21952,7 @@ index 0000000000..1021ea6073
 +
 +    /// Prebuild pass: only the image classes matter (no commands are recorded for the upscale itself).
 +    void PrepareUpscalePoint(const Command& c) {
-+        Image* low = GetImage(c.colors[0], false);
++        Image* low = GetImage(tm_desc.valid ? tm_desc : c.colors[0], false);
 +        if (low && UpscalePointNeedsImage(low)) {
 +            up_alias = EnsureUpImage(low);
 +        }
@@ -21893,7 +21963,7 @@ index 0000000000..1021ea6073
 +    /// The upscale point: the tonemapped 3D image at the scene scale becomes an output-size image (FSR 1, a hook
 +    /// backend, or a bilinear blit when no upscaler is on); the HUD and the final pass then draw at the output scale.
 +    void RunUpscalePoint(const Command& c) {
-+        Image* low = GetImage(c.colors[0], false);
++        Image* low = GetImage(tm_desc.valid ? tm_desc : c.colors[0], false);
 +        post_phase = true;
 +        cur_scale = out_scale;
 +        static const u64 up_log_from = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG_FROM"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
@@ -24005,6 +24075,11 @@ index 0000000000..1021ea6073
 +                const char* v = std::getenv("KARTRECOMP_NATIVE_DUMP_AFTER");
 +                return v ? std::strtoull(v, nullptr, 10) : 0ull;
 +            }();
++            static const bool dump_multi = [] { const char* v = std::getenv("KARTRECOMP_DUMP_MULTI_TONEMAP"); return v && *v == '1'; }();
++            if (dump_multi && multi_tonemap_frame && dumps_done < 2 && frames >= next_multi_dump) {
++                dump_frame = true;
++                next_multi_dump = frames + 300;
++            }
 +            if (dump_every && frame.guest_draws >= dump_min && frames >= dump_from) {
 +                dump_frame = dump_every == 1 ? dumps_done == 0 : (qualifying_frames % dump_every == 0);
 +                ++qualifying_frames;
@@ -24092,6 +24167,7 @@ index 0000000000..1021ea6073
 +                if (hud_cmd && &c == hud_cmd && !post_phase) {
 +                    RunUpscalePoint(c); // the HUD starts: upscale the 3D composite first
 +                }
++                ApplyUiScale(c);
 +                in_tonemap_pass = tm_cmd && &c == tm_cmd;
 +                ApplyRenderTargets(st, c, true);
 +                {
@@ -24920,6 +24996,10 @@ index 0000000000..1021ea6073
 +    bool frame_upscaled = false;
 +    bool frame_has_scene = false;
 +    const Command* hud_cmd = nullptr; ///< the first pass of the HUD (the upscale point), or none
++    std::optional<ImageKey> ui_key; ///< the final image when UI is composited into it before the 3D: drawn at the output size
++    TextureDesc tm_desc{};          ///< the image upscaled at the upscale point (the tonemap pass's target)
++    bool multi_tonemap_frame = false; ///< this frame tonemaps into two different images (KARTRECOMP_DUMP_MULTI_TONEMAP)
++    u64 next_multi_dump = 0;
 +    const Command* tm_cmd = nullptr;  ///< the tonemap pass (never jittered: it draws the finished scene full-screen)
 +    bool in_tonemap_pass = false;     ///< the pass being recorded is tm_cmd
 +    ImageKey tm_key{};                ///< the 3D composite (tonemap output) the HUD draws over

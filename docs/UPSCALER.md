@@ -334,3 +334,11 @@ the results screen; seen live as the board's text outlines changing between cons
 moves to each tonemap-format pass into a new image, and the HUD is the first later pass without depth into the candidate's image.
 Also never jittered: any pass into a screen-size tonemap-format (A2B10G10R10) image (227/229 kept the depth target bound and
 shifted the whole picture every frame).
+**UI composited into the final image (2026-11-19, end-of-Grand-Prix screen, pass log with image ids `#xxxx`):** the board's 12
+rows are drawn into the FINAL image (`#1089`) before any 3D (each row: 840x96 / 210x24 blur, then 14-17 draws), the trophy scene
+is tonemapped into its own image (`#f889`), and a 1-draw pass composites it into `#1089`. Upscaling `#1089` gave a low-resolution
+board. Now, when a tonemap-format image gets draws before the frame's first depth pass (races only clear it), `FindUpscalePoint`
+takes the first tonemap-format image after the scene that is not one of those as the image to upscale (`tm_desc`, `tm_key`) and the
+first later pass into the UI image as the upscale point; `ApplyUiScale` draws every pass into the UI image (`ui_key`) at the output
+size, before the split too. Only the trophy goes through FSR. (User: "i just want the trophy upscaled on the results screen".)
+Debug switch `KARTRECOMP_DUMP_MULTI_TONEMAP=1` (dumps two frames of a screen that tonemaps into two images; the title screen does too).
