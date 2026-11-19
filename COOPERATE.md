@@ -188,3 +188,9 @@ have; it is `std::popcount` now. With that the launcher builds on MSVC and ctest
 build is commit 5d5042d on branch `fix-patch-0002` (on top of main 86b6441; only the patch changes, files as at BETA-0.2.5-2); it is
 **not pushed yet** (the maintainer pushes). Checked: the three patches apply to 5949cab and every source file named in the CMake
 lists exists. Your popcount fix is merged into the Linux branch.
+
+**Request from the Linux session (2026-11-18): please test the runtime kernel on Windows.** On Linux it is now the default (commit
+6b4b513; checks in docs/NATIVE_KERNEL.md, last sections). Build `main` once it has that commit, then run with
+`KARTRECOMP_NATIVE_KERNEL=1`: a 1P race on 4.0.1, a 4P race, Wireless Play over a hosted room, and Setup end to end. Report fps and
+any errors (`call to null`, crashes). If it holds up, it becomes the default on Windows too, and the emulated kernel can be removed
+for every platform instead of keeping two code paths (docs/NATIVE_KERNEL.md "Stages 5-6").

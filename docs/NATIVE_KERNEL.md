@@ -194,3 +194,30 @@ opt-in with `=1`). Checks with the current engine:
 
 Not re-run this time: 4P (passed on 2026-11-15, kernel code unchanged since), keyless boot. Next: stage 5 (audio_core, hid_core
 and the driver module on runtime events), then stage 6 (delete `core/hle/kernel` from the Linux build).
+
+## Stages 5-6: what is left and in which order (2026-11-18)
+
+On the runtime kernel the emulated kernel no longer schedules anything (its 10 ms preemption pass is off too). What still uses it:
+
+1. **Boot**: `KernelCore::Initialize` (slab heaps, memory layout, `KMemoryManager` whose application pool the runtime takes over),
+   `KProcess::LoadFromMetadata` + module loading, then `NativeGame::ImportProcess` copies the mapped modules into the runtime's
+   address space.
+2. **The host-memory view**: `Core::Memory` reads the page table owned by `KProcessPageTable`; the runtime's `AddressSpace`
+   backend maps through it.
+3. **Library objects**: `KEvent`/`KReadableEvent` (audio_core, hid_core, nvdrv; handed to the game in 4 places in the native
+   service shells through `MirrorKernelEvent`), `KSharedMemory` (hid, fonts), `KTransferMemory` (audio), `KProcess` (memory
+   access, device locks).
+
+Order:
+- **5a** (done): no emulated preemption on the runtime kernel.
+- **5b, library objects**: a small `lib_objects` layer (event = signal state + runtime mirrors; shared memory = host buffer +
+  runtime physical range; transfer memory = runtime address/size) with the emulated kernel's objects behind it while other
+  platforms still use the emulated kernel. Creation goes through `ServiceContext::CreateEvent` (33 sites); about 150 use sites
+  (Signal/Clear/GetReadableEvent) in the kept libraries.
+- **2, runtime loader**: modules from the loader's code sets mapped with `AddressSpace::MapNew` + copy + permissions; physical
+  memory from the runtime's allocator, not `KMemoryManager`.
+- **Own memory view**: `Core::Memory` on a page table owned by the runtime (the backend already does all the mapping calls).
+- **6, delete**: `core/hle/kernel` out of the build. Precondition for doing it everywhere instead of Linux-only: the runtime
+  kernel tested on Windows (COOPERATE.md asks the Windows session).
+
+None of this changes what the player sees; it removes code and threads. Expected size: several sessions.
