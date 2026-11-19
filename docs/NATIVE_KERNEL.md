@@ -244,3 +244,31 @@ fonts and audio; process access for memory reads and device locks). Only after t
 the memory manager have no users, and the loader plus `Core::Memory`'s page table move to the runtime (stages 2 and "own memory
 view"). Doing it in one pass without a way to run the audio and controller paths after every file would break the game, so it
 should be done event type by event type with `nkcheck.sh` after each.
+
+## Stage 6 done for Linux: the emulated kernel's machinery is out of the build (2026-11-19)
+
+`KARTRECOMP_RUNTIME_KERNEL_ONLY` (CMake option, on by default for Linux; Windows and Android keep the emulated kernel until the
+runtime kernel is tested there, COOPERATE.md) builds the engine with the game always on the runtime kernel. In order:
+
+| step | left out of the build | stands in |
+|---|---|---|
+| system calls | `svc.cpp` + 41 `svc/svc_*.cpp` | the runtime answers every call |
+| scheduling | `physical_core`, `k_scheduler`, `global_scheduler_context`, `k_hardware_timer`, `k_thread_queue`, `k_light_lock`, `k_condition_variable`, `k_address_arbiter`, `k_synchronization_object` | `k_runtime_lite.cpp`: scheduler lock = recursive lock + dispatch count, light lock on its tag word, host-side waits check and sleep |
+| IPC | `k_port`, `k_session`, `k_server_session`, `k_client_*`, `k_light_*session`, `k_session_request`, `k_code_memory`, `k_device_address_space`, `k_interrupt_manager`, `k_lock_trace` | nothing: the runtime answers every service; the registry keeps library objects without ports; framework IPC paths are fenced |
+| memory view | (the emulated process page table) | the runtime owns the `Common::PageTable` the recompiled code and `Core::Memory` read |
+| loading | `k_process.cpp` | `k_process_lite.cpp` + `NativeGame::Prepare/LoadModule`: modules go straight into the runtime's address space |
+| page tables | `k_page_table_base`, `k_memory_block_manager`, `k_thread_local_page` | `k_page_table_lite.cpp`: queries answer from the runtime's memory map |
+| physical memory | `k_memory_manager`, `k_page_heap`, `k_memory_layout` (+ board), `k_page_buffer`, `k_system_resource` | `k_memory_manager_lite.h` / `k_memory_lite.cpp`: fixed pools in device memory (the game's 3285 MiB pool, was 3248), slab heaps in host memory |
+| threads | `k_thread.cpp` | `k_thread_lite.cpp`: records only (host threads, per-core records), no fibers |
+
+About 25,000 lines of the emulated kernel are no longer built; ~5,400 remain: the object model the kept libraries use (events,
+shared and transfer memory, handle table, resource limits, object registry, capabilities) and the kernel set-up, plus ~1,200 lines of
+lite stand-ins. That is what the plan meant by "except what stage 5 keeps as plain code".
+
+Checks after every step (`local/exp/nkcheck.sh`): 1P 4.0.1 race, CTGP DX on 3.0.4 (cups, music switch, banner, speedometer),
+Setup's picture-less test boot, Wireless Play over a hosted room. At the end also a 4-player race: four views, 59.85 fps average,
+no slow seconds. One rare hang in the CTGP menu flow (1 in 15 runs, at the menu movies) was seen once, before these steps were
+finished, and not reproduced since; `local/exp/hangcatch.sh` saves thread stacks if it happens.
+
+What is left of the plan: deleting the files for every platform (needs the Windows test), Phase 7 (native memory model: the
+generator emitting plain pointer loads for guest VA == host VA) and the optional Phase 8.
