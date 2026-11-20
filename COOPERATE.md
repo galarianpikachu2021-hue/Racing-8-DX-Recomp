@@ -247,3 +247,8 @@ Release notes: `docs/RELEASE_NOTES_v0.2.5-beta4.md`. **Engine stamp for this pat
 Testing tip from Linux: test the way players run it. Start the release's own engine with the launcher's arguments and
 environment (`launch.env`, `KARTRECOMP_APP_NAME`), working directory = the engine's folder (plugins are found relative to it),
 and back up the config, saves and logs first. Several of today's bugs only showed up that way.
+
+**Beta 4 pre-release is up (2026-11-19):** https://github.com/galarianpikachu2021-hue/Racing-8-DX-Recomp/releases/tag/BETA-0.2.5-4
+(tag `BETA-0.2.5-4` = `main` 78224fe, engine `6a63d1025f-abi6`). It has the Linux AppImage + `.sha256`; please upload
+`KartRecomp-windows-x64.zip` + `.sha256` built from that tag (`gh release upload BETA-0.2.5-4 <files>`), and replace the line
+"Windows zip will be added here shortly" / "Windows: coming." in the release description when you do.
