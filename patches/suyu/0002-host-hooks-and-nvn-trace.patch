@@ -216,7 +216,7 @@ index 88bf023008..7044ca660e 100644
              eden_path_cache = eden_path / CACHE_DIR;
              eden_path_config = eden_path / CONFIG_DIR;
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index 0ae108d9c1..e27180825c 100644
+index 0ae108d9c1..a60a180e06 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -50,6 +50,7 @@
@@ -227,7 +227,19 @@ index 0ae108d9c1..e27180825c 100644
  #include <mutex>
  #include <random>
  
-@@ -228,6 +229,16 @@ public:
+@@ -180,6 +181,11 @@ public:
+ 
+     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms) {
+         std::unique_lock lock{placeholder_mutex};
++        // kart-recomp (Windows): mapping over pages that are already mapped replaces them, as mmap(MAP_FIXED) does on Linux. The
++        // runtime kernel maps the game's memory again into the same host arena after the emulated loader has mapped the modules
++        // there; without this Split below fails ("Failed to split placeholder") because the range is a view, not a placeholder.
++        while (UnmapOnePlaceholder(virtual_offset, length)) {
++        }
+         if (!IsNiechePlaceholder(virtual_offset, length)) {
+             Split(virtual_offset, length);
+         }
+@@ -228,6 +234,16 @@ public:
          UNREACHABLE();
      }
  
@@ -244,7 +256,7 @@ index 0ae108d9c1..e27180825c 100644
      const size_t backing_size; ///< Size of the backing memory in bytes
      const size_t virtual_size; ///< Size of the virtual address placeholder in bytes
  
-@@ -235,6 +246,41 @@ public:
+@@ -235,6 +251,41 @@ public:
      u8* virtual_base{};
  
  private:
@@ -286,7 +298,7 @@ index 0ae108d9c1..e27180825c 100644
      /// Release all resources in the object
      void Release() {
          if (!placeholders.empty()) {
-@@ -516,6 +562,17 @@ static int shm_open_anon(int flags, mode_t mode) {
+@@ -516,6 +567,17 @@ static int shm_open_anon(int flags, mode_t mode) {
  
  class HostMemory::Impl {
  public:
@@ -304,7 +316,7 @@ index 0ae108d9c1..e27180825c 100644
      explicit Impl(size_t backing_size_, size_t virtual_size_)
          : backing_size{backing_size_}
          , virtual_size{virtual_size_}
-@@ -573,6 +630,19 @@ public:
+@@ -573,6 +635,19 @@ public:
              LOG_CRITICAL(HW_Memory, "mmap failed: {}", strerror(errno));
              return false;
          }
@@ -324,7 +336,7 @@ index 0ae108d9c1..e27180825c 100644
  
          // Virtual memory initialization
          virtual_base = virtual_map_base = static_cast<u8*>(ChooseVirtualBase(virtual_size));
-@@ -582,6 +652,13 @@ public:
+@@ -582,6 +657,13 @@ public:
          }
  #if defined(__linux__)
          madvise(virtual_base, virtual_size, MADV_HUGEPAGE);
@@ -338,7 +350,7 @@ index 0ae108d9c1..e27180825c 100644
  #endif
          free_manager.SetAddressSpace(virtual_base, virtual_size);
          return true;
-@@ -784,6 +861,31 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
+@@ -784,6 +866,31 @@ void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission
  }
  
  void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
