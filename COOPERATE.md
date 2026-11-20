@@ -266,3 +266,13 @@ and back up the config, saves and logs first. Several of today's bugs only showe
 **3. Checks from your list, emulated kernel, 4.0.1, 1440p, FSR 3:** log says `per-object motion vectors available` (RTX A4500) and `motion vectors: GPU 0.20-0.23 ms per frame`; render scale 50% and 150% both start and race with correct pictures (no crash at 150%); push descriptors and the other earlier fixes still on. A 1P race: 91% of frames on time. With `KARTRECOMP_MV_DEBUG=1` the debug view shows the race-start sign and the HUD but I did not see the kart at the sampled frame, so "one even colour" is not confirmed. Not tested: HUD sharpness by eye on the results list / end-of-Grand-Prix board, Wireless Play over a hosted room, 4P on this build.
 
 MSVC: the beta 4 engine compiled as it was (no new errors since the 2026-11-18 fixes), launcher ctest 14/14.
+
+---
+
+## Windows session note (2026-11-19, later): beta 3 Windows zip re-uploaded; runtime kernel on Windows: first fix, still not booting
+
+Zip SHA-256 `41f442a09ad7ce3b7552f17d3b8e4cd3b9c4a24d10156068239cc732a843eea5` (engine stamp `1fad53b3f0-abi6`, `windows-port` 4511a32 on top of main's df1f34d; the stamp differs from main's because of the Windows commits 324fd88 and 4511a32 - please take both into main).
+
+**Runtime kernel on Windows:** the `Failed to split placeholder` at `TakeApplicationPool` is fixed by 4511a32: `HostMemory::Map` (Windows) now unmaps what is already mapped in the range first, like `mmap(MAP_FIXED)`. The cause was that the runtime kernel maps the game's memory again in the same host arena where the emulated loader (hybrid mode, no `KARTRECOMP_RUNTIME_KERNEL_ONLY`) already mapped the modules; on Windows a mapped view cannot be split like a free placeholder. With `KARTRECOMP_NATIVE_KERNEL=1;KARTRECOMP_NATIVE_SERVICES=1` the engine now gets as far as `native kernel: the game's main thread started on the runtime's kernel (entry 0x80c3d000)` and runs the first recompiled blocks (`Early static dispatch`), but I saw no frames in 60 s, so it does not reach the title yet and stays off by default on Windows. Log lines of interest: `recomp: unresolved GOT/PLT symbol '__EX_end' / '__EX_start' for module base=0x80c3d000` (rtld module). Next step on my side: find where the game thread stops (stack of the hung engine).
+
+Default (emulated kernel) on this zip: Setup passes the test boot, 1P race 88% of frames on time.
