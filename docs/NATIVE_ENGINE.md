@@ -759,3 +759,15 @@ The SDK then clears the request's events with **svc ClearEvent**, which was not 
 (2001-0114, then an SDK abort). It is now routed. Result: "Connecting...", then back at the main menu.
 
 Test: `make-menu-tas.py --online[=N]`. Diagnostics: a system call that answers "invalid handle" is logged with its arguments.
+
+## Plan status (2026-11-19)
+
+Everything in the plan above is done on Linux except removing the emulated kernel's files from the source for every platform:
+- OS layer, services, file system, graphics queue, threads, synchronisation: native (sections above).
+- Kernel: the runtime kernel is the Linux default and the emulated kernel's machinery is out of the Linux build
+  (`KARTRECOMP_RUNTIME_KERNEL_ONLY`, docs/NATIVE_KERNEL.md "Stage 6").
+- Phase 7 (memory): direct memory (`arena + address`, inline, "Fast code" above). Guest VA == host VA would save one add per access.
+- Phase 8 (function-level code): native calls (BL/BLR) and chained branches are in; the rest was measured at ~1-2% and dropped.
+
+Left: the Windows session tests the runtime kernel (COOPERATE.md), then `KARTRECOMP_RUNTIME_KERNEL_ONLY` becomes the default
+everywhere and the emulated kernel files (the ~25k lines listed in docs/NATIVE_KERNEL.md) are deleted from the fork.

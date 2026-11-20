@@ -219,3 +219,31 @@ test is still the open request: everything for it (runtime kernel default, stage
 fix, per-object motion vectors) is on `native-perf` and reaches `main` when the maintainer pushes. On Windows,
 `KARTRECOMP_RUNTIME_KERNEL_ONLY` stays off (CMake option, Linux default only): test with `KARTRECOMP_NATIVE_KERNEL=1` first, then
 with the option on. After that the emulated kernel files can be removed for every platform.
+
+---
+
+## Linux session note (2026-11-19): beta 4 is on `main` - Windows zip and runtime-kernel test, please
+
+`main` now has everything since beta 2 (35 commits fast-forwarded from the Linux branch `native-perf`, including your MSVC fixes).
+Release notes: `docs/RELEASE_NOTES_v0.2.5-beta4.md`. **Engine stamp for this patch set: `6a63d1025f-abi6`**
+(`cat patches/suyu/*.patch | sha256sum | cut -c1-10` + `-abi6`).
+
+1. **Build the Windows zip for beta 4** from `main` as for beta 2 (`fetch-fork.sh` into an empty folder, CMake must get past
+   "Generating done"). New code to watch with MSVC (compiled with GCC only so far):
+   - `suyu_cmd/native_gpu/vk_shadow_backend.cpp`: per-object motion vectors (`InitObjMv`, `RecordObjMvDraw`, `RunObjectMotion`,
+     `GetMotionPipeline`, `CreatePipeline(..., motion)`), `ApplyUiScale`, the new `FindUpscalePoint` paths, `objmv_spv.h` (new file).
+   - `core/nvn_host/shader_translate.cpp`: `AddPositionCapture` (SPIR-V patcher).
+   - `core/hle/kernel/kernel.cpp`: `SuspendEmulation` is a no-op only under `KARTRECOMP_RUNTIME_KERNEL_ONLY` (off on Windows).
+2. **Check in game on Windows** (FSR 3 selected, render scale 50%):
+   - the log says `per-object motion vectors available` (AMD/NVIDIA Windows drivers have transform feedback and fragment
+     barycentrics); with `KARTRECOMP_MV_DEBUG=1` the kart is one even colour (blue tint = object layer), no speckles;
+   - race HUD, results list and the end-of-Grand-Prix board are sharp; nothing shakes (jitter is automatic now, menu row hidden);
+   - render scale 150% starts without a crash.
+3. **Runtime-kernel test (the open request):** run with `KARTRECOMP_NATIVE_KERNEL=1`: a 1P race on 4.0.1, a 4P race, Wireless
+   Play over a hosted room, Setup end to end. Report fps and errors (`call to null`, crashes). If it holds, build with
+   `-DKARTRECOMP_RUNTIME_KERNEL_ONLY=ON` and repeat; then the emulated kernel files can go for every platform.
+4. Upload the zip (+ `.sha256`) to the beta 4 pre-release when the maintainer creates it, and add a short note here.
+
+Testing tip from Linux: test the way players run it. Start the release's own engine with the launcher's arguments and
+environment (`launch.env`, `KARTRECOMP_APP_NAME`), working directory = the engine's folder (plugins are found relative to it),
+and back up the config, saves and logs first. Several of today's bugs only showed up that way.
