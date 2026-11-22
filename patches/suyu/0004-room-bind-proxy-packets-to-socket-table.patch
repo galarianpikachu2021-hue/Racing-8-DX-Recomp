@@ -1,0 +1,68 @@
+diff --git a/src/core/hle/service/sockets/bsd_sockets.cpp b/src/core/hle/service/sockets/bsd_sockets.cpp
+index d431204b3..a059fa7f2 100644
+--- a/src/core/hle/service/sockets/bsd_sockets.cpp
++++ b/src/core/hle/service/sockets/bsd_sockets.cpp
+@@ -57,11 +57,30 @@ BsdSockets::BsdSockets() {
+     if (auto room_member = Network::GetRoomMember().lock()) {
+         proxy_packet_received = room_member->BindOnProxyPacketReceived(
+             [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
++        proxy_bound = true;
+     } else {
+         LOG_ERROR(Service, "Network isn't initialized");
+     }
+ }
+ 
++// The room client is created after the game is loaded (suyu_cmd calls Network::Init() after system.Load()), but this
++// table is built while loading, so the constructor above may find no room client and never bind the room's packets.
++// The game's sockets then receive nothing and Wireless Play drops the connection a few seconds after it is made.
++// Bind on first use instead.
++void BsdSockets::EnsureProxyBinding() {
++    bool expected = false;
++    if (!proxy_bound.compare_exchange_strong(expected, true)) {
++        return;
++    }
++    if (auto room_member = Network::GetRoomMember().lock()) {
++        proxy_packet_received = room_member->BindOnProxyPacketReceived(
++            [this](const Network::ProxyPacket& packet) { OnProxyPacketReceived(packet); });
++        LOG_INFO(Service, "bsd: room packets bound to the socket table");
++    } else {
++        proxy_bound = false;
++    }
++}
++
+ BsdSockets::~BsdSockets() {
+     if (auto room_member = Network::GetRoomMember().lock()) {
+         room_member->Unbind(proxy_packet_received);
+@@ -69,6 +88,7 @@ BsdSockets::~BsdSockets() {
+ }
+ 
+ std::pair<s32, Errno> BsdSockets::SocketImpl(Domain domain, Type type, Protocol protocol) {
++    EnsureProxyBinding();
+ 
+     if (type == Type::SEQPACKET) {
+         UNIMPLEMENTED_MSG("SOCK_SEQPACKET errno management");
+diff --git a/src/core/hle/service/sockets/bsd_sockets.h b/src/core/hle/service/sockets/bsd_sockets.h
+index 86692669b..4a6287834 100644
+--- a/src/core/hle/service/sockets/bsd_sockets.h
++++ b/src/core/hle/service/sockets/bsd_sockets.h
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <memory>
+ #include <optional>
+ #include <span>
+@@ -69,9 +70,12 @@ private:
+     bool IsFileDescriptorValid(s32 fd) const noexcept;
+     /// A packet from the room for one of the proxy sockets.
+     void OnProxyPacketReceived(const Network::ProxyPacket& packet);
++    /// Binds the room's packets to this table once the room client exists (it is created after the game is loaded).
++    void EnsureProxyBinding();
+ 
+     std::array<std::optional<FileDescriptor>, MAX_FD> file_descriptors{};
+     Network::RoomMember::CallbackHandle<Network::ProxyPacket> proxy_packet_received;
++    std::atomic<bool> proxy_bound{false};
+ };
+ 
+ } // namespace Service::Sockets
