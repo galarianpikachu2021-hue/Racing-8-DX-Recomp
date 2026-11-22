@@ -1,0 +1,49 @@
+diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
+index b49dcd1ee..4d20843eb 100644
+--- a/src/suyu_cmd/suyu.cpp
++++ b/src/suyu_cmd/suyu.cpp
+@@ -64,6 +64,7 @@
+ #include "core/file_sys/program_metadata.h"
+ #include "core/file_sys/submission_package.h"
+ #include "core/file_sys/vfs/vfs_real.h"
++#include "core/hle/service/acc/profile_manager.h"
+ #include "core/hle/service/am/applet_manager.h"
+ #include "core/hle/service/am/service/library_applet_creator.h"
+ #include "core/hle/service/filesystem/filesystem.h"
+@@ -2281,6 +2282,36 @@ int main(int argc, char** argv) {
+     const Core::SystemResultStatus load_result{system.Load(*emu_window, filepath, load_parameters)};
+     LOG_INFO(Frontend, "suyu-cmd: system.Load returned: {}", static_cast<int>(load_result));
+ 
++    // kart-recomp: KARTRECOMP_PROFILE_NAME (the launcher's "Profile name") for the emulated kernel too: the playing user's
++    // console profile is renamed before the game runs, so Wireless Play's lobby shows it (the native services do the same in
++    // native_services_list.cpp, which the Windows engine does not run). The console allows 10 characters.
++    if (const char* profile_name = std::getenv("KARTRECOMP_PROFILE_NAME"); profile_name && *profile_name) {
++        std::string name;
++        size_t chars = 0;
++        for (const char* p = profile_name; *p && chars < 10;) {
++            const auto c = static_cast<unsigned char>(*p);
++            const size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
++            if (name.size() + len > Service::Account::profile_username_size) break;
++            for (size_t i = 0; i < len && p[i]; ++i) name.push_back(p[i]);
++            p += len;
++            ++chars;
++        }
++        auto& profile_manager = system.GetProfileManager();
++        const auto user_id = profile_manager.GetLastOpenedUser();
++        Service::Account::ProfileBase base{};
++        if (!name.empty() && profile_manager.GetProfileBase(user_id, base)) {
++            const std::string old_name(reinterpret_cast<const char*>(base.username.data()),
++                                       strnlen(reinterpret_cast<const char*>(base.username.data()), base.username.size()));
++            if (old_name != name) {
++                base.username.fill(0);
++                std::memcpy(base.username.data(), name.data(), name.size());
++                if (profile_manager.SetProfileBase(user_id, base)) {
++                    LOG_INFO(Frontend, "kart-recomp: profile name '{}' -> '{}'", old_name, name);
++                }
++            }
++        }
++    }
++
+     switch (load_result) {
+     case Core::SystemResultStatus::ErrorGetLoader:
+         LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", filepath);
