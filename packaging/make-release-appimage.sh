@@ -29,6 +29,7 @@ echo "[2/4] Adding the compiler and the hot block list"
 cp -a "$tc" "$appdir/usr/lib/kartrecomp/toolchain"
 for d in "$repo"/data/mk8d-*/; do v="$(basename "$d")"; mkdir -p "$appdir/usr/lib/kartrecomp/data/$v"; cp "$d"/*.txt "$appdir/usr/lib/kartrecomp/data/$v/"; done  # per supported update: hot block list, menu-merge hashes (3.0.4)
 rm -f "$appdir/AppRun"; cp "$here/AppRun.release" "$appdir/AppRun"; chmod +x "$appdir/AppRun"
+cp "$here/linux/collect-logs.sh" "$appdir/usr/lib/kartrecomp/"
 echo "[3/4] Checking that nothing from a game is inside"
 bad=$(find "$appdir" -type f \( -iname '*.nsp' -o -iname '*.nsz' -o -iname '*.xci' -o -iname '*.xcz' -o -iname '*.nca' -o -iname '*.nso' -o -iname '*.npdm' -o -iname 'prod.keys*' -o -iname 'title.keys*' \
   -o -name 'recomp_*.c' -o -name 'recompiled_*' -o -name 'module.json' \) -o \( -name '*.o' -not -path '*/toolchain/*' \) | head -5)

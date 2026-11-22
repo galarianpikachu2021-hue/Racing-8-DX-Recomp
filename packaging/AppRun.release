@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Racing 8 DX Recomp release AppImage: the launcher by default; `AppRun setup|build|export|engine ...` runs the matching tool;
-# `AppRun play` (or --nolauncher) starts the built game directly, without the launcher window.
+# `AppRun play` (or --nolauncher) starts the built game directly, without the launcher window; `AppRun logs` packs the logs for a bug report.
 here="$(dirname "$(readlink -f "$0")")"
 # The generated code is built for x86-64-v3 (AVX2, BMI2, FMA, MOVBE).
 for f in avx2 bmi2 fma movbe; do
@@ -9,6 +9,7 @@ done
 case "${1:-}" in
   setup|build|export) tool="kartrecomp-$1"; shift; exec "$here/usr/bin/$tool" "$@";;
   engine) shift; exec "$here/usr/bin/mk8d-engine" "$@";;
+  logs|--collect-logs) shift; exec bash "$here/usr/lib/kartrecomp/collect-logs.sh" "$@";;
   play|--nolauncher|--play|-nolauncher|-play) shift; exec "$here/usr/bin/kartrecomp" --nolauncher "$@";;  # start the built game without the launcher (#17)
 esac
 exec "$here/usr/bin/kartrecomp" "$@"
