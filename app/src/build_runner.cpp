@@ -43,18 +43,21 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
     // KARTRECOMP_COLD_OPT=<flag> (e.g. -O1): what the cold pieces are compiled with, for measuring; the default is -O0.
     const QString cold = qEnvironmentVariable("KARTRECOMP_COLD_OPT", QStringLiteral("-O0"));
     a << (hot ? QStringLiteral("-O3") : cold);
-    // Fast code (docs/NATIVE_ENGINE.md "Direct memory"): game memory is read in place instead of through a helper call, and the
-    // blocks leave their own code check to one check of the whole module at start.
-    if (BuildRunner::FastCode()) a << "-DRECOMP_DIRECT_MEM=1" << "-DRECOMP_GUARD_WHOLE=1";
+    // Fast code (docs/NATIVE_ENGINE.md "Fast code"): the blocks leave their own code check to one check of the whole module at
+    // start, and (where the engine has the fault handler) game memory is read in place instead of through a helper call.
+    if (BuildRunner::FastCode()) a << "-DRECOMP_GUARD_WHOLE=1";
+    if (BuildRunner::DirectMemory()) a << "-DRECOMP_DIRECT_MEM=1";
     return a;
 }
 } // namespace
 
-bool BuildRunner::FastCode() {
+bool BuildRunner::FastCode() { return qEnvironmentVariable("KARTRECOMP_NO_FAST_CODE") != QLatin1String("1"); }
+
+bool BuildRunner::DirectMemory() {
 #ifdef Q_OS_WIN
-    return false; // the Windows engine has no fault handler for direct memory yet
+    return false; // the Windows engine has no fault handler for direct memory yet (it refuses DM1 modules)
 #else
-    return qEnvironmentVariable("KARTRECOMP_NO_FAST_CODE") != QLatin1String("1");
+    return FastCode();
 #endif
 }
 
