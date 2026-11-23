@@ -1,5 +1,5 @@
 diff --git a/src/common/host_memory.cpp b/src/common/host_memory.cpp
-index a60a180e0..884155e1f 100644
+index a60a180e0..85f0bc423 100644
 --- a/src/common/host_memory.cpp
 +++ b/src/common/host_memory.cpp
 @@ -7,10 +7,14 @@
@@ -17,7 +17,15 @@ index a60a180e0..884155e1f 100644
  
  #else // ^^^ Windows ^^^ vvv POSIX vvv
  
-@@ -145,21 +149,26 @@ public:
+@@ -50,6 +54,7 @@
+ 
+ #endif // ^^^ POSIX ^^^
+ 
++#include <atomic>
+ #include <cstdlib>
+ #include <mutex>
+ #include <random>
+@@ -145,21 +150,26 @@ public:
              return false;
          }
  
@@ -48,7 +56,7 @@ index a60a180e0..884155e1f 100644
          if (ret != backing_base) {
              Release();
              LOG_CRITICAL(HW_Memory, "Failed to map {} MiB of virtual memory", backing_size >> 20);
-@@ -219,6 +228,12 @@ public:
+@@ -219,6 +229,12 @@ public:
          std::scoped_lock lock{placeholder_mutex};
          auto [it, end] = placeholders.equal_range({virtual_offset, virtual_end});
          while (it != end) {
@@ -61,7 +69,18 @@ index a60a180e0..884155e1f 100644
              const size_t offset = (std::max)(it->lower(), virtual_offset);
              const size_t protect_length = (std::min)(it->upper(), virtual_end) - offset;
              DWORD old_flags{};
-@@ -244,6 +259,74 @@ public:
+@@ -237,22 +253,142 @@ public:
+     /// kart-recomp (Windows): releases whole pages of the backing section instead of writing zeros into them. On Windows about
+     /// 75% of the game's resident guest memory (2.4 of 3.2 GB in a 4.0.1 race) was pages the kernel had zero-filled and the
+     /// game never wrote; writing those zeros made each page resident. A discarded section page reads back as zeros through
+-    /// every view (checked once at start, see DiscardReadsZero). False when the discard is not available or not used.
++    /// the views that have it mapped (checked once at start, see DiscardFunction), but a page written through an arena view
++    /// unmapped since keeps its data (tested). The game writes through the arena only with the direct memory handler: no
++    /// discard then. False when the discard is not available or not used.
+     bool DiscardZeroPages(size_t offset, size_t length) {
++        if (handler_pages.load(std::memory_order_relaxed)) return false;
+         static const auto discard = DiscardFunction();
+         if (!discard) return false;
          return discard(backing_base + offset, length) == ERROR_SUCCESS;
      }
  
@@ -120,8 +139,13 @@ index a60a180e0..884155e1f 100644
 +    /// Zeroes the reservoir pages handed out so far, through the backing view (every view of them reads zeros after). Not
 +    /// DiscardZeroPages: a page written only through an arena view keeps its data after a discard of the backing view (tested).
 +    void ZeroSinks() {
-+        std::scoped_lock lock{placeholder_mutex};
-+        std::memset(backing_base + backing_size + kSinkReservoir, 0, sink_cursor);
++        size_t used;
++        {
++            std::scoped_lock lock{placeholder_mutex};
++            used = sink_cursor;
++        }
++        // Outside the lock: reservoir pages are never handed out twice and the backing view is always mapped.
++        std::memset(backing_base + backing_size + kSinkReservoir, 0, used);
 +    }
 +
 +    void SetSinkReservoirLimit(size_t bytes) {
@@ -136,7 +160,11 @@ index a60a180e0..884155e1f 100644
      const size_t backing_size; ///< Size of the backing memory in bytes
      const size_t virtual_size; ///< Size of the virtual address placeholder in bytes
  
-@@ -253,6 +336,48 @@ public:
+     u8* backing_base{};
+     u8* virtual_base{};
++    /// kart-recomp: set by HostMemory::HandlerOps (the direct memory handler is in use); turns DiscardZeroPages off.
++    std::atomic<bool> handler_pages{false};
+ 
  private:
      using DiscardFn = DWORD(WINAPI*)(PVOID, SIZE_T);
  
@@ -185,7 +213,7 @@ index a60a180e0..884155e1f 100644
      /// DiscardVirtualMemory (Windows 8.1+) if a self-test shows that a discarded page of a pagefile-backed section reads back
      /// as zeros through two views of it (the backing view and the fastmem view share the pages). Otherwise null: zeros are
      /// written as before. KARTRECOMP_DISCARD_ZERO=0 turns it off.
-@@ -385,6 +510,17 @@ private:
+@@ -385,6 +521,17 @@ private:
              TrackPlaceholder(unmap_end, host_offset + unmap_end - placeholder_begin,
                               placeholder_end - unmap_end);
          }
@@ -203,7 +231,7 @@ index a60a180e0..884155e1f 100644
          return true;
      }
  
-@@ -442,6 +578,11 @@ private:
+@@ -442,6 +589,11 @@ private:
      std::mutex placeholder_mutex;                                 ///< Mutex for placeholders
      boost::icl::separate_interval_set<size_t> placeholders;       ///< Mapped placeholders
      ankerl::unordered_dense::map<size_t, size_t> placeholder_host_pointers; ///< Placeholder backing offset
@@ -215,7 +243,7 @@ index a60a180e0..884155e1f 100644
  };
  
  #elif defined(__OPENORBIS__) || defined(__managarm__)
-@@ -807,6 +948,9 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
+@@ -807,6 +959,9 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
              // Ensure the virtual base is aligned to the L2 block size.
              virtual_base = reinterpret_cast<u8*>(Common::AlignUp(uintptr_t(virtual_base), HugePageSize));
              virtual_base_offset = virtual_base - impl->virtual_base;
@@ -225,7 +253,7 @@ index a60a180e0..884155e1f 100644
          }
      } else {
          impl.reset();
-@@ -894,6 +1038,45 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
+@@ -894,6 +1049,46 @@ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 f
      std::memset(backing_base + physical_offset, fill_value, length);
  }
  
@@ -234,6 +262,7 @@ index a60a180e0..884155e1f 100644
 +    if (!impl || !virtual_base) {
 +        return {};
 +    }
++    impl->handler_pages.store(true, std::memory_order_relaxed);
 +    // ctx is the Impl, which stays put when the HostMemory is moved.
 +    KartRuntime::DirectMemory::ArenaOps ops{};
 +    ops.ctx = impl.get();
@@ -346,7 +375,7 @@ index b05acb9a8..07999c8c6 100644
  #endif
      ;
 diff --git a/src/kart_runtime/direct_memory.h b/src/kart_runtime/direct_memory.h
-index 6b0956610..40642de76 100644
+index 6b0956610..e4a2377fa 100644
 --- a/src/kart_runtime/direct_memory.h
 +++ b/src/kart_runtime/direct_memory.h
 @@ -17,7 +17,8 @@
@@ -359,11 +388,18 @@ index 6b0956610..40642de76 100644
  // No dependencies beyond the standard library and the OS; see README.md.
  #pragma once
  
-@@ -30,13 +31,31 @@
+@@ -30,13 +31,38 @@
  #include <signal.h>
  #include <sys/mman.h>
  #include <ucontext.h>
 +#elif defined(_WIN32) && (defined(_M_X64) || defined(__x86_64__))
++#include <cstdio>
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
 +#include <windows.h>
  #endif
  
@@ -391,7 +427,16 @@ index 6b0956610..40642de76 100644
  struct Stats {
      std::atomic<std::uint64_t> unmapped_reads{0};  ///< faults: reads of unmapped pages (each page faults once)
      std::atomic<std::uint64_t> unmapped_writes{0}; ///< faults: dropped writes to unmapped pages
-@@ -174,6 +193,117 @@ inline void OnTrap(int sig, siginfo_t* info, void* raw) {
+@@ -45,6 +71,8 @@ struct Stats {
+     std::atomic<std::uint64_t> last_opened{0};     ///< game address of the latest opened page
+     std::atomic<std::uint64_t> sink_pages{0};      ///< unmapped pages that take writes without a fault (emptied by ZeroSinks)
+     std::atomic<std::uint64_t> last_write_ip{0};   ///< host instruction address of the latest dropped write (which code did it)
++    std::atomic<std::uint64_t> retry_giveups{0};   ///< Windows: accesses retried too long, passed on to the next handler
++    std::atomic<std::uint64_t> last_giveup{0};     ///< game address of the latest of those
+ };
+ 
+ inline Stats& GetStats() {
+@@ -174,6 +202,145 @@ inline void OnTrap(int sig, siginfo_t* info, void* raw) {
      }
      uc->uc_mcontext.gregs[REG_EFL] &= ~static_cast<greg_t>(0x100);
  }
@@ -400,6 +445,29 @@ index 6b0956610..40642de76 100644
 +inline void* g_veh = nullptr;
 +/// Pages made writable for the instruction being stepped (host addresses; one instruction can touch two pages).
 +inline thread_local std::uint8_t* t_stepping[2] = {nullptr, nullptr};
++/// An access that keeps being retried (a Map that never places its view) is given up after this long: a crash, not a hang.
++inline constexpr std::uint64_t kRetryLimitMs = 1000;
++inline std::uint64_t g_retry_limit_ms = kRetryLimitMs; // tests shorten it
++inline thread_local std::uint64_t t_retry_address = 0, t_retry_first = 0, t_retry_last = 0;
++
++/// True when the access to `game` may be retried once more. A retry that works never comes back here, so the window starts
++/// again after a pause (another access since) as well as on another address.
++inline bool KeepRetrying(std::uint64_t game) {
++    const std::uint64_t now = GetTickCount64();
++    if (game != t_retry_address || t_retry_first == 0 || now - t_retry_last > g_retry_limit_ms / 2) {
++        t_retry_address = game;
++        t_retry_first = now;
++    } else if (now - t_retry_first >= g_retry_limit_ms) {
++        t_retry_first = 0;
++        GetStats().retry_giveups.fetch_add(1, std::memory_order_relaxed);
++        GetStats().last_giveup.store(game, std::memory_order_relaxed);
++        std::fprintf(stderr, "kart_runtime: direct memory: gave up retrying an access to game address 0x%llx\n",
++                     static_cast<unsigned long long>(game));
++        return false;
++    }
++    t_retry_last = now;
++    return true;
++}
 +
 +/// Makes `game_page` a sink, extending a range as on Linux (see OnSegv). The range lock only guards the table: is_mapped (the
 +/// page table may fault on first touch) and the arena ops run outside it. False when it cannot: the write is stepped then.
@@ -480,11 +548,14 @@ index 6b0956610..40642de76 100644
 +            return EXCEPTION_CONTINUE_EXECUTION;
 +        }
 +        if (is_mapped && is_mapped(game)) {
++            if (!KeepRetrying(game)) return EXCEPTION_CONTINUE_SEARCH;
 +            SwitchToThread(); // a game Map is placing its view: run the instruction again once it has
 +            return EXCEPTION_CONTINUE_EXECUTION;
 +        }
 +        if (!write) {
-+            if (kind == PageKind::Handler) return EXCEPTION_CONTINUE_EXECUTION; // all readable: one was being replaced
++            if (kind == PageKind::Handler) { // all readable: one was being replaced
++                return KeepRetrying(game) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
++            }
 +            if (!g_ops.map_zero(g_ops.ctx, game_page)) continue;
 +            stats.last_unmapped.store(game, std::memory_order_relaxed);
 +            stats.unmapped_reads.fetch_add(1, std::memory_order_relaxed);
@@ -496,10 +567,12 @@ index 6b0956610..40642de76 100644
 +            stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
 +            return EXCEPTION_CONTINUE_EXECUTION; // the write happens, into the sink
 +        }
-+        const int slot = t_stepping[0] == nullptr ? 0 : (t_stepping[1] == nullptr ? 1 : -1);
++        // The same page again (another thread's step put the zero page back first) keeps its slot.
++        std::uint8_t* const page = base + game_page;
++        const int slot = (!t_stepping[0] || t_stepping[0] == page) ? 0 : (!t_stepping[1] || t_stepping[1] == page) ? 1 : -1;
 +        if (slot < 0) return EXCEPTION_CONTINUE_SEARCH;
 +        if (!g_ops.map_scratch(g_ops.ctx, game_page)) continue;
-+        t_stepping[slot] = base + game_page;
++        t_stepping[slot] = page;
 +        context.EFlags |= 0x100; // trap flag: EXCEPTION_SINGLE_STEP after this instruction
 +        stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
 +        return EXCEPTION_CONTINUE_EXECUTION;
@@ -509,7 +582,7 @@ index 6b0956610..40642de76 100644
  #endif
  } // namespace Detail
  
-@@ -196,12 +326,16 @@ inline void ZeroSinks() {
+@@ -196,12 +363,16 @@ inline void ZeroSinks() {
              }
          }
      }
@@ -527,7 +600,7 @@ index 6b0956610..40642de76 100644
      if (!base || Detail::g_base.load()) return Detail::g_base.load() == base;
      Detail::g_is_mapped.store(is_mapped);
      Detail::g_size.store(size);
-@@ -213,10 +347,46 @@ inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped
+@@ -213,10 +384,50 @@ inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped
      if (sigaction(SIGSEGV, &sa, &Detail::g_old_segv) != 0) return false;
      sa.sa_sigaction = &Detail::OnTrap;
      return sigaction(SIGTRAP, &sa, &Detail::g_old_trap) == 0;
@@ -566,9 +639,13 @@ index 6b0956610..40642de76 100644
 +        Detail::g_count[i].store(0);
 +    }
 +    Detail::g_range_count = 0;
++    Detail::t_stepping[0] = Detail::t_stepping[1] = nullptr;
++    Detail::g_retry_limit_ms = Detail::kRetryLimitMs;
++    Detail::t_retry_first = 0;
 +    Stats& stats = GetStats();
 +    for (auto* counter : {&stats.unmapped_reads, &stats.unmapped_writes, &stats.opened_pages, &stats.last_unmapped,
-+                          &stats.last_opened, &stats.sink_pages, &stats.last_write_ip}) {
++                          &stats.last_opened, &stats.sink_pages, &stats.last_write_ip, &stats.retry_giveups,
++                          &stats.last_giveup}) {
 +        counter->store(0);
 +    }
 +}
@@ -576,7 +653,7 @@ index 6b0956610..40642de76 100644
 +
  } // namespace KartRuntime::DirectMemory
 diff --git a/src/tests/common/host_memory.cpp b/src/tests/common/host_memory.cpp
-index 46cc78271..2ed22f29a 100644
+index 46cc78271..9ecda3ac8 100644
 --- a/src/tests/common/host_memory.cpp
 +++ b/src/tests/common/host_memory.cpp
 @@ -9,6 +9,15 @@
@@ -595,7 +672,7 @@ index 46cc78271..2ed22f29a 100644
  using Common::HostMemory;
  using namespace Common::Literals;
  
-@@ -227,3 +236,313 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
+@@ -227,3 +236,393 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
      REQUIRE(ptr[0x0000] == 19);
      REQUIRE(ptr[0x3fff] == 12);
  }
@@ -719,6 +796,25 @@ index 46cc78271..2ed22f29a 100644
 +    REQUIRE(arena[0x61fff] == 0);
 +}
 +
++TEST_CASE("HostMemory: ClearBackingRegion zeroes pages written only through the arena", "[common]") {
++    HostMemory mem(BACKING_SIZE, VIRTUAL_SIZE);
++    RequireFastmemArena(mem);
++    (void)mem.HandlerOps(); // as with the direct memory handler installed
++    volatile u8* const arena = mem.VirtualBasePointer();
++    volatile u8* const backing = mem.BackingBasePointer();
++    mem.Map(0x90000, 0x200000, 0x4000, PERMS, HEAP);
++    for (size_t page = 0; page < 0x4000; page += 0x1000) {
++        arena[0x90000 + page + 0x10] = 0x5a;
++    }
++    mem.Unmap(0x90000, 0x4000, HEAP);
++    mem.ClearBackingRegion(0x200000, 0x4000, 0);
++    mem.Map(0xa0000, 0x200000, 0x4000, PERMS, HEAP);
++    for (size_t page = 0; page < 0x4000; page += 0x1000) {
++        REQUIRE(backing[0x200000 + page + 0x10] == 0);
++        REQUIRE(arena[0xa0000 + page + 0x10] == 0);
++    }
++}
++
 +namespace DM = KartRuntime::DirectMemory;
 +
 +/// Stand-in for the page table: the game pages (below 1 MiB) a test has mapped.
@@ -760,6 +856,25 @@ index 46cc78271..2ed22f29a 100644
 +}
 +static void Store64(u8* p, u64 value) {
 +    *reinterpret_cast<volatile u64*>(p) = value;
++}
++
++/// Calls the handler as Windows would for an access violation at `address` (access: 0 read, 1 write), or for a single step.
++static LONG ForgeFault(u8* address, ULONG_PTR access) {
++    EXCEPTION_RECORD rec{};
++    rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
++    rec.NumberParameters = 2;
++    rec.ExceptionInformation[0] = access;
++    rec.ExceptionInformation[1] = reinterpret_cast<ULONG_PTR>(address);
++    CONTEXT context{};
++    EXCEPTION_POINTERS pointers{&rec, &context};
++    return DM::Detail::OnException(&pointers);
++}
++static LONG ForgeSingleStep() {
++    EXCEPTION_RECORD rec{};
++    rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
++    CONTEXT context{};
++    EXCEPTION_POINTERS pointers{&rec, &context};
++    return DM::Detail::OnException(&pointers);
 +}
 +
 +/// True when reading `p` raised an exception that reached this frame (no C++ objects here: __try).
@@ -863,18 +978,8 @@ index 46cc78271..2ed22f29a 100644
 +    dm.mem.Protect(0xc000, 0x1000, Common::MemoryPermission::Read);
 +    auto& stats = DM::GetStats();
 +    const u64 opened = stats.opened_pages;
-+    const auto fault = [&](size_t address, ULONG_PTR access) {
-+        EXCEPTION_RECORD rec{};
-+        rec.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
-+        rec.NumberParameters = 2;
-+        rec.ExceptionInformation[0] = access;
-+        rec.ExceptionInformation[1] = reinterpret_cast<ULONG_PTR>(dm.arena + address);
-+        CONTEXT context{};
-+        EXCEPTION_POINTERS pointers{&rec, &context};
-+        return DM::Detail::OnException(&pointers);
-+    };
-+    REQUIRE(fault(0xb010, 1) == EXCEPTION_CONTINUE_EXECUTION); // write to a read-write page
-+    REQUIRE(fault(0xc010, 0) == EXCEPTION_CONTINUE_EXECUTION); // read of a read-only page
++    REQUIRE(ForgeFault(dm.arena + 0xb010, 1) == EXCEPTION_CONTINUE_EXECUTION); // write to a read-write page
++    REQUIRE(ForgeFault(dm.arena + 0xc010, 0) == EXCEPTION_CONTINUE_EXECUTION); // read of a read-only page
 +    REQUIRE(stats.opened_pages.load() == opened);
 +    REQUIRE(PageProtection(dm.mem, 0xc000) == PAGE_READONLY); // not opened for good by a read
 +}
@@ -907,5 +1012,57 @@ index 46cc78271..2ed22f29a 100644
 +    REQUIRE_FALSE(done_early);
 +    REQUIRE(seen.load() == 0xc0ffee);
 +    REQUIRE(stats.unmapped_reads.load() == reads);
++}
++TEST_CASE("DirectMemory: a write across two free pages steps with both slots", "[direct_memory]") {
++    DirectMemoryArena dm;
++    auto& stats = DM::GetStats();
++    const u64 writes = stats.unmapped_writes;
++    Store64(dm.arena + 0xdffc, 0x1122334455667788);
++    REQUIRE(stats.unmapped_writes.load() == writes + 2);
++    REQUIRE(Load64(dm.arena + 0xdff8) == 0);
++    REQUIRE(Load64(dm.arena + 0xe000) == 0);
++    Store64(dm.arena + 0xdffc, 1); // the slots were given back
++    REQUIRE(stats.unmapped_writes.load() == writes + 4);
++}
++
++TEST_CASE("DirectMemory: a page faulting again while it is stepped reuses its slot", "[direct_memory]") {
++    // Two threads write the same free page: the other's single step puts the zero page back before this instruction ran, so
++    // it faults on the page again, then on the second page it straddles.
++    DirectMemoryArena dm;
++    auto ops = dm.mem.HandlerOps();
++    REQUIRE(ForgeFault(dm.arena + 0xfffc, 1) == EXCEPTION_CONTINUE_EXECUTION);
++    REQUIRE(ops.map_zero(ops.ctx, 0xf000));
++    REQUIRE(ForgeFault(dm.arena + 0xfffc, 1) == EXCEPTION_CONTINUE_EXECUTION);
++    const LONG second_page = ForgeFault(dm.arena + 0x10000, 1);
++    REQUIRE(ForgeSingleStep() == EXCEPTION_CONTINUE_EXECUTION);
++    REQUIRE(second_page == EXCEPTION_CONTINUE_EXECUTION);
++    REQUIRE(PageProtection(dm.mem, 0xf000) == PAGE_READONLY);
++    REQUIRE(PageProtection(dm.mem, 0x10000) == PAGE_READONLY);
++}
++
++TEST_CASE("DirectMemory: a Map that never comes stops the retries", "[direct_memory]") {
++    DirectMemoryArena dm;
++    DM::Detail::g_retry_limit_ms = 100;
++    g_dm_mapped[0x21] = true; // the page table says mapped, the arena never gets a view
++    auto& stats = DM::GetStats();
++    const auto start = std::chrono::steady_clock::now();
++    LONG result = EXCEPTION_CONTINUE_EXECUTION;
++    while (result == EXCEPTION_CONTINUE_EXECUTION && std::chrono::steady_clock::now() - start < std::chrono::seconds(3)) {
++        result = ForgeFault(dm.arena + 0x21008, 0);
++    }
++    REQUIRE(result == EXCEPTION_CONTINUE_SEARCH);
++    REQUIRE(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(80)); // tick granularity
++    REQUIRE(stats.retry_giveups.load() == 1);
++    REQUIRE(stats.last_giveup.load() == 0x21008);
++
++    // A retry after a pause starts a new window: the earlier retries worked, they just never said so.
++    REQUIRE(ForgeFault(dm.arena + 0x21008, 0) == EXCEPTION_CONTINUE_EXECUTION);
++    std::this_thread::sleep_for(std::chrono::milliseconds(200));
++    REQUIRE(ForgeFault(dm.arena + 0x21008, 0) == EXCEPTION_CONTINUE_EXECUTION);
++
++    // A real read: given up, the fault reaches the code that made it.
++    std::this_thread::sleep_for(std::chrono::milliseconds(200));
++    REQUIRE(ReadFaultReachesCaller(dm.arena + 0x21010));
++    REQUIRE(stats.retry_giveups.load() == 2);
 +}
 +#endif

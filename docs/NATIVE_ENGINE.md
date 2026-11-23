@@ -326,9 +326,21 @@ Tried and dropped: checking only the chain budget at block exits (not `halted` a
 Windows has direct memory too: `direct_memory.h` installs a vectored exception handler that does what the signal handler does
 on Linux. The zero, scratch and sink pages cannot be `mmap`ed over the arena as on Linux, so they are views of a 64 MiB tail of
 the backing section, placed in the arena as tracked views: the game's own `Map`/`Unmap` replace them like any other view.
+That relies on `Map` replacing views that are already mapped (windows-port, 4511a32). Patch 0004 applies without it, but a game
+`Map` over a handler page then fails, so 0004 must not go into a tree without it. The game also needs the start-up fix 324fd88.
 
-Measured on Windows (7800X3D pinned to one core so the game is CPU-bound, native renderer, TAS race, 4.0.1): no fast code 32.0 fps,
-fast code without direct memory 37.3, with direct memory 44.9 (time per frame -29%).
+With direct memory the engine aborts with a message when fastmem is off. The sink reservoir is 64 MiB and is not recycled: once
+it is used up, writes to unmapped pages are single-stepped again. An access retried for more than a second (a `Map` whose view
+never arrives) is given up with one line on stderr, a crash instead of a hang. While the handler is in use, zero-filled pages are
+written instead of discarded: a discard of the backing view leaves the old data in a page written through an arena view that has
+been unmapped since. `KARTRECOMP_NO_DIRECT_MEM=1` at Setup time opts out, on Linux too.
+
+Measured on Windows (7800X3D pinned to one core so the game is CPU-bound, native renderer, TAS race, 4.0.1; 5 runs with direct
+memory, 3 without): fast code without direct memory 37.3 fps, with direct memory 44.9, +20% (time per frame 26.81 -> 22.27 ms,
+about -17%). Against no fast code at all, 32.0 fps from an earlier series of 3 runs with the same method, that is 31.25 -> 22.27 ms
+per frame, -29%. These runs still discarded zero-filled pages. In that race the game itself caused no handler faults, only the
+start-up self-test did, so the fault paths are covered by the Catch2 tests (`HostMemory*`, `[direct_memory]`), not yet by a game
+session. Those tests were run locally: the Windows CI builds no tests (`YUZU_TESTS=OFF`).
 
 Still open on this path: the per-block entry check (`c->pc` against the block's own address) and the `c->pc` store on every
 chained exit; huge pages for the arena.
