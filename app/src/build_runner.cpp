@@ -53,13 +53,7 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
 
 bool BuildRunner::FastCode() { return qEnvironmentVariable("KARTRECOMP_NO_FAST_CODE") != QLatin1String("1"); }
 
-bool BuildRunner::DirectMemory() {
-#ifdef Q_OS_WIN
-    return false; // the Windows engine has no fault handler for direct memory yet (it refuses DM1 modules)
-#else
-    return FastCode();
-#endif
-}
+bool BuildRunner::DirectMemory() { return FastCode() && qEnvironmentVariable("KARTRECOMP_NO_DIRECT_MEM") != QLatin1String("1"); }
 
 QString BuildRunner::ModuleFileName(const QString& name) {
 #ifdef Q_OS_WIN

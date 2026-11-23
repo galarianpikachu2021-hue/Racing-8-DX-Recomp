@@ -236,9 +236,15 @@ private slots:
         QVERIFY(jobs[2].args.contains("-O2") && jobs[2].args.contains("-march=x86-64-v3"));
         QCOMPARE(jobs[2].args.contains("-DRECOMP_GUARD_WHOLE=1"), BuildRunner::FastCode());
         QCOMPARE(jobs[2].args.contains("-DRECOMP_DIRECT_MEM=1"), BuildRunner::DirectMemory());
-#ifdef Q_OS_WIN
-        QVERIFY(!BuildRunner::DirectMemory()); // a Windows engine refuses direct-memory modules
-#endif
+    }
+    void directMemoryFollowsFastCodeUnlessOptedOut() {
+        qunsetenv("KARTRECOMP_NO_DIRECT_MEM");
+        QCOMPARE(BuildRunner::DirectMemory(), BuildRunner::FastCode());
+        const bool fast = BuildRunner::FastCode();
+        qputenv("KARTRECOMP_NO_DIRECT_MEM", "1");
+        QVERIFY(!BuildRunner::DirectMemory());
+        QCOMPARE(BuildRunner::FastCode(), fast);
+        qunsetenv("KARTRECOMP_NO_DIRECT_MEM");
     }
     void aFinishedCompileWritesTheMarkerAndAFailedOneDoesNot() {
         NEEDS_SH();

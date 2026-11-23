@@ -282,9 +282,9 @@ Mario Circuit with the user's mods and settings (FSR 3 100%, HDR, 3x frame gener
 
 The user's slowdown (Mario Circuit, bursts of 17-25 ms frames once per lap) is the main game thread running out of CPU: in a
 scripted three-lap 50cc race without mods it already averages 64% busy and peaks at 81%. Four changes to the generated code cut
-that. All are static (no JIT), and Setup builds them on Linux by default (`BuildRunner::FastCode()`;
-`KARTRECOMP_NO_FAST_CODE=1` at Setup time builds the old form; Windows gets everything but direct memory, `BuildRunner::DirectMemory()`,
-until its engine has the fault handler).
+that. All are static (no JIT), and Setup builds them on Linux and Windows by default (`BuildRunner::FastCode()`;
+`KARTRECOMP_NO_FAST_CODE=1` at Setup time builds the old form; direct memory, `BuildRunner::DirectMemory()`, is built too,
+and `KARTRECOMP_NO_DIRECT_MEM=1` opts out).
 
 Measured on 4.0.1, Mario Circuit, 3 laps, native threads, pinned, 180 s profile; first only the 127 hot units of `main` rebuilt:
 
