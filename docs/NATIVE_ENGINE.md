@@ -330,10 +330,11 @@ That relies on `Map` replacing views that are already mapped (windows-port, 4511
 `Map` over a handler page then fails, so 0004 must not go into a tree without it. The game also needs the start-up fix 324fd88.
 
 With direct memory the engine aborts with a message when fastmem is off. The sink reservoir is 64 MiB and is not recycled: once
-it is used up, writes to unmapped pages are single-stepped again. An access retried for more than a second (a `Map` whose view
-never arrives) is given up with one line on stderr, a crash instead of a hang. While the handler is in use, zero-filled pages are
+it is used up, writes to unmapped pages are single-stepped again. An access retried for 5 s without any fault resolved in between (a `Map` whose
+view never arrives) is given up with one line on stderr, a crash instead of a hang. While the handler is in use, zero-filled pages are
 written instead of discarded: a discard of the backing view leaves the old data in a page written through an arena view that has
-been unmapped since. `KARTRECOMP_NO_DIRECT_MEM=1` at Setup time opts out, on Linux too.
+been unmapped since. The cost is memory: the peak working set in a full TAS race is 6.75 GB with direct memory against 3.68 GB
+without (7800X3D, 4.0.1), with no fps change (44.3 fps on one core against 44.9 before this change). `KARTRECOMP_NO_DIRECT_MEM=1` at Setup time opts out, on Linux too.
 
 Measured on Windows (7800X3D pinned to one core so the game is CPU-bound, native renderer, TAS race, 4.0.1; 5 runs with direct
 memory, 3 without): fast code without direct memory 37.3 fps, with direct memory 44.9, +20% (time per frame 26.81 -> 22.27 ms,

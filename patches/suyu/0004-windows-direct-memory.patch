@@ -375,7 +375,7 @@ index b05acb9a8..07999c8c6 100644
  #endif
      ;
 diff --git a/src/kart_runtime/direct_memory.h b/src/kart_runtime/direct_memory.h
-index 6b0956610..e4a2377fa 100644
+index 6b0956610..7ca9e4ab0 100644
 --- a/src/kart_runtime/direct_memory.h
 +++ b/src/kart_runtime/direct_memory.h
 @@ -17,7 +17,8 @@
@@ -436,7 +436,7 @@ index 6b0956610..e4a2377fa 100644
  };
  
  inline Stats& GetStats() {
-@@ -174,6 +202,145 @@ inline void OnTrap(int sig, siginfo_t* info, void* raw) {
+@@ -174,6 +202,155 @@ inline void OnTrap(int sig, siginfo_t* info, void* raw) {
      }
      uc->uc_mcontext.gregs[REG_EFL] &= ~static_cast<greg_t>(0x100);
  }
@@ -446,9 +446,12 @@ index 6b0956610..e4a2377fa 100644
 +/// Pages made writable for the instruction being stepped (host addresses; one instruction can touch two pages).
 +inline thread_local std::uint8_t* t_stepping[2] = {nullptr, nullptr};
 +/// An access that keeps being retried (a Map that never places its view) is given up after this long: a crash, not a hang.
-+inline constexpr std::uint64_t kRetryLimitMs = 1000;
++inline constexpr std::uint64_t kRetryLimitMs = 5000;
 +inline std::uint64_t g_retry_limit_ms = kRetryLimitMs; // tests shorten it
 +inline thread_local std::uint64_t t_retry_address = 0, t_retry_first = 0, t_retry_last = 0;
++
++/// Any fault the handler resolves ends the retry window: only an unbroken run of retries may add up to the limit.
++inline void EndRetries() { t_retry_first = 0; }
 +
 +/// True when the access to `game` may be retried once more. A retry that works never comes back here, so the window starts
 +/// again after a pause (another access since) as well as on another address.
@@ -540,11 +543,15 @@ index 6b0956610..e4a2377fa 100644
 +                const bool permitted = write ? (p == PAGE_READWRITE || p == PAGE_WRITECOPY || p == PAGE_EXECUTE_READWRITE ||
 +                                                p == PAGE_EXECUTE_WRITECOPY)
 +                                             : p != PAGE_NOACCESS;
-+                if (permitted) return EXCEPTION_CONTINUE_EXECUTION;
++                if (permitted) {
++                    EndRetries();
++                    return EXCEPTION_CONTINUE_EXECUTION;
++                }
 +            }
 +            if (!g_ops.open_game_page(g_ops.ctx, game_page)) continue; // the view went away meanwhile
 +            stats.opened_pages.fetch_add(1, std::memory_order_relaxed);
 +            stats.last_opened.store(game, std::memory_order_relaxed);
++            EndRetries();
 +            return EXCEPTION_CONTINUE_EXECUTION;
 +        }
 +        if (is_mapped && is_mapped(game)) {
@@ -559,12 +566,14 @@ index 6b0956610..e4a2377fa 100644
 +            if (!g_ops.map_zero(g_ops.ctx, game_page)) continue;
 +            stats.last_unmapped.store(game, std::memory_order_relaxed);
 +            stats.unmapped_reads.fetch_add(1, std::memory_order_relaxed);
++            EndRetries();
 +            return EXCEPTION_CONTINUE_EXECUTION;
 +        }
 +        stats.last_unmapped.store(game, std::memory_order_relaxed);
 +        stats.last_write_ip.store(context.Rip, std::memory_order_relaxed);
 +        if (CountWrite(game_page) && MakeSink(game_page, is_mapped)) {
 +            stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
++            EndRetries();
 +            return EXCEPTION_CONTINUE_EXECUTION; // the write happens, into the sink
 +        }
 +        // The same page again (another thread's step put the zero page back first) keeps its slot.
@@ -575,6 +584,7 @@ index 6b0956610..e4a2377fa 100644
 +        t_stepping[slot] = page;
 +        context.EFlags |= 0x100; // trap flag: EXCEPTION_SINGLE_STEP after this instruction
 +        stats.unmapped_writes.fetch_add(1, std::memory_order_relaxed);
++        EndRetries();
 +        return EXCEPTION_CONTINUE_EXECUTION;
 +    }
 +    return EXCEPTION_CONTINUE_SEARCH;
@@ -582,7 +592,7 @@ index 6b0956610..e4a2377fa 100644
  #endif
  } // namespace Detail
  
-@@ -196,12 +363,16 @@ inline void ZeroSinks() {
+@@ -196,12 +373,16 @@ inline void ZeroSinks() {
              }
          }
      }
@@ -600,7 +610,7 @@ index 6b0956610..e4a2377fa 100644
      if (!base || Detail::g_base.load()) return Detail::g_base.load() == base;
      Detail::g_is_mapped.store(is_mapped);
      Detail::g_size.store(size);
-@@ -213,10 +384,50 @@ inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped
+@@ -213,10 +394,50 @@ inline bool Install(std::uint8_t* base, std::uint64_t size, IsMappedFn is_mapped
      if (sigaction(SIGSEGV, &sa, &Detail::g_old_segv) != 0) return false;
      sa.sa_sigaction = &Detail::OnTrap;
      return sigaction(SIGTRAP, &sa, &Detail::g_old_trap) == 0;
@@ -653,7 +663,7 @@ index 6b0956610..e4a2377fa 100644
 +
  } // namespace KartRuntime::DirectMemory
 diff --git a/src/tests/common/host_memory.cpp b/src/tests/common/host_memory.cpp
-index 46cc78271..9ecda3ac8 100644
+index 46cc78271..4733dbed1 100644
 --- a/src/tests/common/host_memory.cpp
 +++ b/src/tests/common/host_memory.cpp
 @@ -9,6 +9,15 @@
@@ -672,7 +682,7 @@ index 46cc78271..9ecda3ac8 100644
  using Common::HostMemory;
  using namespace Common::Literals;
  
-@@ -227,3 +236,393 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
+@@ -227,3 +236,414 @@ TEST_CASE("HostMemory: Partial sparse middle unmap and check bindings", "[common
      REQUIRE(ptr[0x0000] == 19);
      REQUIRE(ptr[0x3fff] == 12);
  }
@@ -1064,5 +1074,26 @@ index 46cc78271..9ecda3ac8 100644
 +    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 +    REQUIRE(ReadFaultReachesCaller(dm.arena + 0x21010));
 +    REQUIRE(stats.retry_giveups.load() == 2);
++}
++
++TEST_CASE("DirectMemory: a resolved fault starts a new retry window", "[direct_memory]") {
++    DirectMemoryArena dm;
++    DM::Detail::g_retry_limit_ms = 100;
++    auto& stats = DM::GetStats();
++    const u64 giveups = stats.retry_giveups;
++    const auto retry_for = [&](std::chrono::milliseconds span) {
++        const auto start = std::chrono::steady_clock::now();
++        while (std::chrono::steady_clock::now() - start < span) {
++            REQUIRE(ForgeFault(dm.arena + 0x22008, 0) == EXCEPTION_CONTINUE_EXECUTION);
++            std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        }
++    };
++    g_dm_mapped[0x22] = true;
++    retry_for(std::chrono::milliseconds(70));
++    g_dm_mapped[0x22] = false;
++    REQUIRE(ForgeFault(dm.arena + 0x22008, 0) == EXCEPTION_CONTINUE_EXECUTION); // resolves: a zero page
++    g_dm_mapped[0x22] = true;
++    retry_for(std::chrono::milliseconds(70)); // 140 ms since the first retry, but only 70 in this window
++    REQUIRE(stats.retry_giveups.load() == giveups);
 +}
 +#endif
