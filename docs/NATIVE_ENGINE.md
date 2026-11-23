@@ -323,8 +323,15 @@ Measured on 4.0.1, Mario Circuit, 3 laps, native threads, pinned, 180 s profile;
 
 Tried and dropped: checking only the chain budget at block exits (not `halted` and `pending_svc`): the game hung at boot.
 
+Windows has direct memory too: `direct_memory.h` installs a vectored exception handler that does what the signal handler does
+on Linux. The zero, scratch and sink pages cannot be `mmap`ed over the arena as on Linux, so they are views of a 64 MiB tail of
+the backing section, placed in the arena as tracked views: the game's own `Map`/`Unmap` replace them like any other view.
+
+Measured on Windows (7800X3D pinned to one core so the game is CPU-bound, native renderer, TAS race, 4.0.1): no fast code 32.0 fps,
+fast code without direct memory 37.3, with direct memory 44.9 (time per frame -29%).
+
 Still open on this path: the per-block entry check (`c->pc` against the block's own address) and the `c->pc` store on every
-chained exit; huge pages for the arena; Windows (needs a vectored exception handler doing what `direct_memory.h` does).
+chained exit; huge pages for the arena.
 
 ## "Decrypted files" Setup mode (2026-11-13)
 
