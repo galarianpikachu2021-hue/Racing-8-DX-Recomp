@@ -15947,10 +15947,10 @@ index a7dc92a2e3..6a761feb42 100644
                      "Attempted to read input state, but applet resource is not initialized!");
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..a2d7fc727f
+index 0000000000..58f9be667b
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1452 @@
+@@ -0,0 +1,1454 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +#include "common/settings.h"
@@ -17354,16 +17354,18 @@ index 0000000000..a2d7fc727f
 +    RecompHooks::Install(address, [&handler, present, timing, replaced](HookContext& ctx) {
 +        auto& st = S();
 +        std::vector<Backend*> throttle;
-+        const auto t0 = std::chrono::steady_clock::now();
 +        {
 +            std::scoped_lock lock{st.lock};
++            // Times 1 call in 16 (scaled below): two clock reads per bind cost more than most handlers.
++            const bool sampled = (timing->second & 15) == 0;
++            const auto t0 = sampled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 +            st.system = &ctx.system;
 +            st.system_ptr.store(&ctx.system, std::memory_order_release);
 +            handler(ctx, st);
 +            if (present) {
 +                for (auto& b : st.backends) throttle.push_back(b.get());
 +            }
-+            timing->first += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
++            if (sampled) timing->first += 16 * static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
 +            ++timing->second;
 +            if (present && ++st.presents_timed % 300 == 0) {
 +                std::vector<std::pair<u64, std::string>> top;
