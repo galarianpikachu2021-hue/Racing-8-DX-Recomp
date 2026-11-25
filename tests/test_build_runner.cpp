@@ -239,12 +239,14 @@ private slots:
     }
     void directMemoryFollowsFastCodeUnlessOptedOut() {
         qunsetenv("KARTRECOMP_NO_DIRECT_MEM");
+        qputenv("KARTRECOMP_DIRECT_MEM", "1"); // whatever this PC's memory (Windows turns it off under 12 GB)
         QCOMPARE(BuildRunner::DirectMemory(), BuildRunner::FastCode());
         const bool fast = BuildRunner::FastCode();
         qputenv("KARTRECOMP_NO_DIRECT_MEM", "1");
         QVERIFY(!BuildRunner::DirectMemory());
         QCOMPARE(BuildRunner::FastCode(), fast);
         qunsetenv("KARTRECOMP_NO_DIRECT_MEM");
+        qunsetenv("KARTRECOMP_DIRECT_MEM");
     }
     void aFinishedCompileWritesTheMarkerAndAFailedOneDoesNot() {
         NEEDS_SH();

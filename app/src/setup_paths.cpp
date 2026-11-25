@@ -6,6 +6,8 @@
 #include <QDir>
 #include <QSet>
 #include <QDirIterator>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -198,10 +200,14 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& l) {
 }
 
 bool IsBuilt(const DataLayout& l, const QString& engineVersion) {
-    if (!QFileInfo::exists(l.moduleDir() + "/" + BuildRunner::ModuleFileName("image"))) return false;
+    return !engineVersion.isEmpty() && BuiltForVersion(l) == engineVersion;
+}
+
+QString BuiltForVersion(const DataLayout& l) {
+    if (!QFileInfo::exists(l.moduleDir() + "/" + BuildRunner::ModuleFileName("image"))) return {};
     QFile f(l.moduleDir() + "/module.json");
-    if (!f.open(QIODevice::ReadOnly)) return false;
-    return f.readAll().contains("\"engineVersion\": \"" + engineVersion.toUtf8() + "\"");
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("engineVersion")).toString();
 }
 
 QString DataLayout::installedKeys() const { return QFileInfo(keysFile()).isFile() ? keysFile() : QString(); }

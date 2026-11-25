@@ -781,6 +781,33 @@ The SDK then clears the request's events with **svc ClearEvent**, which was not 
 
 Test: `make-menu-tas.py --online[=N]`. Diagnostics: a system call that answers "invalid handle" is logged with its arguments.
 
+## Float bodies out of line and regions (2026-11-24)
+
+Two generator changes; the game's code does the same work with far fewer instructions fetched (hardware counters before: 44% of
+cycles stalled in the front end, 25M L1 instruction cache misses per second).
+
+**Float bodies out of line (`g_emit_fpo`, default with the exact float mode; `KARTRECOMP_NO_FPO=1` at export time = old form).**
+The exact software float routines (Arm NaN rules, rounding, flush-to-zero) were inlined at every instruction, once per lane. They
+are now one out-of-line function per operation and width (`recomp_fpe_<op><bits>` in `recomp_runtime.c`). Two- and four-lane
+single-precision operations first try one host vector instruction (`recomp_fpv_*`, AVX2/FMA) and fall back when any lane needs the
+exact path; scalar fused multiply-add uses the host's. Checked bit for bit: 500 instruction forms x 20,000 random and special
+inputs, 0 differences (`local/exp/fpotest`).
+
+**Regions (exporter `--regions <hot_blocks.txt>`, Setup passes the shipped list; `KARTRECOMP_NO_REGIONS=1` at Setup time = off).**
+The hot blocks of one game function become one C function: edges inside it are `goto`s, the budget/exit check stays on back edges
+only, and the hook check only on blocks that can be hooked (the `--roots` list and four fixed ones). Limits: 320 instructions, 64
+blocks, one source piece. Named after its lowest block.
+
+Measured on 4.0.1, Mario Kart Stadium, 12 racers, 40 s profiles, in samples:
+
+| | main game thread | workers (2) | renderer hook thread | main module |
+|---|---|---|---|---|
+| before | 17,461 | 8,151 | 9,567 | 956 MB |
+| float bodies out of line | 13,921 | 5,756 | 7,362 | 632 MB |
+| + regions | **10,341 (-41%)** | **4,257 (-48%)** | **5,858 (-39%)** | 578 MB |
+
+The computer-controlled racers run on these threads, so this is where they got cheaper. The whole game compiles in about 2 min 10 s.
+
 ## Plan status (2026-11-19)
 
 Everything in the plan above is done on Linux except removing the emulated kernel's files from the source for every platform:

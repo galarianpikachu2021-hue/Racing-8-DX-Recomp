@@ -60,3 +60,5 @@ QString InstallInputs(const SetupInputs& in, const DataLayout& layout);
 
 /// The game is built when the module folder holds the modules and a module.json stamped for this engine version.
 bool IsBuilt(const DataLayout& layout, const QString& engineVersion);
+/// The engine version a game that is there was built for ("" when there is none).
+QString BuiltForVersion(const DataLayout& layout);

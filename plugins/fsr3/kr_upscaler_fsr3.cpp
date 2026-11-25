@@ -455,7 +455,8 @@ int Configure(void* instance, uint32_t render_w, uint32_t render_h, uint32_t out
         std::fprintf(stderr, "[fsr3] cannot query the shared resources\n");
         return 1;
     }
-    const VkImageUsageFlags shared_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    const VkImageUsageFlags shared_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT; // FSR clears them with vkCmdClearColorImage
     struct { Img* img; const FfxCreateResourceDescription* d; } list[] = {{&f->dilated_depth, &shared.dilatedDepth},
                                                                       {&f->dilated_mv, &shared.dilatedMotionVectors},
                                                                       {&f->prev_nearest_depth, &shared.reconstructedPrevNearestDepth}};
@@ -633,13 +634,13 @@ void Dispatch(void* instance, const KrUpscalerFrame* fr) {
         return;
     }
 
-    // The inputs end up in a read-only layout; the host wants everything back in GENERAL.
+    // Everything is in GENERAL again (checked with the validation layer); what is needed is the memory dependency.
     std::vector<VkImageMemoryBarrier> back;
     const auto add_back = [&](VkImage image, VkImageAspectFlags aspect) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL; // the SDK puts registered resources back in their first state itself
         b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = image;
@@ -647,8 +648,8 @@ void Dispatch(void* instance, const KrUpscalerFrame* fr) {
         back.push_back(b);
     };
     add_back(f->lin_in.image, VK_IMAGE_ASPECT_COLOR_BIT);
-    add_back(f->reactive.image, VK_IMAGE_ASPECT_COLOR_BIT);
-    add_back(f->reactive_final.image, VK_IMAGE_ASPECT_COLOR_BIT);
+    // `reactive` is only written and read as a storage image here (GENERAL throughout); `reactive_final` is an FSR input when used.
+    if (have_reactive || have_mismatch) add_back(f->reactive_final.image, VK_IMAGE_ASPECT_COLOR_BIT);
     if (have_reactive) {
         add_back(fr->opaque_color, VK_IMAGE_ASPECT_COLOR_BIT);
         add_back(fr->scene_color, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -794,7 +795,8 @@ int FgConfigure(void* instance, uint32_t render_w, uint32_t render_h, uint32_t o
         std::fprintf(stderr, "[fsr3 fg] cannot query the optical-flow resources\n");
         return 1;
     }
-    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT; // FSR clears them with vkCmdClearColorImage
     struct { Img* img; const FfxCreateResourceDescription* d; } list[] = {{&g->of_vector, &sd.opticalFlowVector}, {&g->of_scd, &sd.opticalFlowSCD}};
     for (auto& item : list) {
         const VkFormat fmt = VkFormatOf(item.d->resourceDescription.format);
@@ -899,13 +901,13 @@ int FgDispatch(void* instance, const KrFrameGenFrame* fr) {
         std::fprintf(stderr, "[fsr3 fg] frame interpolation dispatch failed (%d)\n", static_cast<int>(e));
         return 1;
     }
-    // Everything back to GENERAL, the layout the host expects.
+    // Everything is in GENERAL again, the layout the host expects: a memory dependency.
     std::vector<VkImageMemoryBarrier> back;
     const auto add_back = [&](VkImage image) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL; // put back by the SDK (see Dispatch)
         b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
         b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = image;

@@ -153,6 +153,9 @@ SetupPage::SetupPage(QWidget* parent)
     dlcRow.edit->setText(dlc.join("; "));
     QString missing;
     if (!paths.complete(&missing)) message->setText(missing);
+    else if (const QString version = BuiltForVersion(layout); !version.isEmpty() && version != paths.engineVersion)
+        message->setText(tr("The game in this folder was built by another version of this program, so Play is off. Press Rebuild game, or use "
+                            "the version it was built with. (A game copied from another computer needs the same version there too.)"));
     revalidate();
     refreshButtons();
     if (QFileInfo::exists(layout.moduleDir())) emit builtChanged(IsBuilt(layout, paths.engineVersion));

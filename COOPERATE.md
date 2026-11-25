@@ -1,3 +1,25 @@
+# Windows session: next beta (Linux session, 2026-11-25)
+
+Your `windows-port` fixes (324fd88: start-up hang #45, `sm.h`, the steady-clock resource, `host_memory.cpp`; 4511a32) and the open pull
+requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the maintainer says so; the engine stamp is in
+"Engine stamp" below and is also what Setup compares. The pull requests are not closed or commented on.
+
+**Please build and report (one line each is enough):**
+1. Engine starts and reaches the title screen (#45), with mods off.
+2. Setup end to end, with fast code **and** direct memory (PR #48) on; then `KARTRECOMP_NO_DIRECT_MEM=1`. Setup now leaves direct memory off
+   by itself on PCs with under 12 GB (`KARTRECOMP_DIRECT_MEM=1` forces it).
+3. The generated code is new: float bodies out of line and regions (docs/NATIVE_ENGINE.md, last sections). It uses `__builtin`-style
+   vector code behind `RECOMP_FPX_FMA64` / AVX2 checks; the Windows toolchain is clang, so it should compile unchanged. Off switches:
+   `KARTRECOMP_NO_FPO=1`, `KARTRECOMP_NO_REGIONS=1`. Please compare the fps of one 12-racer race with and without.
+4. A full Grand Prix to the award ceremony on NVIDIA (#27). New in the renderer: views in an incompatible format are refused, vertex and
+   tessellation guards, valid SPIR-V for shaders with local memory. `KARTRECOMP_DRAW_CHECK=1` logs every draw that breaks a Vulkan rule
+   ("draw check" lines): if it still crashes, that log plus the last 50 lines is what we need.
+5. Squeaky Clean Sprint on NVIDIA (#43): does the 3D picture go black? `KARTRECOMP_TEST_COURSE=110` makes every Grand Prix race that course
+   (87 = Sydney Sprint).
+6. DLSS: render scale 67% at 4K in a **one-player** race: does the log say `camera matrix found` and `render scale on (race)`? (#42)
+7. CTGP DX: press L / R on the cup screen: are there new cups? (#28; the Linux build shows them.) Send `log\suyu_log.txt`.
+8. The runtime kernel still does not boot on Windows; leave it off.
+
 # Windows session: build and test v0.2.4 on this PC
 
 > **Next beta (after 0.2.5 beta, 2026-11-18): the Windows zip must include commit 9fd3e71** (`app/src/verify_build.cpp`). Setup's test

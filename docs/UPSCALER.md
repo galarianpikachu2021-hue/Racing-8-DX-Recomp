@@ -323,6 +323,13 @@ Now the scene's opaque draws carry exact vectors:
 - **Not covered:** instanced draws, programs with tessellation/geometry stages, transparent draws (no depth write): they keep
   the camera/matching vectors. Ideas to cut the cost: skip draws whose clip positions only move with the camera.
 
+**Only moving objects (2026-11-24).** Drawing every opaque draw again cost 2 ms of CPU and 3 ms of GPU time on heavy courses (user
+report: slowdown on Sydney Sprint). The camera vector is already exact for the still world, so a draw is now kept only when its own
+matrices changed since last frame: a vertex stage that reads uniform block 4 is skinned (the bone block is hashed), one that reads only
+block 1 is rigid (the first 48 bytes, the world matrix). Draws with the same identity are paired by nearest position. The matching
+layer no longer guesses vectors while object motion runs (it painted "didn't move" specks on the near road); it still fills the mismatch
+mask. Stadium: 88-129 draws kept, ~99% matched, 0.07 ms GPU for `mv.comp`; Sydney Sprint holds 60 with it on.
+
 **Jitter follows the upscaler (2026-11-19):** with the menu row hidden (normal), camera jitter is on exactly when a temporal
 upscaler plugin is active (FSR 3, DLSS; not Off / FSR 1 / passthrough); `KARTRECOMP_DEV_MENU=1` shows the row and lets it decide,
 `KARTRECOMP_JITTER` still forces it. And nothing is jittered after the upscale point any more: the end-of-Grand-Prix results

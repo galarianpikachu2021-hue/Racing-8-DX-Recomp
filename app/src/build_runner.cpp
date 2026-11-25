@@ -53,7 +53,19 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
 
 bool BuildRunner::FastCode() { return qEnvironmentVariable("KARTRECOMP_NO_FAST_CODE") != QLatin1String("1"); }
 
-bool BuildRunner::DirectMemory() { return FastCode() && qEnvironmentVariable("KARTRECOMP_NO_DIRECT_MEM") != QLatin1String("1"); }
+bool BuildRunner::DirectMemory() {
+    if (!FastCode() || qEnvironmentVariable("KARTRECOMP_NO_DIRECT_MEM") == QLatin1String("1")) return false;
+#ifdef Q_OS_WIN
+    // Windows keeps every touched page of the game's memory in the working set with direct memory (6.75 GB in a race against
+    // 3.7 GB without): off by default on PCs with under 12 GB. KARTRECOMP_DIRECT_MEM=1 forces it on.
+    if (qEnvironmentVariable("KARTRECOMP_DIRECT_MEM") != QLatin1String("1")) {
+        MEMORYSTATUSEX m{};
+        m.dwLength = sizeof(m);
+        if (GlobalMemoryStatusEx(&m) && m.ullTotalPhys < (11ull << 30) + (1ull << 29)) return false; // 12 GB minus what firmware reserves
+    }
+#endif
+    return true;
+}
 
 QString BuildRunner::ModuleFileName(const QString& name) {
 #ifdef Q_OS_WIN

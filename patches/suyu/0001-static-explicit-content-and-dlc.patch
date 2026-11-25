@@ -16335,10 +16335,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..d084ea1d54
+index 0000000000..8a20513955
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9032 @@
+@@ -0,0 +1,9171 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -16887,6 +16887,7 @@ index 0000000000..d084ea1d54
 +        u64 data = 0; ///< NVN shader data address
 +        std::vector<u32> spirv; ///< kept for debug dumps
 +        u64 constants = 0; ///< hardware cbuf 1: the compiler's literal constants
++        bool far_plane = false; ///< vertex stage with Position.z = Position.w (sky domes): drawn with depth range [1, 1]
 +        VkShaderModule module_xfb = VK_NULL_HANDLE; ///< kart-recomp: vertex stage with its position captured (object motion)
 +    };
 +    std::vector<Stage> stages;
@@ -17592,7 +17593,7 @@ index 0000000000..d084ea1d54
 +        bci.size = kRingSize;
 +        bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
 +                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; // (dst: frame dumps)
 +        if (vk.vkCreateBuffer(device, &bci, nullptr, &ring) != VK_SUCCESS) {
 +            return Fail("upload ring buffer");
 +        }
@@ -18267,6 +18268,23 @@ index 0000000000..d084ea1d54
 +        return nullptr;
 +    }
 +
++    /// A view may only reinterpret between formats of one compatibility class (same texel size; never across colour, depth and
++    /// block-compressed; a block-compressed image was made without mutable format). Anything else is an invalid view, and drivers
++    /// may crash on it instead of failing the call.
++    bool ViewFormatOk(const Image* img, VkFormat format, const char* what) {
++        if (format == img->info.format) return true;
++        if (!img->info.compressed && !img->info.depth && TexelClass(format) == TexelClass(img->info.format)) return true;
++        DrawCheckLog(fmt::format("{} view of an image of format {} as {} refused ({}x{})", what, static_cast<int>(img->info.format),
++                                 static_cast<int>(format), img->guest_width, img->guest_height));
++        return false;
++    }
++
++    /// One line per distinct problem (at most 200). See KARTRECOMP_DRAW_CHECK.
++    void DrawCheckLog(const std::string& what) {
++        if (draw_check_seen.size() < 200 && draw_check_seen.insert(what).second)
++            LOG_WARNING(Frontend, "draw check (frame {}): {}", frames, what);
++    }
++
 +    /// View of a color image in another same-size format (aliasing); base views
 +    /// for the creation format and for depth images.
 +    VkImageView ViewFor(Image* img, VkFormat format, u32 level = 0, u32 layer = 0) {
@@ -18276,6 +18294,7 @@ index 0000000000..d084ea1d54
 +        if (format == VK_FORMAT_UNDEFINED || img->info.depth) {
 +            format = img->info.format;
 +        }
++        if (!ViewFormatOk(img, format, "render")) format = img->info.format; // (ApplyRenderTargets already made the pipeline match)
 +        level = std::min(level, img->levels - 1);
 +        layer = std::min(layer, std::max(img->layers, img->depth >> level) - 1);
 +        if (format == img->info.format && level == 0 && layer == 0) {
@@ -18318,6 +18337,7 @@ index 0000000000..d084ea1d54
 +        if (img->info.depth || format == VK_FORMAT_UNDEFINED) {
 +            format = img->info.format;
 +        }
++        if (!ViewFormatOk(img, format, "sampled")) return VK_NULL_HANDLE; // the caller reads the game's memory instead
 +        const bool is_3d = img->depth > 1;
 +        if ((type == VK_IMAGE_VIEW_TYPE_3D) != is_3d) {
 +            return VK_NULL_HANDLE; // a 3D image is only sampled as 3D, and only it is
@@ -18372,6 +18392,9 @@ index 0000000000..d084ea1d54
 +
 +    void Barrier(VkImage image, VkImageSubresourceRange range, VkImageLayout from,
 +                 VkImageLayout to) {
++        // Never inside an open render pass (invalid; NVIDIA may lose the picture or crash): the pass is closed, and the next draw's
++        // BeginRendering opens it again with its contents loaded.
++        if (rendering) EndRendering();
 +        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 +        b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
 +        b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -18563,7 +18586,10 @@ index 0000000000..d084ea1d54
 +                }
 +            }
 +            const auto mapped = MapFormat(view_fmt ? view_fmt : t.format);
-+            st.color_formats.push_back(mapped ? mapped->format : VK_FORMAT_UNDEFINED);
++            VkFormat view_format = mapped ? mapped->format : VK_FORMAT_UNDEFINED;
++            if (st.colors.back() && (view_format == VK_FORMAT_UNDEFINED || !ViewFormatOk(st.colors.back(), view_format, "target")))
++                view_format = st.colors.back()->info.format; // the attachment's view and the pipeline must name one format
++            st.color_formats.push_back(view_format);
 +            st.color_levels.push_back(ci < c.color_levels.size() ? c.color_levels[ci] : 0);
 +            st.color_layers.push_back(ci < c.color_layers.size() ? c.color_layers[ci] : 0);
 +            if (report && !st.colors.back() && t.valid && null_formats.insert(t.format).second) {
@@ -18582,7 +18608,10 @@ index 0000000000..d084ea1d54
 +                            frames, ci, t.width, t.height, t.depth, t.format, t.target, t.pool, t.offset);
 +            }
 +        }
-+        st.depth = GetImage(c.depth, true, true);
++        // Split-screen: a view's tonemap into the output-size picture with the scene's smaller depth target still bound: without it. Bound,
++        // the shared depth image would be recreated at the other size, twice a frame. (Not on other screens: the end-of-Grand-Prix
++        // board is drawn depth-tested.)
++        st.depth = multi_view && ui_pass && std::fabs(frame_scene_scale - out_scale) > 1e-4f ? nullptr : GetImage(c.depth, true, true);
 +        st.depth_layer = c.depth_layer;
 +        if (report && c.depth.valid && KartRe::Enabled() &&
 +            rt_shapes_logged.insert(fmt::format("depth {}x{}x{} f{} t{} {:x}/{:x} layer {}", c.depth.width,
@@ -18599,6 +18628,7 @@ index 0000000000..d084ea1d54
 +
 +    /// Vertex input for a draw: the attributes the vertex shader reads, and one
 +    /// binding per vertex stream they use, in first-use order.
++    static constexpr u32 kZeroStream = 0xFF; ///< VertexLayout::streams: no game stream, a binding that reads zeros
 +    struct VertexLayout {
 +        std::vector<VkVertexInputAttributeDescription> attrs;
 +        std::vector<VkVertexInputBindingDescription> binds;
@@ -18621,6 +18651,7 @@ index 0000000000..d084ea1d54
 +        }
 +        std::array<s32, 16> stream_binding;
 +        stream_binding.fill(-1);
++        s32 zero_binding = -1;
 +        for (u32 i = 0; i < 32; ++i) {
 +            if (!vs.info.loads.Generic(i)) {
 +                continue;
@@ -18632,6 +18663,13 @@ index 0000000000..d084ea1d54
 +            // RGB10A2SN (105), which a 6-bit read turned into RGBA16F (41).
 +            const VkFormat format = MapVertexFormat((word >> 21) & 0xFF);
 +            if (format == VK_FORMAT_UNDEFINED || stream >= 16) {
++                // The shader reads an input the game binds nothing to. Vulkan wants an attribute for every input: zeros.
++                if (zero_binding < 0) {
++                    zero_binding = static_cast<s32>(out.binds.size());
++                    out.binds.push_back({static_cast<u32>(zero_binding), 0, VK_VERTEX_INPUT_RATE_VERTEX});
++                    out.streams.push_back(kZeroStream);
++                }
++                out.attrs.push_back({i, static_cast<u32>(zero_binding), VK_FORMAT_R32G32B32A32_SFLOAT, 0});
 +                continue;
 +            }
 +            if (stream_binding[stream] < 0) {
@@ -19116,6 +19154,8 @@ index 0000000000..d084ea1d54
 +                return entry;
 +            }
 +            entry.stages.push_back({t.stage, module, t.info, t.data, t.spirv, ConstantsAddress(t.data)});
++            entry.stages.back().far_plane = t.far_plane;
++            if (t.far_plane && KartRe::Enabled()) KartRe::Log("far-plane vertex shader {:x}", t.data);
 +            // KARTRECOMP_OBJMV_DUMP=1: every capture variant (and its normal shader) into log/objmv_spv/, to check with spirv-val.
 +            static const bool objmv_dump = [] { const char* v = std::getenv("KARTRECOMP_OBJMV_DUMP"); return v && *v == '1'; }();
 +            if (objmv_dump && !t.spirv_xfb.empty()) {
@@ -19124,6 +19164,11 @@ index 0000000000..d084ea1d54
 +                std::ofstream(dir / fmt::format("{:x}_xfb.spv", t.data), std::ios::binary)
 +                    .write(reinterpret_cast<const char*>(t.spirv_xfb.data()), static_cast<std::streamsize>(t.spirv_xfb.size() * 4));
 +                std::ofstream(dir / fmt::format("{:x}.spv", t.data), std::ios::binary)
++                    .write(reinterpret_cast<const char*>(t.spirv.data()), static_cast<std::streamsize>(t.spirv.size() * 4));
++            }
++            // KARTRECOMP_SPV_DUMP=<folder>: every translated stage, <program hash>_<stage>.spv (to check with spirv-val).
++            if (static const char* const spv_dir = std::getenv("KARTRECOMP_SPV_DUMP"); spv_dir && *spv_dir) {
++                std::ofstream(std::filesystem::path(spv_dir) / fmt::format("{:016x}_{}_{:x}.spv", entry.code_hash, static_cast<int>(t.stage), t.data), std::ios::binary)
 +                    .write(reinterpret_cast<const char*>(t.spirv.data()), static_cast<std::streamsize>(t.spirv.size() * 4));
 +            }
 +            if (objmv_supported && !t.spirv_xfb.empty()) {
@@ -19376,8 +19421,10 @@ index 0000000000..d084ea1d54
 +        std::array<VkRenderingAttachmentInfo, 8> color_infos{};
 +        u32 width = UINT32_MAX, height = UINT32_MAX;
 +        u32 count = 0;
++        pass_view_formats.clear();
 +        for (size_t i = 0; i < st.colors.size() && i < 8; ++i) {
 +            VkRenderingAttachmentInfo& a = color_infos[i];
++            pass_view_formats.push_back(st.colors[i] ? st.color_formats[i] : VK_FORMAT_UNDEFINED);
 +            a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 +            Image* img = st.colors[i];
 +            if (img) {
@@ -19555,6 +19602,8 @@ index 0000000000..d084ea1d54
 +        const VkFormat depth_format = motion ? VK_FORMAT_UNDEFINED : st.depth ? st.depth->info.format : VK_FORMAT_UNDEFINED;
 +        std::vector<VkPipelineShaderStageCreateInfo> stages;
 +        for (const auto& s : prog.stages) {
++            // No tessellation state is set up (and no patch topology is mapped): such a pipeline would be invalid.
++            if (s.stage == Shader::Stage::TessellationControl || s.stage == Shader::Stage::TessellationEval || !s.module) return VK_NULL_HANDLE;
 +            VkPipelineShaderStageCreateInfo ssci{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
 +            ssci.stage = VkStage(s.stage);
 +            ssci.module = s.module;
@@ -19677,6 +19726,43 @@ index 0000000000..d084ea1d54
 +            pipeline = VK_NULL_HANDLE;
 +        }
 +        return pipeline;
++    }
++
++    /// KARTRECOMP_DRAW_CHECK=1: checks every draw against the Vulkan rules the renderer depends on.
++    void CheckDraw(const DrawState& st, const ProgramEntry& prog, const VertexLayout& layout, const std::vector<VkWriteDescriptorSet>& writes,
++                   const VkViewport& vp, const VkRect2D& sc, u32 vb_count) {
++        const auto id = [&] { return fmt::format("program {:x}/{:x}", prog.stages.front().data, prog.stages.back().data); };
++        for (const auto& s : prog.stages) {
++            if (!s.module) DrawCheckLog("null shader module, " + id());
++            if (s.stage == Shader::Stage::TessellationControl || s.stage == Shader::Stage::TessellationEval) DrawCheckLog("tessellation stage, " + id());
++        }
++        for (u32 i = 0; i < 32; ++i) {
++            if (!prog.stages.front().info.loads.Generic(i)) continue;
++            const auto it = std::find_if(layout.attrs.begin(), layout.attrs.end(), [i](const auto& a) { return a.location == i; });
++            if (it == layout.attrs.end()) DrawCheckLog(fmt::format("vertex input {} has no attribute, {}", i, id()));
++            else if (it->offset > 2047) DrawCheckLog(fmt::format("vertex attribute {} offset {}, {}", i, it->offset, id()));
++        }
++        for (const auto& b : layout.binds)
++            if (b.stride > 2048) DrawCheckLog(fmt::format("vertex binding stride {}, {}", b.stride, id()));
++        if (vb_count != layout.binds.size()) DrawCheckLog("vertex buffer count differs from the pipeline's, " + id());
++        for (const auto& w : writes) {
++            for (u32 k = 0; k < w.descriptorCount; ++k) {
++                if (w.pImageInfo && (!w.pImageInfo[k].imageView || !w.pImageInfo[k].sampler))
++                    DrawCheckLog(fmt::format("null {} at binding {}, {}", w.pImageInfo[k].imageView ? "sampler" : "image view", w.dstBinding, id()));
++                if (w.pBufferInfo && (w.pBufferInfo[k].range == 0 || w.pBufferInfo[k].offset + w.pBufferInfo[k].range > kRingSize))
++                    DrawCheckLog(fmt::format("buffer range at binding {}, {}", w.dstBinding, id()));
++            }
++        }
++        if (!(vp.width > 0.0f) || vp.width > 16384.0f || !std::isfinite(vp.height) || std::fabs(vp.height) > 16384.0f)
++            DrawCheckLog(fmt::format("viewport {}x{}, {}", vp.width, vp.height, id()));
++        if (sc.offset.x < 0 || sc.offset.y < 0 || sc.extent.width > 1u << 20 || sc.extent.height > 1u << 20)
++            DrawCheckLog(fmt::format("scissor {}x{}, {}", sc.extent.width, sc.extent.height, id()));
++        for (size_t i = 0; i < st.colors.size() && i < 8; ++i) {
++            const VkFormat want = st.colors[i] ? st.color_formats[i] : VK_FORMAT_UNDEFINED;
++            const VkFormat have = i < pass_view_formats.size() ? pass_view_formats[i] : VK_FORMAT_UNDEFINED;
++            if (want != have) DrawCheckLog(fmt::format("colour target {}: pipeline format {}, view format {}, {}", i, static_cast<int>(want), static_cast<int>(have), id()));
++        }
++        if (st.depth != pass_depth) DrawCheckLog("depth target differs from the pass's, " + id());
 +    }
 +
 +    /// Executes one NVN draw natively. Returns false when it had to be skipped.
@@ -19850,6 +19936,14 @@ index 0000000000..d084ea1d54
 +        vb_buffers.clear();
 +        vb_offsets.clear();
 +        for (const u32 stream : layout.streams) {
++            if (stream == kZeroStream) {
++                const auto zeros = Allocate(64, 16);
++                if (!zeros) return false;
++                std::memset(ring_ptr + *zeros, 0, 64);
++                vb_buffers.push_back(ring);
++                vb_offsets.push_back(*zeros);
++                continue;
++            }
 +            const u32 stride = stream * 2 < st.streams.size() ? st.streams[stream * 2] : 0;
 +            const u32 divisor = stream * 2 + 1 < st.streams.size() ? st.streams[stream * 2 + 1] : 0;
 +            const auto& vb = st.vertex_buffers[stream];
@@ -20069,7 +20163,7 @@ index 0000000000..d084ea1d54
 +                if (snapshot && current_frame && snapshot - 1 + size <= current_frame->snapshot.size()) {
 +                    off = Allocate(bytes, ssbo_align);
 +                    if (off) {
-+                        std::memcpy(ring_ptr + *off, current_frame->snapshot.data() + (snapshot - 1), size);
++                        std::memcpy(ring_ptr + *off, current_frame->snapshot.data() + (snapshot - 1), std::min<u64>(size, bytes));
 +                        if (bytes > size) std::memset(ring_ptr + *off + size, 0, bytes - size);
 +                    }
 +                } else {
@@ -20156,8 +20250,9 @@ index 0000000000..d084ea1d54
 +
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 +        if (prog->push) {
-+            vk.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, static_cast<u32>(writes.size()),
-+                                         writes.data());
++            if (!writes.empty()) // a program without resources: a count of 0 is invalid
++                vk.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, static_cast<u32>(writes.size()),
++                                             writes.data());
 +        } else {
 +            vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prog->layout, 0, 1, &set, 0,
 +                                       nullptr);
@@ -20198,6 +20293,11 @@ index 0000000000..d084ea1d54
 +        // passes (a color target plus a depth target, no shadow maps) get their viewport shifted by
 +        // a fraction of a pixel, which moves everything drawn like a jittered projection would.
 +        // HUD, post-processing and menus have no depth target and stay put.
++        // A sky dome drawn at z = w (exactly the far plane) is drawn in the depth pre-pass and again with an EQUAL test, and two layers
++        // of it overlap at the same depth: they match only when every pixel's depth is exactly 1.0. NVIDIA's interpolation gives that,
++        // AMD's ends up a hair off (Sky-High Sundae: coral slabs and hairlines where the blue dome failed the test). A depth range of
++        // [1, 1] makes it exact on every GPU.
++        if (prog->stages.size() == 2 && prog->stages.front().far_plane && vp.maxDepth == 1.0f) vp.minDepth = 1.0f;
 +        const VkViewport vp_plain = vp; // before the jitter shift (object motion maps last frame's positions with it)
 +        // Never after the upscale point: nothing smooths it out there (the results board is drawn with a depth target bound).
 +        // Not into a screen-size tonemap-format image either: those passes are tonemap / post-processing of the finished scene
@@ -20243,6 +20343,8 @@ index 0000000000..d084ea1d54
 +            vk.vkCmdSetDepthBias(cmd, draw_bias[0], draw_bias[1], draw_bias[2]);
 +        }
 +        vk.vkCmdSetBlendConstants(cmd, st.blend_color);
++        static const bool draw_check = std::getenv("KARTRECOMP_DRAW_CHECK") != nullptr;
++        if (draw_check) CheckDraw(st, *prog, layout, writes, vp, sc, static_cast<u32>(vb_buffers.size()));
 +        if (KartRe::Enabled() && !st.colors.empty() && st.colors[0] && chain_logs < 60) {
 +            const u32 lw = std::max(1u, st.colors[0]->guest_width >> (st.color_levels.empty() ? 0 : st.color_levels[0]));
 +            const u32 lh = std::max(1u, st.colors[0]->guest_height >> (st.color_levels.empty() ? 0 : st.color_levels[0]));
@@ -21267,6 +21369,7 @@ index 0000000000..d084ea1d54
 +
 +    /// Sets the speed limit for this run only (percent 0 = unlimited), remembering the configured one.
 +    static void ApplySpeedLimit(int percent) {
++        KartOverlay::SpeedPercent().store(percent, std::memory_order_relaxed);
 +        auto& original = KartOverlay::SpeedOriginalValue();
 +        if (!original.saved) {
 +            original = {true, Settings::values.use_speed_limit.GetValue(), Settings::values.speed_limit.GetValue()};
@@ -21706,8 +21809,12 @@ index 0000000000..d084ea1d54
 +                if (view_frames % 600 == 0) view_counts.fill(0);
 +                if (!multi_view_logged) {
 +                    multi_view_logged = true;
-+                    LOG_INFO(Frontend, "split-screen ({} views): render scale and upscaler off for these frames", cycles);
++                    LOG_INFO(Frontend, "split-screen ({} views): no temporal upscaler or frame generation for these frames (render scale applies)", cycles);
 +                }
++                // Render scale (below 100%) still applies: each view's 3D at the scene scale, and its tonemap into the shared picture at
++                // the output size scales it up (bilinear; no temporal upscaler, which would need a history per view).
++                multi_view = true;
++                if (view_target) ui_key = *view_target;
 +                frame_has_scene = false;
 +                return;
 +            }
@@ -21837,6 +21944,8 @@ index 0000000000..d084ea1d54
 +        tm_cmd = nullptr;
 +        tm_desc = {};
 +        ui_key.reset();
++        ui_pass = false;
++        multi_view = false;
 +        ss_cmd = nullptr;
 +        ss_alias = nullptr;
 +        frame_has_scene = false;
@@ -21863,6 +21972,7 @@ index 0000000000..d084ea1d54
 +            }
 +        }
 +        frame_scene_scale = !split_mode ? out_scale : ((hud_cmd || frame_has_scene) && race_frame) ? scene_scale : out_scale;
++        if (multi_view && ui_key) frame_scene_scale = std::min(scene_scale, out_scale);
 +        if (split_mode && (hud_cmd || frame_has_scene) && race_frame != race_logged && race_log_count < 40) {
 +            ++race_log_count;
 +            LOG_INFO(Frontend, "render scale {} from frame {} (scene {:.2f}x of the output)", race_frame ? "on (race)" : "off (menu)",
@@ -21961,14 +22071,14 @@ index 0000000000..d084ea1d54
 +    /// Does the upscale point need its own output image? Not when nothing upscales and the sizes already match.
 +    /// Before the upscale point: passes into the UI image (ui_key) are drawn at the output size, the rest at the scene scale.
 +    void ApplyUiScale(const Command& c) {
-+        if (post_phase || !ui_key) return;
-+        bool ui = false;
++        ui_pass = false;
++        if (!ui_key) return;
 +        if (!c.colors.empty() && c.colors[0].valid && c.colors[0].width) {
 +            if (const auto info = MapFormat(c.colors[0].format)) {
-+                ui = ImageKey{c.colors[0].pool, c.colors[0].offset, TexelClass(info->format), c.colors[0].width, c.colors[0].height} == *ui_key;
++                ui_pass = ImageKey{c.colors[0].pool, c.colors[0].offset, TexelClass(info->format), c.colors[0].width, c.colors[0].height} == *ui_key;
 +            }
 +        }
-+        cur_scale = ui ? out_scale : frame_scene_scale;
++        if (!post_phase) cur_scale = ui_pass ? out_scale : frame_scene_scale;
 +    }
 +
 +    bool UpscalePointNeedsImage(const Image* low) const {
@@ -22302,7 +22412,7 @@ index 0000000000..d084ea1d54
 +        mix(first);
 +        mix(static_cast<u64>(static_cast<s64>(base_vertex)));
 +        mix(static_cast<u64>(topology));
-+        for (const u32 stream : layout.streams) mix(st.vertex_buffers[stream].address ^ (u64{stream} << 56));
++        for (const u32 stream : layout.streams) if (stream < 16) mix(st.vertex_buffers[stream].address ^ (u64{stream} << 56));
 +        auto& seen = objmv_worlds[frames & 1][key];
 +        if (seen.frame != frames) {
 +            seen.frame = frames;
@@ -23578,7 +23688,7 @@ index 0000000000..d084ea1d54
 +        auto& x = fgx[static_cast<size_t>(k - 2)];
 +        vk.vkWaitForFences(device, 1, &x.fence, VK_TRUE, UINT64_MAX);
 +        u32 idx = 0;
-+        const VkResult acq = vk.vkAcquireNextImageKHR(device, swapchain, 100'000'000, x.acquired, VK_NULL_HANDLE, &idx);
++        const VkResult acq = AcquireNext(x.acquired, &idx);
 +        if (SwapchainStale(acq)) resize_pending = true;
 +        if (acq != VK_SUCCESS) return;
 +        vk.vkResetFences(device, 1, &x.fence);
@@ -23633,7 +23743,7 @@ index 0000000000..d084ea1d54
 +        FgWaitReal(); // the previous real frame has gone out (and its semaphore is free again)
 +        vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
 +        u32 index2 = 0;
-+        const VkResult acq = vk.vkAcquireNextImageKHR(device, swapchain, 100'000'000, acquired2, VK_NULL_HANDLE, &index2);
++        const VkResult acq = AcquireNext(acquired2, &index2);
 +        if (SwapchainStale(acq)) resize_pending = true;
 +        if (acq != VK_SUCCESS) return;
 +        vk.vkResetFences(device, 1, &fence2);
@@ -23672,6 +23782,24 @@ index 0000000000..d084ea1d54
 +                     index2, rendered2_sems[index2], true);
 +    }
 +
++    /// vkAcquireNextImageKHR (100 ms at most). The swapchain may be used by one thread at a time, and with frame generation the
++    /// presenter thread presents meanwhile: then short polls under the swapchain lock, so neither waits inside it.
++    VkResult AcquireNext(VkSemaphore semaphore, u32* out_index) {
++        constexpr u64 kTimeout = 100'000'000;
++        if (!fg_thread.joinable()) return vk.vkAcquireNextImageKHR(device, swapchain, kTimeout, semaphore, VK_NULL_HANDLE, out_index);
++        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds{kTimeout};
++        while (true) {
++            VkResult r;
++            {
++                std::scoped_lock lock{swap_mutex};
++                r = vk.vkAcquireNextImageKHR(device, swapchain, 0, semaphore, VK_NULL_HANDLE, out_index);
++            }
++            if (r != VK_NOT_READY && r != VK_TIMEOUT) return r;
++            if (std::chrono::steady_clock::now() >= until) return VK_TIMEOUT;
++            std::this_thread::sleep_for(std::chrono::microseconds{150});
++        }
++    }
++
 +    void FgPresentThread() {
 +        KrPlatform::SetCurrentThreadName("FrameGenPresent");
 +        KrPlatform::CurrentThreadRenderPriority(); // wakes on time to present the generated frame
@@ -23694,7 +23822,9 @@ index 0000000000..d084ea1d54
 +                pi.swapchainCount = 1;
 +                pi.pSwapchains = &swapchain;
 +                pi.pImageIndices = &next.index;
++                std::unique_lock slock{swap_mutex};
 +                const VkResult r = vk.vkQueuePresentKHR(queue_handle, &pi);
++                slock.unlock();
 +                if (SwapchainStale(r)) resize_pending = true;
 +                present_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - locked).count();
 +            }
@@ -23884,14 +24014,18 @@ index 0000000000..d084ea1d54
 +            TextureCopyRetire(opaque_img);
 +            opaque_img = {};
 +        }
-+        if (!opaque_img.image && !CreateAuxImage(opaque_img, VK_FORMAT_B10G11R11_UFLOAT_PACK32, src->width, src->height, false)) {
-+            return;
-+        }
-+        opaque_captured = true;
 +        const u32 saved_draws = pass_draws;
++        // The pass is closed first: creating the image changes its layout, which is not allowed inside one.
 +        vk.vkCmdEndRendering(cmd);
 +        rendering = false;
 +        MemoryBarrier();
++        if (!opaque_img.image && !CreateAuxImage(opaque_img, VK_FORMAT_B10G11R11_UFLOAT_PACK32, src->width, src->height, false)) {
++            DrawState reopen = st;
++            BeginRendering(reopen);
++            pass_draws = saved_draws;
++            return;
++        }
++        opaque_captured = true;
 +        VkImageCopy copy{};
 +        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 +        copy.extent = {src->width, src->height, 1};
@@ -24053,7 +24187,7 @@ index 0000000000..d084ea1d54
 +            Profile::Scope ps{prof, Profile::Wait};
 +            vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
 +            vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
-+            acq = vk.vkAcquireNextImageKHR(device, swapchain, 100'000'000, acquired, VK_NULL_HANDLE, &index);
++            acq = AcquireNext(acquired, &index);
 +        }
 +        const auto record_start = std::chrono::steady_clock::now();
 +        const size_t programs_at_start = programs.size(), pipelines_at_start = pipelines.size();
@@ -25070,6 +25204,10 @@ index 0000000000..d084ea1d54
 +    bool frame_upscaled = false;
 +    bool frame_has_scene = false;
 +    const Command* hud_cmd = nullptr; ///< the first pass of the HUD (the upscale point), or none
++    std::unordered_set<std::string> draw_check_seen;
++    std::vector<VkFormat> pass_view_formats; ///< of the colour attachments of the render pass that is open
++    bool ui_pass = false; ///< the pass being applied draws into ui_key
++    bool multi_view = false; ///< split-screen: every view is its own scene, tonemapped into ui_key
 +    std::optional<ImageKey> ui_key; ///< the final image when UI is composited into it before the 3D: drawn at the output size
 +    TextureDesc tm_desc{};          ///< the image upscaled at the upscale point (the tonemap pass's target)
 +    bool multi_tonemap_frame = false; ///< this frame tonemaps into two different images (KARTRECOMP_DUMP_MULTI_TONEMAP)
@@ -25139,6 +25277,7 @@ index 0000000000..d084ea1d54
 +    std::chrono::steady_clock::time_point fg_last_present{};
 +    double fg_period_ms = 16.7;
 +    u64 fg_count = 0;
++    std::mutex swap_mutex; ///< the swapchain: acquire (renderer) against present (frame-generation presenter)
 +    std::mutex queue_mutex;                        ///< the queue is used by the renderer and the frame-generation presenter
 +    std::thread fg_thread;
 +    std::mutex fg_mx;
