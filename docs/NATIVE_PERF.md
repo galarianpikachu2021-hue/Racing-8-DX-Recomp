@@ -171,3 +171,8 @@ on, average over frames 3000-9000; same shape as the Deck, 2.9x faster). `local/
 `program_lock` is taken after `State::lock`, never before: the first d1 held it across `Append` and deadlocked within a minute.
 `KARTRECOMP_HUGE_CODE=1/2/3` (2 MiB pages for the game's code / + its tables / + all modules, about 0.5 GB more memory): no clear gain on a Ryzen 9700X;
 off by default, to be tried on the Deck (Zen 2, small TLBs).
+
+Deck, second log (beta5c engine, same 1080p + FSR 3 settings, a 3840x2160 window): game-thread hook time 4.8 -> 0.5 ms a frame; fps at matching
+draw counts 400-600: 53.2 -> 54.6, 600-800: 49.5 -> 53.3, 800-900: 45.5 -> 52.5, 1000-1200: 40.9 -> 45.4 (5-second samples, 3-9 each). Fit:
+12.5 ms + 11.1 us/draw -> 14.5 ms + 6.7 us/draw (the fixed part rests on 25 samples). The profile in that upload was the first session's (same
+mapping addresses and AppImage mount name): `KARTRECOMP_PROFILE=180,40` writes nothing when the game closes before 220 s, and the old file stays.
