@@ -12,6 +12,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 
+#include "storage.h"
 #include "zip_archive.h"
 
 DataLayout DataLayout::FromRoots(const QString& data, const QString& cache) { return {data, cache}; }
@@ -28,7 +29,9 @@ QString DataLayout::ConfigRoot() {
 #endif
 }
 
-DataLayout DataLayout::Default() {
+DataLayout DataLayout::Default() { return Storage::LayoutFor(Storage::Chosen()); }
+
+DataLayout DataLayout::Standard() {
 #ifdef Q_OS_WIN
     // Windows is portable: everything the launcher and the game write (the built game, saves, mods, logs) sits in a "userdata" folder
     // next to kartrecomp.exe, so the folder can be moved, copied or zipped as it is. XDG_* variables still override (tests).

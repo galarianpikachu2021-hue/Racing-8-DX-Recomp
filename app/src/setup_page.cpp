@@ -308,6 +308,7 @@ void SetupPage::build() {
     }
     saveInputs();
     building = true;
+    emit buildingChanged(true);
     cancelFlag = false;
     refreshButtons();
     const SetupInputs in = inputs();
@@ -325,6 +326,7 @@ void SetupPage::build() {
 
 void SetupPage::finishBuild(bool ok, const QString& text) {
     building = false;
+    emit buildingChanged(false);
     adoptInstalled();
     saveInputs();
     if (ok) {

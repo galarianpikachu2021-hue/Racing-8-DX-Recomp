@@ -9,6 +9,7 @@
 
 #include "ctgp_convert.h"
 #include "setup_page.h"
+#include "storage_page.h"
 #include "updater.h"
 
 #include <QThread>
@@ -130,6 +131,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs->addTab(scrolled(buildDlcTab()), tr("DLC"));
     tabs->addTab(scrolled(buildModsTab()), tr("Mods"));
     tabs->addTab(scrolled(multiplayer_page = new MultiplayerPage), tr("Online play"));
+    tabs->insertTab(2, scrolled(storage_page = new StoragePage), tr("Storage")); // beside Setup and Play: a full device needs it first
+    connect(setup_page, &SetupPage::buildingChanged, storage_page, [this](bool building) { storage_page->setLocked(building || game.state() != QProcess::NotRunning); });
+    storage_page->setBusyCheck([this] { return importing || setup_page->isBuilding() || game.state() != QProcess::NotRunning; });
+    connect(storage_page, &StoragePage::movingChanged, this, [this](bool moving) { // every other page reads or writes the files that move
+        for (int i = 0; i < tabs->count(); ++i)
+            if (tabs->widget(i) != tabs->currentWidget()) tabs->setTabEnabled(i, !moving);
+    });
     setCentralWidget(tabs);
 
     QSettings prefs;
@@ -190,6 +198,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         enhancements_page->setEnabled(!running);
         mii_editor->setLocked(running);
         controller_mapper->setLocked(running);
+        storage_page->setLocked(running || setup_page->isBuilding());
         refreshMods();
         if (!running) {
             refreshControllers();
@@ -223,6 +232,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             return;
         }
         setup_page->stopAndWait();
+    }
+    if (storage_page->isMoving()) {
+        QMessageBox::information(this, tr("Storage"), tr("The game is being moved. Wait until it is done, or cancel it on the Storage tab."));
+        event->ignore();
+        return;
     }
     QMainWindow::closeEvent(event);
 }

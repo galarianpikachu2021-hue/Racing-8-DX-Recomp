@@ -1,7 +1,7 @@
 # Windows session: next beta (Linux session, 2026-11-25)
 
 Your `windows-port` fixes (324fd88: start-up hang #45, `sm.h`, the steady-clock resource, `host_memory.cpp`; 4511a32) and the open pull
-requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the maintainer says so; **engine stamp 8e297414a5-abi6** (`-DKARTRECOMP_ENGINE_VERSION`, also what Setup compares). The pull requests are not closed or commented on.
+requests #40, #46, #47, #48 and #50 are merged locally. Nothing is pushed until the maintainer says so; **engine stamp 8e297414a5-abi6** (`-DKARTRECOMP_ENGINE_VERSION`, also what Setup compares). The pull requests are not closed or commented on.
 
 **Please build and report (one line each is enough):**
 1. Engine starts and reaches the title screen (#45), with mods off.
@@ -10,7 +10,7 @@ requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the m
 3. The generated code is new: float bodies out of line and regions (docs/NATIVE_ENGINE.md, last sections). It uses `__builtin`-style
    vector code behind `RECOMP_FPX_FMA64` / AVX2 checks; the Windows toolchain is clang, so it should compile unchanged. Off switches:
    `KARTRECOMP_NO_FPO=1`, `KARTRECOMP_NO_REGIONS=1`. Please compare the fps of one 12-racer race with and without.
-4. A full Grand Prix to the award ceremony on NVIDIA (#27). New in the renderer: views in an incompatible format are refused, vertex and
+4. A full Grand Prix to the award ceremony on NVIDIA (#27; PR #50 is in and should fix it). New in the renderer: views in an incompatible format are refused, vertex and
    tessellation guards, valid SPIR-V for shaders with local memory. `KARTRECOMP_DRAW_CHECK=1` logs every draw that breaks a Vulkan rule
    ("draw check" lines): if it still crashes, that log plus the last 50 lines is what we need.
 5. Squeaky Clean Sprint on NVIDIA (#43): does the 3D picture go black? `KARTRECOMP_TEST_COURSE=110` makes every Grand Prix race that course
@@ -21,7 +21,10 @@ requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the m
    try `KARTRECOMP_FRAMES_IN_FLIGHT=1` and `KARTRECOMP_FRAME_PARTS=1` and say which one helps. Please also run it under the Vulkan
    validation layer once on NVIDIA; on AMD/Linux a whole Grand Prix with the credits movie is clean except two known harmless kinds.
 9. `plugins/fsr3` changed (image usage, layouts): rebuild it.
-10. The runtime kernel still does not boot on Windows; leave it off.
+10. New launcher parts, all untested on Windows: the **Storage tab** (`app/src/storage*.cpp`; drives from `QStorageInfo`, a move with
+   `std::filesystem`, the choice in `userdata\config\kartrecomp\storage.txt`; `tests/test_storage`, set `KARTRECOMP_TEST_OTHER_DRIVE` to a
+   folder on a second drive) and the **controller shortcuts** (`src/common/kart_shortcuts.h`, `shortcuts.ini`; Controllers tab and in-game Controls).
+11. The runtime kernel still does not boot on Windows; leave it off.
 
 # Windows session: build and test v0.2.4 on this PC
 

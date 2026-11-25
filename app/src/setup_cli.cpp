@@ -10,6 +10,7 @@
 #include "ctgp_convert.h"
 #include "menu_merge.h"
 #include "setup_pipeline.h"
+#include "storage.h"
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
@@ -55,6 +56,10 @@ int main(int argc, char** argv) {
     if (!nsp && !decrypted) {
         std::fprintf(stderr, "or (decrypted files, no keys or firmware): kartrecomp-setup --exefs <code folder> --romfs <data folder or romfs.bin>\n");
         std::fprintf(stderr, "usage: kartrecomp-setup --base <base.nsp> --update <update.nsp> --keys <prod.keys> --firmware <dir|zip> [--dlc <x.nsp>]... [--patch split60]\n");
+        return 1;
+    }
+    if (Storage::Missing()) {
+        std::fprintf(stderr, "The game is kept in %s (the launcher's Storage tab), which is not there.\n", qPrintable(Storage::Chosen()));
         return 1;
     }
     const auto result = RunSetupPipeline(in, DataLayout::Default(), BuilderPaths::Detect(), [](int permille, const QString& text) {

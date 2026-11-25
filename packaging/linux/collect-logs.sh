@@ -8,6 +8,9 @@ name=kartrecomp
 data="${XDG_DATA_HOME:-$HOME/.local/share}/$name"
 conf="${XDG_CONFIG_HOME:-$HOME/.config}/$name"
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/$name"
+# A folder chosen on the launcher's Storage tab (an SD card).
+store="$(head -n1 "$conf/storage.txt" 2>/dev/null)"
+[ -n "$store" ] && [ -d "$store" ] && { data="$store/data/$name"; cache="$store/cache/$name"; }
 out="$(realpath -m "${1:-$HOME/kartrecomp-logs.tar.gz}")"
 [ -d "$data" ] || [ -d "$conf" ] || { echo "No $data or $conf yet: run the game first." >&2; exit 1; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT

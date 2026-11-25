@@ -18,6 +18,7 @@ kart_test(mii_db)
 kart_test(menu_merge)
 kart_test(mod_addon)
 kart_test(ctgp_tables)
+kart_test(storage)
 # The launcher's Online play tab (a widget: built from its source with Qt Widgets).
 add_executable(test_multiplayer_page test_multiplayer_page.cpp ../app/src/multiplayer_page.cpp ../app/src/multiplayer_page.h)
 target_include_directories(test_multiplayer_page PRIVATE ../app/src)

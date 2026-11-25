@@ -32,6 +32,7 @@ public:
 
 signals:
     void builtChanged(bool built);
+    void buildingChanged(bool building);
     void playRequested();
 
 private:

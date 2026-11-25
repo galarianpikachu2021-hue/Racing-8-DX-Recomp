@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QShowEvent>
@@ -18,6 +19,8 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 #include "ini_file.h"
 
@@ -230,6 +233,32 @@ ControllerMapper::ControllerMapper(QWidget* parent) : QWidget(parent) {
         }
     }
     outer->addWidget(grid_host);
+
+    auto* shortcuts = new QGroupBox(tr("Shortcuts (every controller)"));
+    auto* sgrid = new QGridLayout(shortcuts);
+    const QString does[2] = {tr("→ Open the in-game menu (mods and settings)"), tr("→ Close the game")};
+    for (int i = 0; i < 2; ++i) {
+        shortcut_bound[i] = new QLabel;
+        shortcut_bound[i]->setFont(bold);
+        shortcut_bound[i]->setMinimumWidth(180);
+        auto* change = new QPushButton(tr("Change"));
+        auto* clear = new QPushButton(tr("Clear"));
+        auto* normal = new QPushButton(tr("Default"));
+        sgrid->addWidget(shortcut_bound[i], i, 0);
+        sgrid->addWidget(new QLabel(does[i]), i, 1);
+        sgrid->addWidget(change, i, 2);
+        sgrid->addWidget(clear, i, 3);
+        sgrid->addWidget(normal, i, 4);
+        for (auto* b : {change, clear, normal}) shortcut_buttons.push_back(b);
+        connect(change, &QPushButton::clicked, this, [this, i] { captureShortcut(i); });
+        connect(clear, &QPushButton::clicked, this, [this, i] { setShortcut(i, {}, {}); });
+        connect(normal, &QPushButton::clicked, this, [this, i] { setShortcut(i, Shortcuts{}.buttons[i], Shortcuts{}.names[i]); });
+    }
+    auto* snote = new QLabel(tr("One button, or several held together. F10 on the keyboard always opens the menu."));
+    snote->setWordWrap(true);
+    sgrid->addWidget(snote, 2, 0, 1, 5);
+    sgrid->setColumnStretch(5, 1);
+    outer->addWidget(shortcuts);
 
     auto* bottom = new QHBoxLayout;
     status = new QLabel;
@@ -453,6 +482,8 @@ void ControllerMapper::showPlayer() {
     }
     const bool usable = !locked && !busy && !dev.isEmpty();
     for (auto* button : row_buttons) button->setEnabled(usable);
+    for (auto* button : shortcut_buttons) button->setEnabled(!locked && !busy);
+    showShortcuts();
     standard->setEnabled(usable);
     swap->setEnabled(usable && Engine(dev) != QLatin1String("keyboard"));
     // The names of this controller's inputs ("LB", "Cross") and its standard layout, once per session.
@@ -596,6 +627,7 @@ void ControllerMapper::setBusy(bool b, const QString& text) {
         showPlayer();
     } else {
         for (auto* button : row_buttons) button->setEnabled(false);
+        for (auto* button : shortcut_buttons) button->setEnabled(false);
         standard->setEnabled(false);
         swap->setEnabled(false);
     }
@@ -773,6 +805,91 @@ void ControllerMapper::capture(const QString& setting) {
         rememberProfile(p);
         status->setText(tr("%1 now does in-game %2.").arg(tab > 0 ? answer.mid(tab + 1).trimmed() : binding, label));
     }
+}
+
+QString ControllerMapper::shortcutsPath() const {
+    return QFileInfo(config_path).dir().filePath(QStringLiteral("shortcuts.ini"));
+}
+
+ControllerMapper::Shortcuts ControllerMapper::LoadShortcuts(const QString& path) {
+    Shortcuts s;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return s;
+    for (const QString& line : QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'))) {
+        const QString t = line.trimmed();
+        const int eq = t.indexOf(QLatin1Char('='));
+        const QString key = t.left(eq), value = t.mid(eq + 1);
+        if (eq < 0) continue;
+        if (key == QLatin1String("menu")) s.buttons[0] = value;
+        else if (key == QLatin1String("menu_name")) s.names[0] = value;
+        else if (key == QLatin1String("quit")) s.buttons[1] = value;
+        else if (key == QLatin1String("quit_name")) s.names[1] = value;
+    }
+    return s;
+}
+
+bool ControllerMapper::SaveShortcuts(const QString& path, const Shortcuts& s) {
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+    f.write(QStringLiteral("menu=%1\nmenu_name=%2\nquit=%3\nquit_name=%4\n").arg(s.buttons[0], s.names[0], s.buttons[1], s.names[1]).toUtf8());
+    return f.commit();
+}
+
+bool ControllerMapper::ShortcutsClash(const QString& a, const QString& b) {
+    const auto la = a.split(QLatin1Char('+'), Qt::SkipEmptyParts), lb = b.split(QLatin1Char('+'), Qt::SkipEmptyParts);
+    if (la.isEmpty() || lb.isEmpty()) return false;
+    const auto in = [](const QStringList& x, const QStringList& y) {
+        return std::all_of(x.begin(), x.end(), [&](const QString& e) { return y.contains(e); });
+    };
+    return in(la, lb) || in(lb, la);
+}
+
+void ControllerMapper::showShortcuts() {
+    const Shortcuts s = LoadShortcuts(shortcutsPath());
+    for (int i = 0; i < 2; ++i) shortcut_bound[i]->setText(s.buttons[i].isEmpty() ? tr("(nothing)") : s.names[i].isEmpty() ? s.buttons[i] : s.names[i]);
+}
+
+void ControllerMapper::setShortcut(int which, const QString& buttons, const QString& names) {
+    if (locked) return;
+    Shortcuts s = LoadShortcuts(shortcutsPath());
+    if (ShortcutsClash(buttons, s.buttons[1 - which])) {
+        status->setText(tr("That overlaps the other shortcut: nothing changed."));
+        return;
+    }
+    s.buttons[which] = buttons;
+    s.names[which] = names;
+    QDir().mkpath(QFileInfo(shortcutsPath()).absolutePath());
+    if (!SaveShortcuts(shortcutsPath(), s)) {
+        status->setText(tr("Could not write %1").arg(QDir::toNativeSeparators(shortcutsPath())));
+        return;
+    }
+    showShortcuts();
+    if (buttons.isEmpty()) status->setText(which == 0 ? tr("No controller button opens the in-game menu now (F10 still does).") : tr("No controller button closes the game now."));
+    else status->setText(which == 0 ? tr("%1 now opens the in-game menu.").arg(names) : tr("%1 now closes the game.").arg(names));
+}
+
+void ControllerMapper::captureShortcut(int which) {
+    if (locked || busy) return;
+    PressDialog dialog(this, which == 0 ? tr("Press a controller button for the in-game menu, or hold several,\nthen let go")
+                                        : tr("Press a controller button for closing the game, or hold several,\nthen let go"), false);
+    QString answer;
+    bool answered = false;
+    ask({QStringLiteral("shortcut"), QStringLiteral("3600")}, 3600 * 1000, [&](const QString& out) {
+        answer = out;
+        answered = true;
+        dialog.accept();
+    });
+    if (!question) return; // the helper could not start (status says why)
+    if (dialog.exec() != QDialog::Accepted || !answered) {
+        cancelQuestion(); // also drops the callback, which refers to this stack frame
+        return;
+    }
+    const int tab = answer.indexOf(QLatin1Char('\t'));
+    if (tab <= 0) {
+        status->setText(tr("The controller didn't answer: the shortcut is unchanged."));
+        return;
+    }
+    setShortcut(which, answer.left(tab), answer.mid(tab + 1).trimmed());
 }
 
 void ControllerMapper::autoAssign() {

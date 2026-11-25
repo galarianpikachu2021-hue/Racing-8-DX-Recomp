@@ -10,12 +10,22 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
 - **Object motion vectors only for what moves:** Sydney Sprint holds 60 fps again.
 - **Split-screen: the render scale works there too** (below 100%).
 
+## New
+- **Storage tab:** keep the game (game files, built game, mods, saves, build files) on an SD card or another drive, and build and play it
+  from there. "Move everything there" copies first and removes the old files only when all of them have arrived; "Use it without moving"
+  starts in the new place, for a device that is full. If the drive is not connected the launcher asks instead of starting over.
+- **Two controller shortcuts** (Controllers tab, and Controls in the in-game menu), for every controller: open the in-game menu (still
+  L3 + R3 unless you change it) and close the game (nothing unless you set it). One button or a combination.
+
 ## Fixed
+- **Crash at the award ceremony on NVIDIA (#27):** a shader could be translated before the game had put its code in place (PR #50).
+  Confirmed by its author on an RTX 3070 Ti.
+- **CTGP DX: the track author line** at the start of a race said "WWWW..."; it shows the author now ("Nintendo" on the game's own tracks).
 - **The game froze after your first cup win** (Linux): the staff credits movie needs the audio output service. It plays now.
 - **The amiibo screen** answers (there is no reader, so the game waits for one).
 - **Sky-High Sundae's sky on AMD:** coral-coloured slabs and lines in the sky are gone.
 - **Invalid Vulkan use** found with the validation layer (layout changes inside a render pass, empty descriptor updates, the swapchain used
-  from two threads with frame generation, and more). These may be behind the NVIDIA reports #27 and #43: please test.
+  from two threads with frame generation, and more). These may be behind the NVIDIA report #43: please test.
 - FSR 3: grey "standing still" specks on the near road in the motion vectors.
 - The speed limit row in the F10 menu did nothing; it works again.
 - prod.keys with only master keys work in Setup (#34).
@@ -25,6 +35,6 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
 
 ## Known issues
 - A rare freeze at the menu movies at start-up is not found yet.
-- No DLSS / NVIDIA test here: #27, #42 and #43 need a report from an NVIDIA PC.
+- No DLSS / NVIDIA test here: #42 and #43 need a report from an NVIDIA PC.
 - CTGP DX on Windows: L / R on the cup screen shows no new cups (#28).
 - At 33% render scale, fine texture detail on moving characters is grainy.

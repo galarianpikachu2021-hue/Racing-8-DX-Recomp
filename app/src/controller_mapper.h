@@ -8,6 +8,9 @@
 // controller_profiles.ini beside the game's config (format in the fork's suyu_cmd/controller_profiles.h), and whichever player
 // gets that controller, here or when the game hands controllers out, gets its layout.
 //
+// Two shortcuts work on every controller whoever plays on it: open the in-game menu (L3 + R3 unless changed) and close the game
+// (nothing unless set). They are in shortcuts.ini beside the config (format in the fork's common/kart_shortcuts.h).
+//
 // Controller questions go to the engine (`--input-capture`, it has the controller library), always asynchronously.
 #pragma once
 
@@ -40,6 +43,15 @@ public:
     /// "k:v,k:v" binding without guid and port (what a profile stores) / with this device's guid and port.
     static QString StripDevice(const QString& binding);
     static QString BindToDevice(const QString& stored, const QString& device);
+    /// shortcuts.ini: the buttons ("leftstick+rightstick", "" = none) and their printed names; a missing file or line = the default.
+    struct Shortcuts {
+        QString buttons[2] = {QStringLiteral("leftstick+rightstick"), QString()};
+        QString names[2] = {QStringLiteral("L3 + R3"), QString()};
+    };
+    static Shortcuts LoadShortcuts(const QString& path);
+    static bool SaveShortcuts(const QString& path, const Shortcuts& s);
+    /// One would fire while the other is being pressed.
+    static bool ShortcutsClash(const QString& a, const QString& b);
 
 protected:
     void showEvent(QShowEvent* e) override;
@@ -65,6 +77,10 @@ private:
     void showPlayer();
     void chooseDevice(int index);
     void capture(const QString& setting);
+    void captureShortcut(int which);
+    void setShortcut(int which, const QString& buttons, const QString& names);
+    void showShortcuts();
+    QString shortcutsPath() const;
     void applyLayout(const Bindings& layout, bool remember);
     Bindings playerBindings(int player) const;
     QString deviceOf(int player) const; ///< the device param a player's bindings point at ("" = disconnected)
@@ -94,6 +110,8 @@ private:
     QLabel* status = nullptr;
     std::map<QString, QLabel*> bound;
     std::vector<QPushButton*> row_buttons;
+    QLabel* shortcut_bound[2] = {};                ///< the menu and close-game shortcuts (any controller)
+    std::vector<QPushButton*> shortcut_buttons;
     QList<Device> devices;       ///< controllers found
     QList<Device> combo_devices; ///< what the device combo lists now
     QMap<QString, QList<QPair<QString, QString>>> names; ///< profile key -> (binding, printed name)

@@ -18,6 +18,7 @@ class TestPlatformPaths : public QObject {
 private slots:
     void availableMemoryIsReported() { QVERIFY(BuildRunner::AvailableMemoryBytes() > (64LL << 20)); }
     void defaultLayoutHonoursTheEnvironmentOverrides() {
+        qputenv("XDG_CONFIG_HOME", "/xdg/config"); // not the user's own Storage choice
         qputenv("XDG_DATA_HOME", "/xdg/data");
         qputenv("XDG_CACHE_HOME", "/xdg/cache");
         const auto l = DataLayout::Default();

@@ -15,7 +15,8 @@ struct DataLayout {
     static DataLayout FromRoots(const QString& data, const QString& cache);
     static QString PortableRoot(); // Windows: <folder of kartrecomp.exe>/userdata
     static QString ConfigRoot();   // the launcher's and the engine's settings folder
-    static DataLayout Default(); // honours XDG_DATA_HOME / XDG_CACHE_HOME
+    static DataLayout Default();  // the folder chosen on the Storage tab (storage.h), else Standard()
+    static DataLayout Standard(); // honours XDG_DATA_HOME / XDG_CACHE_HOME
 
     QString content() const { return dataRoot + "/content"; }
     QString base() const { return content() + "/base.nsp"; }

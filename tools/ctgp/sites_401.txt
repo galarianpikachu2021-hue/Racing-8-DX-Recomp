@@ -152,7 +152,8 @@
 0x4966c8 root | courseid 0x4d268c
 0x4fb620 root | courseid 0x5432f8
 0x4fb63c root | courseid 0x543310
-0x50cfbc root | courseid 0x556ce0
+0x50cfbc root | keeps the block start after the site, which games built before the handler have
+0x50cfbc call course_author | 0x556ce0 (author line of the course-info screen)
 0x43bb80 root | courseid 0x46fa74
 0x494fec root | courseid 0x4d0b48
 0x50ccb0 root | courseid 0x556864

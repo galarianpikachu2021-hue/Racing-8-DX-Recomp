@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <QApplication>
 
+#include <QDir>
 #include <QFile>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QTimer>
 
 #include "launcher_language.h"
 #include "main_window.h"
 #include "mii_render.h"
+#include "storage.h"
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -41,6 +45,18 @@ int main(int argc, char** argv) {
     }
 
     LauncherLanguage::Install();
+    // The game was put on another drive (Storage tab) and that drive is not there: never quietly start over in an empty place.
+    while (Storage::Missing()) {
+        QMessageBox box(QMessageBox::Warning, QStringLiteral("KartRecomp"),
+                        QCoreApplication::translate("Messages", "The game is kept in %1, which is not there. Is the SD card or drive connected?").arg(QDir::toNativeSeparators(Storage::Chosen())));
+        auto* retry = box.addButton(QCoreApplication::translate("Messages", "Try again"), QMessageBox::AcceptRole);
+        auto* standard = box.addButton(QCoreApplication::translate("Messages", "Use this device's folders this time"), QMessageBox::ActionRole);
+        box.addButton(QCoreApplication::translate("Messages", "Quit"), QMessageBox::RejectRole);
+        box.setDefaultButton(retry);
+        box.exec();
+        if (box.clickedButton() == standard) Storage::IgnoreChoice();
+        else if (box.clickedButton() != retry) return 1;
+    }
     MainWindow window;
     // --nolauncher (or --play): start the built game straight away with the saved settings, without showing the launcher, and
     // quit when the game exits. For playing from a TV or Steam (issue #17); the in-game menu (F10, L3+R3) has the settings.

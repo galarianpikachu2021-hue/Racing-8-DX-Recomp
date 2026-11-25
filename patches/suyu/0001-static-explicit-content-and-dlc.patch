@@ -1,8 +1,8 @@
 diff --git a/src/input_common/drivers/sdl_driver.cpp b/src/input_common/drivers/sdl_driver.cpp
-index bc82572582..8f9118c74d 100644
+index bc82572582..53da6c96a7 100644
 --- a/src/input_common/drivers/sdl_driver.cpp
 +++ b/src/input_common/drivers/sdl_driver.cpp
-@@ -3,6 +3,11 @@
+@@ -3,6 +3,12 @@
  // SPDX-FileCopyrightText: 2018 Citra Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
@@ -10,23 +10,39 @@ index bc82572582..8f9118c74d 100644
 +#include <unordered_map>
 +
 +#include "common/kart_overlay.h"
++#include "common/kart_shortcuts.h"
 +#include <cstdlib>
  #include <array>
  #include <numbers>
  #include "common/logging.h"
-@@ -573,7 +578,73 @@ void SDLDriver::PumpEvents() const {
+@@ -573,7 +579,101 @@ void SDLDriver::PumpEvents() const {
      }
  }
  
 +namespace {
 +
 +/// In-game overlay menu (kart-recomp): reads a controller's state through SDL's gamepad mapping,
-+/// turns presses into menu navigation and opens/closes the menu on L3+R3. Returns true while the
-+/// menu is open, in which case the game gets neutral input.
++/// turns presses into menu navigation, opens/closes the menu on its shortcut (L3+R3 unless changed) and closes the game on the
++/// close-game shortcut (common/kart_shortcuts.h). Returns true while the menu is open, in which case the game gets neutral input.
 +struct OverlayPad {
 +    SDL_Gamepad* pad = nullptr;
-+    bool ls = false, rs = false, up = false, down = false, left = false, right = false, a = false, b = false;
++    u32 held = 0;
++    bool up = false, down = false, left = false, right = false, a = false, b = false;
 +};
++
++static_assert(SDL_GAMEPAD_BUTTON_SOUTH == 0 && SDL_GAMEPAD_BUTTON_LEFT_STICK == 7 && SDL_GAMEPAD_BUTTON_RIGHT_STICK == 8 &&
++              SDL_GAMEPAD_BUTTON_DPAD_RIGHT == 14 && SDL_GAMEPAD_BUTTON_LEFT_PADDLE2 == 19 && SDL_GAMEPAD_BUTTON_MISC6 == 25);
++
++/// The buttons and triggers held, as KartShortcuts bits.
++u32 HeldMask(SDL_Gamepad* pad) {
++    u32 held = 0;
++    for (int b = 0; b < KartShortcuts::kLeftTrigger; ++b) {
++        if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b))) held |= 1u << b;
++    }
++    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) held |= 1u << KartShortcuts::kLeftTrigger;
++    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) held |= 1u << KartShortcuts::kRightTrigger;
++    return held;
++}
 +
 +bool OverlayPoll(SDL_JoystickID id) {
 +    static std::mutex lock;
@@ -40,7 +56,11 @@ index bc82572582..8f9118c74d 100644
 +        return KartOverlay::IsOpen();
 +    }
 +    const auto button = [&](SDL_GamepadButton b) { return SDL_GetGamepadButton(p.pad, b); };
-+    const bool ls = button(SDL_GAMEPAD_BUTTON_LEFT_STICK), rs = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
++    const u32 held = HeldMask(p.pad), before = std::exchange(p.held, held);
++    const auto pressed = [&](KartShortcuts::Shortcut s) { // the last button of the set just went down
++        const u32 mask = KartShortcuts::Masks()[s].load(std::memory_order_relaxed);
++        return mask && (held & mask) == mask && (before & mask) != mask;
++    };
 +    const bool up = button(SDL_GAMEPAD_BUTTON_DPAD_UP), down = button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
 +    const bool left = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT), right = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
 +    // Same buttons as the game: confirm on the right face button, back on the bottom one (the Switch's A/B positions; on an
@@ -49,11 +69,16 @@ index bc82572582..8f9118c74d 100644
 +    using KartOverlay::Nav;
 +    if (KartOverlay::Capturing().load()) {
 +        // The Controls page is waiting for a press: it goes to the input library's mapping, not to the menu.
-+        p.ls = ls, p.rs = rs, p.up = up, p.down = down, p.left = left, p.right = right, p.a = a, p.b = b;
++        p.up = up, p.down = down, p.left = left, p.right = right, p.a = a, p.b = b;
 +        return false;
 +    }
-+    if (ls && rs && !(p.ls && p.rs)) {
++    bool used = false; // this press was a shortcut: the game does not get it
++    if (pressed(KartShortcuts::kQuit)) {
++        KartOverlay::QuitRequest().store(true);
++        used = true;
++    } else if (pressed(KartShortcuts::kMenu)) {
 +        KartOverlay::Push(Nav::Toggle);
++        used = true;
 +    } else if (KartOverlay::IsOpen()) {
 +        if (up && !p.up) KartOverlay::Push(Nav::Up);
 +        if (down && !p.down) KartOverlay::Push(Nav::Down);
@@ -62,8 +87,8 @@ index bc82572582..8f9118c74d 100644
 +        if (a && !p.a) KartOverlay::Push(Nav::Accept);
 +        if (b && !p.b) KartOverlay::Push(Nav::Back);
 +    }
-+    p.ls = ls, p.rs = rs, p.up = up, p.down = down, p.left = left, p.right = right, p.a = a, p.b = b;
-+    return KartOverlay::IsOpen();
++    p.up = up, p.down = down, p.left = left, p.right = right, p.a = a, p.b = b;
++    return used || KartOverlay::IsOpen();
 +}
 +
 +} // namespace
@@ -80,6 +105,10 @@ index bc82572582..8f9118c74d 100644
 +        overlay_open = OverlayPoll(event.jhat.which);
 +        break;
 +    case SDL_EVENT_JOYSTICK_AXIS_MOTION:
++        if ((KartShortcuts::Masks()[KartShortcuts::kMenu].load(std::memory_order_relaxed) |
++             KartShortcuts::Masks()[KartShortcuts::kQuit].load(std::memory_order_relaxed)) & KartShortcuts::kTriggerBits) {
++            OverlayPoll(event.jaxis.which); // a shortcut with a trigger in it
++        }
 +        overlay_open = KartOverlay::IsOpen() && !KartOverlay::Capturing().load();
 +        break;
 +    default:
@@ -88,7 +117,7 @@ index bc82572582..8f9118c74d 100644
      switch (event.type) {
      case SDL_EVENT_JOYSTICK_BUTTON_UP: {
          if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
-@@ -583,6 +654,9 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
+@@ -583,6 +683,9 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
          break;
      }
      case SDL_EVENT_JOYSTICK_BUTTON_DOWN: {
@@ -98,7 +127,7 @@ index bc82572582..8f9118c74d 100644
          if (const auto joystick = GetSDLJoystickBySDLID(event.jbutton.which)) {
              const PadIdentifier identifier = joystick->GetPadIdentifier();
              SetButton(identifier, event.jbutton.button, true);
-@@ -592,14 +666,14 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
+@@ -592,14 +695,14 @@ void SDLDriver::HandleGameControllerEvent(const SDL_Event& event) {
      case SDL_EVENT_JOYSTICK_HAT_MOTION: {
          if (const auto joystick = GetSDLJoystickBySDLID(event.jhat.which)) {
              const PadIdentifier identifier = joystick->GetPadIdentifier();
@@ -115,7 +144,7 @@ index bc82572582..8f9118c74d 100644
          }
          break;
      }
-@@ -778,13 +852,15 @@ Common::Input::DriverResult SDLDriver::SetVibration(
+@@ -778,13 +881,15 @@ Common::Input::DriverResult SDLDriver::SetVibration(
          return (amplitude + std::pow(amplitude, factor)) * 0.5f * 0xFFFF;
      };
  
@@ -138,7 +167,7 @@ index bc82572582..8f9118c74d 100644
  
      // Amplitude for HD rumble needs no modification
      if (joystick->HasHDRumble()) {
-@@ -945,6 +1021,107 @@ Common::ParamPackage SDLDriver::BuildParamPackageForAnalog(PadIdentifier identif
+@@ -945,6 +1050,125 @@ Common::ParamPackage SDLDriver::BuildParamPackageForAnalog(PadIdentifier identif
      return params;
  }
  
@@ -243,14 +272,32 @@ index bc82572582..8f9118c74d 100644
 +    return held;
 +}
 +
++std::vector<std::pair<int, std::string>> SDLDriver::GetHeldShortcutButtons() {
++    std::vector<std::pair<int, std::string>> out;
++    std::scoped_lock lock{joystick_map_mutex};
++    for (const auto& [guid, list] : joystick_map) {
++        for (const auto& joystick : list) {
++            SDL_Gamepad* pad = joystick->GetSDLGameController();
++            const u32 held = pad ? HeldMask(pad) : 0;
++            for (int b = 0; b < static_cast<int>(KartShortcuts::kButtonNames.size()); ++b) {
++                if (!(held & (1u << b))) continue;
++                out.emplace_back(b, b >= KartShortcuts::kLeftTrigger ? GamepadTriggerName(pad, b == KartShortcuts::kLeftTrigger)
++                                                                     : GamepadButtonName(pad, static_cast<SDL_GamepadButton>(b)));
++            }
++            if (!out.empty()) return out; // one controller's buttons, never a mix of two
++        }
++    }
++    return out;
++}
++
  ButtonMapping SDLDriver::GetButtonMappingForDevice(const Common::ParamPackage& params) {
      if (!params.Has("guid") || !params.Has("port")) {
          return {};
 diff --git a/src/input_common/drivers/sdl_driver.h b/src/input_common/drivers/sdl_driver.h
-index 1736884079..d53fdec75d 100644
+index 1736884079..2e107722e7 100644
 --- a/src/input_common/drivers/sdl_driver.h
 +++ b/src/input_common/drivers/sdl_driver.h
-@@ -69,6 +69,12 @@ public:
+@@ -69,6 +69,14 @@ public:
  
      bool IsVibrationEnabled(const PadIdentifier& identifier) override;
  
@@ -259,15 +306,17 @@ index 1736884079..d53fdec75d 100644
 +    std::vector<std::pair<std::string, std::string>> GetGamepadControls(const Common::ParamPackage& device);
 +    /// Indices into GetGamepadControls held right now (triggers past half); -1 / -2 = left / right stick pushed past half.
 +    std::vector<int> GetHeldGamepadControls(const Common::ParamPackage& device);
++    /// What the first controller with anything pressed holds: KartShortcuts button numbers and what that controller calls them.
++    std::vector<std::pair<int, std::string>> GetHeldShortcutButtons();
 +
  private:
      void InitJoystick(SDL_JoystickID joystick_id);
      void CloseJoystick(SDL_Joystick* sdl_joystick);
 diff --git a/src/input_common/main.cpp b/src/input_common/main.cpp
-index d65a6a1eec..064b3dc944 100644
+index d65a6a1eec..13178c6ac9 100644
 --- a/src/input_common/main.cpp
 +++ b/src/input_common/main.cpp
-@@ -372,6 +372,20 @@ void InputSubsystem::Shutdown() {
+@@ -372,6 +372,28 @@ void InputSubsystem::Shutdown() {
      impl->Shutdown();
  }
  
@@ -285,14 +334,22 @@ index d65a6a1eec..064b3dc944 100644
 +    return {};
 +}
 +
++std::vector<std::pair<int, std::string>> InputSubsystem::GetHeldShortcutButtons() const {
++#ifdef HAVE_SDL3
++    return impl->sdl->GetHeldShortcutButtons();
++#else
++    return {};
++#endif
++}
++
  Keyboard* InputSubsystem::GetKeyboard() {
      return impl->keyboard.get();
  }
 diff --git a/src/input_common/main.h b/src/input_common/main.h
-index c6e62fd2a4..465a651c28 100644
+index c6e62fd2a4..8fc166bcc6 100644
 --- a/src/input_common/main.h
 +++ b/src/input_common/main.h
-@@ -139,6 +139,11 @@ public:
+@@ -139,6 +139,13 @@ public:
      /// Retrieves the button mappings for the given device.
      [[nodiscard]] ButtonMapping GetButtonMappingForDevice(const Common::ParamPackage& device) const;
  
@@ -300,6 +357,8 @@ index c6e62fd2a4..465a651c28 100644
 +    [[nodiscard]] std::vector<std::pair<std::string, std::string>> GetGamepadControls(const Common::ParamPackage& device) const;
 +    /// Indices into GetGamepadControls held now; -1 / -2 = left / right stick pushed.
 +    [[nodiscard]] std::vector<int> GetHeldGamepadControls(const Common::ParamPackage& device) const;
++    /// Buttons held on the first controller with anything pressed (KartShortcuts numbers) and their printed names.
++    [[nodiscard]] std::vector<std::pair<int, std::string>> GetHeldShortcutButtons() const;
 +
      /// Retrieves the motion mappings for the given device.
      [[nodiscard]] MotionMapping GetMotionMappingForDevice(const Common::ParamPackage& device) const;
@@ -672,10 +731,10 @@ index d8e34913ba..ccd3e85bb0 100644
  } // namespace SuyuCmd
 diff --git a/src/suyu_cmd/controller_profiles.h b/src/suyu_cmd/controller_profiles.h
 new file mode 100644
-index 0000000000..739a5389ef
+index 0000000000..23cdd12a71
 --- /dev/null
 +++ b/src/suyu_cmd/controller_profiles.h
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,193 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: per-controller button profiles. Each controller (by SDL GUID) and the keyboard keeps its own layout in
 +// <config dir>/controller_profiles.ini; whichever player gets that controller gets its layout. The launcher reads and writes
@@ -694,6 +753,7 @@ index 0000000000..739a5389ef
 +#include <vector>
 +
 +#include "common/fs/path_util.h"
++#include "common/kart_shortcuts.h"
 +#include "common/param_package.h"
 +#include "common/settings_input.h"
 +#include "input_common/main.h"
@@ -835,6 +895,35 @@ index 0000000000..739a5389ef
 +            if (static_cast<std::size_t>(h) < controls.size()) return controls[static_cast<std::size_t>(h)];
 +        }
 +        return {};
++    }
++};
++
++inline std::string ShortcutsPath() {
++    return Common::FS::PathToUTF8String(Common::FS::GetSuyuPath(Common::FS::SuyuPath::ConfigDir) / "shortcuts.ini");
++}
++
++/// Waits for a button or a combination on any controller: whatever was held together, once everything is let go again. What is held
++/// when it starts (the button that chose "Change") must be let go first.
++struct ShortcutCapture {
++    bool released = false;
++    std::map<int, std::string> seen; ///< button number -> printed name
++
++    /// (mask, names) when done, mask 0 until then.
++    std::pair<u32, std::string> Poll(InputCommon::InputSubsystem& input) {
++        const auto held = input.GetHeldShortcutButtons();
++        if (!released) {
++            released = held.empty();
++            return {};
++        }
++        for (const auto& [button, name] : held) seen.emplace(button, name);
++        if (!held.empty() || seen.empty()) return {};
++        u32 mask = 0;
++        std::string names;
++        for (const auto& [button, name] : seen) {
++            mask |= 1u << button;
++            names += (names.empty() ? "" : " + ") + name;
++        }
++        return {mask, names};
 +    }
 +};
 +
@@ -995,7 +1084,7 @@ index 0000000000..b9ff87f8ff
 +
 +} // namespace SuyuCmd
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
-index bca83ab630..ff138bf26e 100644
+index bca83ab630..6a1c5e795c 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.cpp
 @@ -1,7 +1,17 @@
@@ -1052,7 +1141,15 @@ index bca83ab630..ff138bf26e 100644
  }
  } // namespace
  
-@@ -885,6 +916,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
+@@ -804,6 +835,7 @@ void ShowDevMenu(Core::System& system, InputCommon::InputSubsystem* input) {
+ 
+ EmuWindow_SDL2::EmuWindow_SDL2(InputCommon::InputSubsystem* input_subsystem_, Core::System& system_)
+     : input_subsystem{input_subsystem_}, system{system_} {
++    KartShortcuts::Load(SuyuCmd::Profiles::ShortcutsPath());
+     input_subsystem->Initialize();
+     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD)) {
+         LOG_CRITICAL(Frontend, "Failed to initialize SDL3: {}, Exiting...", SDL_GetError());
+@@ -885,6 +917,54 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
          return;
      }
  #endif
@@ -1107,7 +1204,7 @@ index bca83ab630..ff138bf26e 100644
      if (state == SDL_PRESSED) {
          input_subsystem->GetKeyboard()->PressKey(static_cast<std::size_t>(key));
      } else if (state == SDL_RELEASED) {
-@@ -900,7 +979,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
+@@ -900,7 +980,101 @@ void EmuWindow_SDL2::EnableTasPlayback() {
      tas_playback = true;
  }
  
@@ -1209,7 +1306,7 @@ index bca83ab630..ff138bf26e 100644
      if (!tas_playback) {
          return;
      }
-@@ -1016,6 +1189,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1016,6 +1190,7 @@ void EmuWindow_SDL2::WaitEvent() {
              LOG_ERROR(Frontend, "SDL_WaitEventTimeout failed: {}", error);
              SDL_ClearError();
          }
@@ -1217,7 +1314,7 @@ index bca83ab630..ff138bf26e 100644
          const u64 idle_time = SDL_GetTicks();
          if (idle_time > last_time + kStatusRefreshMs) {
              last_time = idle_time;
-@@ -1090,6 +1264,7 @@ void EmuWindow_SDL2::WaitEvent() {
+@@ -1090,6 +1265,7 @@ void EmuWindow_SDL2::WaitEvent() {
          break;
      }
  
@@ -1225,7 +1322,7 @@ index bca83ab630..ff138bf26e 100644
      const u64 current_time = SDL_GetTicks();
      if (current_time > last_time + kStatusRefreshMs) {
          last_time = current_time;
-@@ -1215,6 +1390,12 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1215,6 +1391,12 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
      if (gamepad_check_pending) {
          AutoAssignControllers();
      }
@@ -1238,7 +1335,7 @@ index bca83ab630..ff138bf26e 100644
      if (controls_save_pending && SDL_GetTicks() >= last_controls_save + kControlsSaveMs) {
          controls_save_pending = false;
          last_controls_save = SDL_GetTicks();
-@@ -1227,7 +1408,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
+@@ -1227,7 +1409,7 @@ void EmuWindow_SDL2::RefreshWindowStatus() {
  
      SuyuCmd::NativeStatusSnapshot display{};
      SuyuCmd::TryGetNativeStatusSnapshot(display);
@@ -1247,7 +1344,7 @@ index bca83ab630..ff138bf26e 100644
          display.shaders_building = system.GPU().ShaderNotify().ShadersBuilding();
      }
      const std::string title = SuyuCmd::FormatNativeTitle(display);
-@@ -1243,7 +1424,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1243,7 +1425,7 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      gamepad_check_pending = false;
      // A TAS replay drives the players itself; their mappings stay as configured.
      if (!g_export_package || !SdlConfig::auto_assign_controllers ||
@@ -1256,7 +1353,7 @@ index bca83ab630..ff138bf26e 100644
          return;
      }
      const auto devices = input_subsystem->GetInputDevices();
-@@ -1268,23 +1449,32 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1268,23 +1450,32 @@ void EmuWindow_SDL2::AutoAssignControllers() {
          MapDefault(*input_subsystem, pad, player);
          LOG_INFO(Frontend, "Assigned {}", pad.Get("display", std::string{"a controller"}));
      };
@@ -1302,7 +1399,7 @@ index bca83ab630..ff138bf26e 100644
          return;
      }
      SdlConfig::auto_assigned_pads = SuyuCmd::SerializePadBindings(bindings);
-@@ -1298,6 +1488,330 @@ void EmuWindow_SDL2::AutoAssignControllers() {
+@@ -1298,6 +1489,364 @@ void EmuWindow_SDL2::AutoAssignControllers() {
      controls_save_pending = true;
  }
  
@@ -1313,7 +1410,7 @@ index bca83ab630..ff138bf26e 100644
 +void EmuWindow_SDL2::ServiceQuitRequests() {
 +    // The in-game menu's "Quit game".
 +    if (KartOverlay::QuitRequest().exchange(false)) {
-+        LOG_INFO(Frontend, "kart-recomp: quit from the in-game menu");
++        LOG_INFO(Frontend, "kart-recomp: quit from the in-game menu or the close-game shortcut");
 +        is_open = false;
 +        return;
 +    }
@@ -1375,6 +1472,19 @@ index bca83ab630..ff138bf26e 100644
 +    const int code = KartOverlay::kControlInputs[input].code;
 +    return code >= 100 ? player.analogs[static_cast<std::size_t>(code - 100)] : player.buttons[static_cast<std::size_t>(code)];
 +}
++/// Changes a shortcut, saves it and says what happened.
++std::string SetShortcut(int which, u32 mask, const std::string& names) {
++    const auto k = static_cast<std::size_t>(which);
++    const bool menu = which == KartShortcuts::kMenu;
++    if (KartShortcuts::Clash(mask, KartShortcuts::Masks()[menu ? KartShortcuts::kQuit : KartShortcuts::kMenu].load()))
++        return std::string{"That overlaps the other shortcut: "} + (menu ? "menu" : "close game") + " unchanged";
++    KartShortcuts::Masks()[k].store(mask);
++    KartShortcuts::Names()[k] = names;
++    const bool saved = KartShortcuts::Save(SuyuCmd::Profiles::ShortcutsPath());
++    LOG_INFO(Frontend, "Overlay: shortcut {} -> {}{}", KartShortcuts::kKeys[k], mask ? KartShortcuts::Text(mask) : "nothing", saved ? "" : " (not saved)");
++    const std::string what = menu ? "opens this menu" : "closes the game";
++    return (mask ? names + " now " + what : "Nothing " + what + " now") + (saved ? "" : " (could not be saved)");
++}
 +static_assert(Settings::NativeButton::A == 0 && Settings::NativeButton::LStick == 4 && Settings::NativeButton::L == 6 &&
 +              Settings::NativeButton::DLeft == 12 && Settings::NativeButton::DUp == 13 && Settings::NativeButton::Home == 18 &&
 +              Settings::NativeButton::Screenshot == 19 && Settings::NativeAnalog::RStick == 1);
@@ -1387,7 +1497,7 @@ index bca83ab630..ff138bf26e 100644
 +    using KartOverlay::kControlInputs;
 +    auto& state = KartOverlay::Pads();
 +    auto& players = Settings::values.players.GetValue();
-+    int req_player, req_input;
++    int req_player, req_input, shortcut_reset;
 +    bool cancel;
 +    std::array<int, 4> action;
 +    {
@@ -1395,6 +1505,7 @@ index bca83ab630..ff138bf26e 100644
 +        req_player = state.capture_player;
 +        req_input = state.capture_input;
 +        state.capture_player = state.capture_input = -1;
++        shortcut_reset = std::exchange(state.shortcut_reset, -1);
 +        cancel = state.capture_cancel;
 +        state.capture_cancel = false;
 +        action = state.action;
@@ -1409,7 +1520,8 @@ index bca83ab630..ff138bf26e 100644
 +    std::string message;
 +
 +    if (req_player >= 0 && req_player < 4 && req_input >= 0 && req_input < kControlInputCount && cap_player < 0 && !tas_playback) {
-+        const bool stick = kControlInputs[req_input].code >= 100;
++        const bool shortcut = kControlInputs[req_input].code >= 200;
++        const bool stick = !shortcut && kControlInputs[req_input].code >= 100;
 +        if (stick && uses_keyboard(static_cast<std::size_t>(req_player))) {
 +            message = "Sticks on the keyboard use four keys: choose Standard layout for W/A/S/D and the arrow keys";
 +        } else {
@@ -1419,16 +1531,22 @@ index bca83ab630..ff138bf26e 100644
 +            capture_started = SDL_GetTicks();
 +            capture = SuyuCmd::Profiles::Capture{};
 +            capture.stick = stick;
++            shortcut_capture = SuyuCmd::Profiles::ShortcutCapture{};
 +            KartOverlay::Capturing().store(true);
-+            message = stick ? "Move the stick (Esc cancels)" : "Press the new button (Esc cancels)";
++            message = shortcut ? "Press a controller button, or hold several, then let go (Esc cancels)" : stick ? "Move the stick (Esc cancels)" : "Press the new button (Esc cancels)";
 +        }
 +        publish = true;
 +    }
 +    if (cap_player >= 0) {
 +        auto& player = players[static_cast<std::size_t>(cap_player)];
++        const int shortcut = kControlInputs[cap_input].code - 200; // >= 0: KartShortcuts, any controller
++        u32 shortcut_mask = 0;
 +        const bool keyboard = uses_keyboard(static_cast<std::size_t>(cap_player));
 +        std::string got, got_name;
-+        if (keyboard) {
++        if (shortcut >= 0) {
++            std::tie(shortcut_mask, got_name) = shortcut_capture.Poll(*input_subsystem);
++            if (shortcut_mask) got = KartShortcuts::Text(shortcut_mask);
++        } else if (keyboard) {
 +            if (captured_key >= 0) {
 +                got = InputCommon::GenerateKeyboardParam(captured_key);
 +                got_name = DescribeBinding(got);
@@ -1440,7 +1558,9 @@ index bca83ab630..ff138bf26e 100644
 +        if (!got.empty() || cancel || timed_out) {
 +            KartOverlay::Capturing().store(false);
 +            const std::string label = kControlInputs[cap_input].label;
-+            if (!got.empty()) {
++            if (!got.empty() && shortcut >= 0) {
++                message = SetShortcut(shortcut, shortcut_mask, got_name);
++            } else if (!got.empty()) {
 +                BindingOf(player, cap_input) = got;
 +                message = got_name + " now does in-game " + label;
 +                LOG_INFO(Frontend, "Overlay: Player {} {} -> {}", cap_player + 1, label, got);
@@ -1452,6 +1572,10 @@ index bca83ab630..ff138bf26e 100644
 +            cap_player = cap_input = -1;
 +            publish = true;
 +        }
++    }
++    if (shortcut_reset >= 0 && shortcut_reset < KartShortcuts::kCount) {
++        message = SetShortcut(shortcut_reset, KartShortcuts::kDefaults[shortcut_reset], KartShortcuts::kDefaultNames[shortcut_reset]);
++        publish = true;
 +    }
 +    for (std::size_t p = 0; p < 4; ++p) {
 +        auto& player = players[p];
@@ -1504,6 +1628,13 @@ index bca83ab630..ff138bf26e 100644
 +        const auto controls = input_subsystem->GetGamepadControls(own);
 +        const auto sticks = controls.empty() ? InputCommon::AnalogMapping{} : input_subsystem->GetAnalogMappingForDevice(own);
 +        for (int i = 0; i < kControlInputCount; ++i) {
++            if (const int s = kControlInputs[i].code - 200; s >= 0) {
++                const auto k = static_cast<std::size_t>(s);
++                const std::string& name = KartShortcuts::Names()[k];
++                const u32 mask = KartShortcuts::Masks()[k].load();
++                bindings[p].push_back(!mask ? "(none)" : name.empty() ? KartShortcuts::Text(mask) : name);
++                continue;
++            }
 +            const std::string& binding = BindingOf(players[p], i);
 +            std::string text = DescribeBinding(binding, controls);
 +            const Common::ParamPackage b{binding};
@@ -1634,7 +1765,7 @@ index bca83ab630..ff138bf26e 100644
  void EmuWindow_SDL2::SetWindowIcon() {
  #ifdef _WIN32
 diff --git a/src/suyu_cmd/emu_window/emu_window_sdl2.h b/src/suyu_cmd/emu_window/emu_window_sdl2.h
-index 257b06d5e7..7a2f3dbd78 100644
+index 257b06d5e7..50f8cb7ded 100644
 --- a/src/suyu_cmd/emu_window/emu_window_sdl2.h
 +++ b/src/suyu_cmd/emu_window/emu_window_sdl2.h
 @@ -8,6 +8,7 @@
@@ -1645,7 +1776,7 @@ index 257b06d5e7..7a2f3dbd78 100644
  #include "core/frontend/graphics_context.h"
  
  struct SDL_Window;
-@@ -45,6 +46,17 @@ public:
+@@ -45,6 +46,18 @@ public:
      void WaitEvent();
  
      void RefreshWindowStatus();
@@ -1656,6 +1787,7 @@ index 257b06d5e7..7a2f3dbd78 100644
 +    int captured_key = -1;  ///< SDL scancode pressed during a keyboard capture
 +    int cap_player = -1, cap_input = -1; ///< the capture running now
 +    SuyuCmd::Profiles::Capture capture;
++    SuyuCmd::Profiles::ShortcutCapture shortcut_capture;
 +    u64 capture_started = 0;
 +    u64 bindings_published = 0;
 +    bool title_passed = false;
@@ -1663,7 +1795,7 @@ index 257b06d5e7..7a2f3dbd78 100644
  
      /// Hand connected gamepads to player slots; see SuyuCmd::AssignControllers.
      void AutoAssignControllers();
-@@ -53,6 +65,11 @@ public:
+@@ -53,6 +66,11 @@ public:
      /// a hotkey, and quit once it runs out. Call before the system is run.
      void EnableTasPlayback();
  
@@ -1675,7 +1807,7 @@ index 257b06d5e7..7a2f3dbd78 100644
      // Sets the window icon from suyu.bmp
      void SetWindowIcon();
  
-@@ -113,6 +130,8 @@ protected:
+@@ -113,6 +131,8 @@ protected:
  
      /// Whether playback has been started. Set on the first displayed frame.
      bool tas_started = false;
@@ -14503,10 +14635,10 @@ index 0000000000..292a550e85
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.cpp b/src/suyu_cmd/native_gpu/overlay_menu.cpp
 new file mode 100644
-index 0000000000..44230f027c
+index 0000000000..279bd77c2e
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.cpp
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,672 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <cstdlib>
 +#include "common/kart_data_path.h"
@@ -14853,7 +14985,13 @@ index 0000000000..44230f027c
 +            controls_player = (controls_player + (nav == Nav::Left ? 3 : 1)) % 4;
 +            return 0;
 +        }
-+        if (nav == Nav::Left) return 0;
++        if (nav == Nav::Left) { // a shortcut goes back to its default; the other rows have none
++            if (controls_selected <= kControlInputCount && kControlInputs[controls_selected - 1].code >= 200) {
++                std::scoped_lock lock{pads.lock};
++                pads.shortcut_reset = kControlInputs[controls_selected - 1].code - 200;
++            }
++            return 0;
++        }
 +        std::scoped_lock lock{pads.lock};
 +        if (controls_selected <= kControlInputCount) {
 +            pads.capture_player = controls_player;
@@ -14977,9 +15115,13 @@ index 0000000000..44230f027c
 +                                       ? who.options[static_cast<size_t>(std::clamp(who.value, 0, static_cast<int>(who.options.size()) - 1))]
 +                                       : std::string{};
 +        const bool waiting = capturing_player >= 0 && capturing_input >= 0 && capturing_input < kControlInputCount;
-+        title = waiting ? std::string{"Press the button for in-game "} + kControlInputs[capturing_input].label + " on the controller (Esc cancels)"
++        const auto is_shortcut = [](int input) { return input >= 0 && input < kControlInputCount && kControlInputs[input].code >= 200; };
++        title = waiting && is_shortcut(capturing_input)
++                    ? std::string{kControlInputs[capturing_input].label} + ": press a button or hold several, then let go (Esc cancels)"
++                : waiting ? std::string{"Press the button for in-game "} + kControlInputs[capturing_input].label + " on the controller (Esc cancels)"
 +                        : "Controls - Player " + std::to_string(controls_player + 1) + (device.empty() ? "" : " (" + device + ")");
-+        help = "Up/Down select   A: press a new button for this   Left/Right player   B back";
++        help = is_shortcut(controls_selected - 1) ? "A: press a new button or combination (any controller)   Left: default   B back"
++                                                  : "Up/Down select   A: press a new button for this   Left/Right player   B back";
 +        list.push_back({"Player", "< Player " + std::to_string(controls_player + 1) + " >", true, controls_selected == 0, device, 12});
 +        const auto& b = bindings[static_cast<size_t>(controls_player)];
 +        // Left: what the player presses (the controller's own name for it); right: the Switch button it acts as.
@@ -14987,7 +15129,7 @@ index 0000000000..44230f027c
 +            const bool sel = controls_selected == i + 1;
 +            std::string input = static_cast<size_t>(i) < b.size() ? b[static_cast<size_t>(i)] : "...";
 +            if (waiting && capturing_player == controls_player && capturing_input == i) input = "[ press now ]";
-+            list.push_back({input, std::string{"In-game "} + kControlInputs[i].label, true, sel, "", 24});
++            list.push_back({input, is_shortcut(i) ? std::string{kControlInputs[i].label} : std::string{"In-game "} + kControlInputs[i].label, true, sel, "", 24});
 +        }
 +        list.push_back({"Swap A/B and X/Y (Xbox / PlayStation layout)", "", true, controls_selected == kControlInputCount + 1, "", 0});
 +        list.push_back({"Standard layout for this controller", "", true, controls_selected == kControlInputCount + 2, "", 0});
@@ -15171,14 +15313,14 @@ index 0000000000..44230f027c
 +} // namespace KartOverlay
 diff --git a/src/suyu_cmd/native_gpu/overlay_menu.h b/src/suyu_cmd/native_gpu/overlay_menu.h
 new file mode 100644
-index 0000000000..7df9340582
+index 0000000000..6d8257d9ac
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/overlay_menu.h
 @@ -0,0 +1,145 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the in-game overlay menu (model and layout; drawing is in vk_shadow_backend.cpp).
 +//
-+// Opened with F10 or by pressing both stick buttons (L3+R3) on a controller. While it is open the
++// Opened with F10 or the menu shortcut (L3+R3 on a controller unless changed, common/kart_shortcuts.h). While it is open the
 +// keyboard and controller go to the menu and not to the game: Up/Down select, Left/Right change a
 +// value, A/Enter changes it too or closes the menu on "Close", B/Esc/F10 close it.
 +#pragma once
@@ -16335,10 +16477,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..7490b54f5c
+index 0000000000..4e3e2b0e46
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9272 @@
+@@ -0,0 +1,9285 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -18749,7 +18891,7 @@ index 0000000000..7490b54f5c
 +        const std::vector<u64>& datas = keyed;
 +        if (const auto it = programs.find(datas); it != programs.end()) {
 +            if (it->second.speculative) {
-+                if (SpeculationHolds(it->second, st.textures)) {
++                if (SpeculationHolds(it->second, stages, st.textures)) {
 +                    it->second.speculative = false;
 +                } else {
 +                    DestroyProgram(it->second);
@@ -18768,9 +18910,21 @@ index 0000000000..7490b54f5c
 +        return &entry;
 +    }
 +
-+    /// A speculative program is right when every texture slot its translation
-+    /// asked about still reads as 2D with the real bindings.
-+    static bool SpeculationHolds(const ProgramEntry& e, const TextureTable& textures) {
++    /// A speculative program is right when its code is still the code it was
++    /// translated from, and every texture slot its translation asked about still
++    /// reads as 2D with the real bindings.
++    static bool SpeculationHolds(const ProgramEntry& e, const std::vector<u64>& datas, const TextureTable& textures) {
++        // Programs are translated when the game sets their shaders, which can be before the code is in memory. The GP trophy
++        // ceremony's fragment shader was read while its memory still held something else, translated as a vertex shader, and
++        // the program reached the NVIDIA driver with two vertex stages, which crashed it.
++        if (e.code_hash != CodeHash(datas)) {
++            static std::atomic<int> logged{0};
++            if (logged++ < 8) {
++                LOG_INFO(Frontend, "nvn-host vulkan: program {:016x} was translated before its code was in place: translated again",
++                         e.code_hash);
++            }
++            return false;
++        }
 +        for (const auto& [stage, slot] : e.texture_queries) {
 +            const u32 raw = static_cast<u32>(textures[stage][slot]);
 +            if (Core::NvnHost::TextureTypeForHandle(raw) != Shader::TextureType::Color2D) {
@@ -18906,7 +19060,7 @@ index 0000000000..7490b54f5c
 +            case Op::Draw:
 +                if (bound.empty()) break;
 +                if (const auto it = programs.find(bound); it != programs.end() && it->second.speculative) {
-+                    if (SpeculationHolds(it->second, textures)) {
++                    if (SpeculationHolds(it->second, bound, textures)) {
 +                        it->second.speculative = false;
 +                    } else {
 +                        DestroyProgram(it->second);
@@ -19146,11 +19300,12 @@ index 0000000000..7490b54f5c
 +            const u64 handle = textures[stage][TextureSlot(offset)];
 +            return static_cast<u32>(offset % 8 == 0 ? handle : handle >> 32);
 +        };
++        // Hashed before translating: code that changes meanwhile then fails SpeculationHolds instead of passing it.
++        entry.code_hash = CodeHash(datas);
 +        const auto translated = Core::NvnHost::TranslateProgramStages(reader, datas, cbuf, uint_outputs);
 +        std::sort(queries.begin(), queries.end());
 +        queries.erase(std::unique(queries.begin(), queries.end()), queries.end());
 +        entry.texture_queries = std::move(queries);
-+        entry.code_hash = CodeHash(datas);
 +        for (const auto& t : translated) {
 +            if (!t.ok) {
 +                entry.error = t.error;
@@ -25915,7 +26070,7 @@ index aedbdd9285..1c6db4aafe 100644
  
  void SdlConfig::ReadSdlValues() {
 diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
-index 03f738eb63..4d20843eb7 100644
+index 03f738eb63..3b4d82c0df 100644
 --- a/src/suyu_cmd/suyu.cpp
 +++ b/src/suyu_cmd/suyu.cpp
 @@ -1,6 +1,11 @@
@@ -26163,7 +26318,7 @@ index 03f738eb63..4d20843eb7 100644
      }
  }
  
-@@ -917,7 +930,276 @@ static bool HasEntries(const std::filesystem::path& dir) {
+@@ -917,7 +930,287 @@ static bool HasEntries(const std::filesystem::path& dir) {
             std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator();
  }
  
@@ -26293,6 +26448,17 @@ index 03f738eb63..4d20843eb7 100644
 +            }
 +            std::this_thread::sleep_for(std::chrono::milliseconds{5});
 +        }
++    } else if (mode == "shortcut" && q.size() > 1) { // a button or combination on any controller: "<names+joined>\t<printed names>"
++        SuyuCmd::Profiles::ShortcutCapture capture;
++        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{std::max(1, std::atoi(q[1].c_str()))};
++        while (std::chrono::steady_clock::now() < deadline && !cancel.load()) {
++            SDL_PumpEvents();
++            if (const auto [mask, names] = capture.Poll(input); mask) {
++                std::printf("%s\t%s\n", KartShortcuts::Text(mask).c_str(), names.c_str());
++                break;
++            }
++            std::this_thread::sleep_for(std::chrono::milliseconds{5});
++        }
 +    } else if (mode == "held" && q.size() > 1) { // diagnosis: what is held right now
 +        const auto controls = input.GetGamepadControls(Common::ParamPackage{q[1]});
 +        for (const int h : input.GetHeldGamepadControls(Common::ParamPackage{q[1]}))
@@ -26383,7 +26549,7 @@ index 03f738eb63..4d20843eb7 100644
 +    }
 +    std::vector<std::string> q(argv, argv + argc);
 +    if (!AnswerInputQuestion(input, q, cancel)) {
-+        std::fprintf(stderr, "usage: --input-capture serve | devices | button|stick <s> <device> | names <device> | defaults <device>\n");
++        std::fprintf(stderr, "usage: --input-capture serve | devices | button|stick <s> <device> | shortcut <s> | names <device> | defaults <device>\n");
 +        input.Shutdown();
 +        return 2;
 +    }
@@ -26440,7 +26606,7 @@ index 03f738eb63..4d20843eb7 100644
  #ifdef SUYU_CMD_STATIC_RECOMP_STRICT
  #ifdef _WIN32
      _putenv_s("SUYU_RECOMP_STRICT", "1");
-@@ -978,7 +1260,16 @@ int main(int argc, char** argv) {
+@@ -978,7 +1271,16 @@ int main(int argc, char** argv) {
          const std::filesystem::path exe_dir =
              std::filesystem::canonical("/proc/self/exe", exe_ec).parent_path();
  #endif
@@ -26458,7 +26624,7 @@ index 03f738eb63..4d20843eb7 100644
  #ifdef SUYU_CMD_STATIC_RECOMP
          // Never a "user" folder relative to wherever this was started from.
          if (exe_dir.empty()) {
-@@ -1004,10 +1295,12 @@ int main(int argc, char** argv) {
+@@ -1004,10 +1306,12 @@ int main(int argc, char** argv) {
                                       "icons", "themes"}) {
                  std::filesystem::create_directories(user_root / sub);
              }
@@ -26474,7 +26640,7 @@ index 03f738eb63..4d20843eb7 100644
              FS::SetSuyuPath(FS::SuyuPath::LogDir, user_root / "log");
              FS::SetSuyuPath(FS::SuyuPath::NANDDir, user_root / "nand");
              FS::SetSuyuPath(FS::SuyuPath::SaveDir, user_root / "nand");
-@@ -1026,11 +1319,15 @@ int main(int argc, char** argv) {
+@@ -1026,11 +1330,15 @@ int main(int argc, char** argv) {
              // The suyu that made the export decides where that is: a portable
              // install keeps its data in a user/ folder beside its executable,
              // as path_util does for it; otherwise it is the usual location.
@@ -26492,7 +26658,7 @@ index 03f738eb63..4d20843eb7 100644
                  std::filesystem::is_directory(recorded_suyu.parent_path() / "user", portable_ec)) {
                  installed_root = recorded_suyu.parent_path() / "user";
                  installed_config = installed_root / "config";
-@@ -1039,8 +1336,8 @@ int main(int argc, char** argv) {
+@@ -1039,8 +1347,8 @@ int main(int argc, char** argv) {
                  installed_root = FS::GetAppDataRoamingDirectory() / "suyu";
                  installed_config = installed_root / "config";
  #else
@@ -26503,7 +26669,7 @@ index 03f738eb63..4d20843eb7 100644
  #endif
              }
              // Coverage gaps are pooled in the installed suyu's user folder, which
-@@ -1091,12 +1388,14 @@ int main(int argc, char** argv) {
+@@ -1091,12 +1399,14 @@ int main(int argc, char** argv) {
      std::optional<std::string> config_path;
      std::optional<std::string> explicit_content_base;
      std::optional<std::string> explicit_content_update;
@@ -26518,7 +26684,7 @@ index 03f738eb63..4d20843eb7 100644
      bool fullscreen = false;
      bool tas_playback = false;
      std::optional<u32> app_version_override;
-@@ -1116,6 +1415,7 @@ int main(int argc, char** argv) {
+@@ -1116,6 +1426,7 @@ int main(int argc, char** argv) {
          {"game", required_argument, 0, 'g'},
          {"applet-params", optional_argument, 0, 'l'},
          {"multiplayer", required_argument, 0, 'm'},
@@ -26526,7 +26692,7 @@ index 03f738eb63..4d20843eb7 100644
          {"program", optional_argument, 0, 'p'},
          {"tas", no_argument, 0, 't'},
          {"user", required_argument, 0, 'u'},
-@@ -1126,12 +1426,13 @@ int main(int argc, char** argv) {
+@@ -1126,12 +1437,13 @@ int main(int argc, char** argv) {
          {"content-update", required_argument, 0, 'U'},
          {"content-probe", no_argument, 0, 'P'},
          {"content-dump", required_argument, 0, 'D'},
@@ -26541,7 +26707,7 @@ index 03f738eb63..4d20843eb7 100644
          if (arg != -1) {
              switch (static_cast<char>(arg)) {
              case 'B':
-@@ -1158,6 +1459,9 @@ int main(int argc, char** argv) {
+@@ -1158,6 +1470,9 @@ int main(int argc, char** argv) {
              case 'P':
                  explicit_content_probe = true;
                  break;
@@ -26551,7 +26717,7 @@ index 03f738eb63..4d20843eb7 100644
              case 'c':
                  config_path = optarg;
                  break;
-@@ -1195,34 +1499,28 @@ int main(int argc, char** argv) {
+@@ -1195,34 +1510,28 @@ int main(int argc, char** argv) {
                  break;
              }
              case 'm': {
@@ -26602,7 +26768,7 @@ index 03f738eb63..4d20843eb7 100644
                      return 0;
                  }
                  break;
-@@ -1279,7 +1577,8 @@ int main(int argc, char** argv) {
+@@ -1279,7 +1588,8 @@ int main(int argc, char** argv) {
  
      if (explicit_content_base.has_value() != explicit_content_update.has_value() ||
          (explicit_content_probe && !explicit_content_base) ||
@@ -26612,7 +26778,7 @@ index 03f738eb63..4d20843eb7 100644
          LOG_ERROR(Frontend, "Supply both --content-base and --content-update");
          return 2;
      }
-@@ -1291,13 +1590,43 @@ int main(int argc, char** argv) {
+@@ -1291,13 +1601,43 @@ int main(int argc, char** argv) {
          filepath = *explicit_content_base;
      }
  #ifdef SUYU_CMD_STATIC_RECOMP
@@ -26657,7 +26823,7 @@ index 03f738eb63..4d20843eb7 100644
  
      // apply the log_filter setting
      // the logger was initialized before and doesn't pick up the filter on its own
-@@ -1383,6 +1712,16 @@ int main(int argc, char** argv) {
+@@ -1383,6 +1723,16 @@ int main(int argc, char** argv) {
          rom_found:;
      }
  
@@ -26674,7 +26840,7 @@ index 03f738eb63..4d20843eb7 100644
      // Native recompiled CPU modules, in NSO load order: rtld(0), main(1),
      // subsdk0-N(2..N+1), sdk(last). Whichever way they arrive, registering any
      // of them makes ArmRecomp run the game's CPU natively instead of dynarmic.
-@@ -1427,94 +1766,6 @@ int main(int argc, char** argv) {
+@@ -1427,94 +1777,6 @@ int main(int argc, char** argv) {
      // Preferred path: modules compiled straight into this executable. Nothing
      // to find on disk, nothing to load, and no version skew between the exe and
      // its modules.
@@ -26769,7 +26935,7 @@ index 03f738eb63..4d20843eb7 100644
      // Compatibility path for exports that ship recompiled_*.dll beside the exe:
      // recompiled_rtld.dll, recompiled_image.dll (main), recompiled_subsdk0.dll,
      // recompiled_sdk.dll. Skipped entirely when modules are already linked in.
-@@ -1682,6 +1933,7 @@ int main(int argc, char** argv) {
+@@ -1682,6 +1944,7 @@ int main(int argc, char** argv) {
                  Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
              }
          });
@@ -26777,7 +26943,7 @@ index 03f738eb63..4d20843eb7 100644
          // A window running native recompiled code is a standalone game export,
          // not the suyu dev frontend — the window chrome (title/icon) should
          // read as the game, not the emulator.
-@@ -1715,9 +1967,24 @@ int main(int argc, char** argv) {
+@@ -1715,9 +1978,24 @@ int main(int argc, char** argv) {
  #else
          const auto exe_dir = std::filesystem::path(argv[0]).parent_path();
  #endif
@@ -26803,7 +26969,7 @@ index 03f738eb63..4d20843eb7 100644
          if (std::filesystem::is_directory(local_mods)) {
              Common::FS::SetSuyuPath(Common::FS::SuyuPath::LoadDir, local_mods);
              LOG_INFO(Frontend, "Using local mod directory: {}",
-@@ -1732,7 +1999,11 @@ int main(int argc, char** argv) {
+@@ -1732,7 +2010,11 @@ int main(int argc, char** argv) {
      // still reports keys that are present but unusable, handled further down.
      const std::filesystem::path suyu_exe =
          installed_nand.empty() ? std::filesystem::path{} : RecordedSuyuExecutable(export_user_root);
@@ -26816,7 +26982,7 @@ index 03f738eb63..4d20843eb7 100644
          const auto keys_dir = Common::FS::GetSuyuPath(Common::FS::SuyuPath::KeysDir);
          std::error_code keys_ec;
          // The same two names KeyManager loads production keys from. There is no
-@@ -1783,7 +2054,20 @@ int main(int argc, char** argv) {
+@@ -1783,7 +2065,20 @@ int main(int argc, char** argv) {
          system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
          if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
                                                *explicit_content_base, *explicit_content_update,
@@ -26838,7 +27004,7 @@ index 03f738eb63..4d20843eb7 100644
              return 2;
          }
          if (explicit_content_probe) {
-@@ -1797,6 +2081,28 @@ int main(int argc, char** argv) {
+@@ -1797,6 +2092,28 @@ int main(int argc, char** argv) {
      // Apply the command line arguments
      system.ApplySettings();
  
@@ -26867,7 +27033,7 @@ index 03f738eb63..4d20843eb7 100644
      std::unique_ptr<EmuWindow_SDL2> emu_window;
      switch (Settings::values.renderer_backend.GetValue()) {
      case Settings::RendererBackend::OpenGL_GLSL:
-@@ -1825,6 +2131,34 @@ int main(int argc, char** argv) {
+@@ -1825,6 +2142,34 @@ int main(int argc, char** argv) {
  #endif
  
      LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
@@ -26902,7 +27068,7 @@ index 03f738eb63..4d20843eb7 100644
      if (!explicit_content_base) {
          system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
          system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
-@@ -1857,8 +2191,45 @@ int main(int argc, char** argv) {
+@@ -1857,8 +2202,45 @@ int main(int argc, char** argv) {
                                               app_display_version_override);
      }
      system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
@@ -26948,7 +27114,7 @@ index 03f738eb63..4d20843eb7 100644
      if (static_cast<u32>(load_parameters.applet_id)) {
          // code below based off of suyu/main.cpp : GMainWindow::OnHomeMenu()
          // Inline minimal mapping (AppletIdToProgramId is in an anonymous namespace)
-@@ -1911,6 +2282,36 @@ int main(int argc, char** argv) {
+@@ -1911,6 +2293,36 @@ int main(int argc, char** argv) {
      const Core::SystemResultStatus load_result{system.Load(*emu_window, filepath, load_parameters)};
      LOG_INFO(Frontend, "suyu-cmd: system.Load returned: {}", static_cast<int>(load_result));
  
@@ -26985,7 +27151,7 @@ index 03f738eb63..4d20843eb7 100644
      switch (load_result) {
      case Core::SystemResultStatus::ErrorGetLoader:
          LOG_CRITICAL(Frontend, "Failed to obtain loader for {}!", filepath);
-@@ -1925,6 +2326,9 @@ int main(int argc, char** argv) {
+@@ -1925,6 +2337,9 @@ int main(int argc, char** argv) {
          LOG_CRITICAL(Frontend, "Failed to initialize VideoCore!");
          return -1;
      case Core::SystemResultStatus::Success:
@@ -26995,7 +27161,7 @@ index 03f738eb63..4d20843eb7 100644
          break; // Expected case
      default:
          if (static_cast<u32>(load_result) >
-@@ -2043,23 +2447,51 @@ int main(int argc, char** argv) {
+@@ -2043,23 +2458,51 @@ int main(int argc, char** argv) {
      };
  #endif
  
@@ -27056,7 +27222,7 @@ index 03f738eb63..4d20843eb7 100644
      system.GetCpuManager().OnGpuReady();
  
      // A game export is launched over and over by a player, always for the same
-@@ -2075,7 +2507,7 @@ int main(int argc, char** argv) {
+@@ -2075,7 +2518,7 @@ int main(int argc, char** argv) {
          Settings::values.use_disk_shader_cache.SetValue(false);
      }
  
@@ -27065,7 +27231,7 @@ index 03f738eb63..4d20843eb7 100644
          // Build the cached shaders on their own thread, as the Qt frontend does from its
          // emulation thread. The progress callback runs on the shader workers, so it only
          // records counts; the window belongs to this thread, which keeps it responding and
-@@ -2147,6 +2579,7 @@ int main(int argc, char** argv) {
+@@ -2147,6 +2590,7 @@ int main(int argc, char** argv) {
      // emulator stops making progress, which is the case worth seeing. The
      // status sampler hands these counters no sample at all while this owns
      // them, so there is still only one reader of them.
@@ -27073,7 +27239,7 @@ index 03f738eb63..4d20843eb7 100644
      const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
      std::atomic<bool> perf_sampling_run{perf_sampling};
      std::thread perf_sampler;
-@@ -2171,6 +2604,30 @@ int main(int argc, char** argv) {
+@@ -2171,6 +2615,30 @@ int main(int argc, char** argv) {
                   "PERF sampling off: the window status refresh owns the perf counters");
      }
  
@@ -27104,7 +27270,7 @@ index 03f738eb63..4d20843eb7 100644
      const char* capture_dir_env = std::getenv("SUYU_CMD_CAPTURE_DIR");
      const std::filesystem::path capture_dir = capture_dir_env ? capture_dir_env : "";
      if (!capture_dir.empty()) {
-@@ -2188,6 +2645,17 @@ int main(int argc, char** argv) {
+@@ -2188,6 +2656,17 @@ int main(int argc, char** argv) {
          // The wait is bounded (see EmuWindow_SDL2::WaitEvent), so this loop also
          // runs with no input, which keeps a NetPlay join or leave current in Discord.
          emu_window->WaitEvent();
@@ -27122,7 +27288,7 @@ index 03f738eb63..4d20843eb7 100644
  #ifdef USE_DISCORD_PRESENCE
          if (discord_enabled) {
              std::string next_state = discord_title;
-@@ -2204,12 +2672,12 @@ int main(int argc, char** argv) {
+@@ -2204,12 +2683,12 @@ int main(int argc, char** argv) {
              }
          }
  #endif
@@ -27138,7 +27304,7 @@ index 03f738eb63..4d20843eb7 100644
          auto pixels = std::make_shared<std::vector<u8>>(width * height * 4);
          const std::string output =
              (capture_dir / ("frame-" + std::to_string(++capture_index) + ".png")).string();
-@@ -2236,6 +2704,11 @@ int main(int argc, char** argv) {
+@@ -2236,6 +2715,11 @@ int main(int argc, char** argv) {
          next_capture += capture_interval;
      }
  
@@ -27150,7 +27316,7 @@ index 03f738eb63..4d20843eb7 100644
      perf_sampling_run.store(false, std::memory_order_relaxed);
      if (perf_sampler.joinable()) {
          perf_sampler.join();
-@@ -2243,7 +2716,10 @@ int main(int argc, char** argv) {
+@@ -2243,7 +2727,10 @@ int main(int argc, char** argv) {
  
      system.DetachDebugger();
      void(system.Pause());

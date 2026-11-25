@@ -56,7 +56,11 @@ private slots:
         QCOMPARE(env.value("KARTRECOMP_NATIVE_HEIGHT"), QString("1440"));
         QCOMPARE(env.value("KARTRECOMP_NATIVE_GPU"), QString("native"));
 #ifndef Q_OS_WIN
-        QVERIFY(env.value("XDG_DATA_HOME") != d.filePath("d")); // the engine finds its own XDG folders from the app name
+        // A folder chosen on the Storage tab is passed on; the standard one the engine finds itself from the app name.
+        QCOMPARE(env.value("XDG_DATA_HOME"), d.filePath("d"));
+        QCOMPARE(env.value("XDG_CACHE_HOME"), d.filePath("c"));
+        const auto standard = GamePackage::Installed(DataLayout::Standard(), d.filePath("conf"), "/e/mk8d-engine", "v").launchEnvironment();
+        QCOMPARE(standard.value("XDG_DATA_HOME"), qEnvironmentVariable("XDG_DATA_HOME"));
 #else
         QCOMPARE(env.value("XDG_DATA_HOME"), d.filePath("d")); // portable: the engine's data folder is the launcher's
 #endif

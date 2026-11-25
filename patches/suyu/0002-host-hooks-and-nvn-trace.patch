@@ -764,10 +764,10 @@ index 0000000000..5d285fee33
 +}
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
-index 0000000000..2fc84d1e91
+index 0000000000..d4f7d1ed43
 --- /dev/null
 +++ b/src/common/kart_overlay.h
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,221 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: input path to the in-game overlay menu (suyu_cmd/native_gpu/overlay_menu.h).
 +// The window and controller drivers push navigation events here; while the menu is open the
@@ -956,11 +956,13 @@ index 0000000000..2fc84d1e91
 +    int capture_player = -1, capture_input = -1; ///< request: rebind this input (index into kControlInputs) by the next press
 +    bool capture_cancel = false;
 +    int capturing_player = -1, capturing_input = -1; ///< the capture running now (-1 = none)
++    int shortcut_reset = -1;                  ///< request: put this shortcut back to its default (KartShortcuts)
 +    std::string capture_message;              ///< the last capture's result, shown under the list
 +    std::array<int, 4> action{};              ///< request: 1 = swap A/B and X/Y, 2 = standard layout for the player's device
 +};
 +
-+/// The inputs the Controls page lists: Settings::NativeButton values, or 100 + Settings::NativeAnalog for the sticks.
++/// The inputs the Controls page lists: Settings::NativeButton values, 100 + Settings::NativeAnalog for the sticks, or
++/// 200 + KartShortcuts::Shortcut (the same for every player and controller).
 +struct ControlInput {
 +    const char* label;
 +    int code;
@@ -971,6 +973,7 @@ index 0000000000..2fc84d1e91
 +    {"+ (Plus)", 10},   {"- (Minus)", 11},  {"D-pad up", 13},   {"D-pad down", 15},
 +    {"D-pad left", 12}, {"D-pad right", 14}, {"Left stick press", 4}, {"Right stick press", 5},
 +    {"Home", 18},       {"Capture", 19},    {"Left stick", 100}, {"Right stick", 101},
++    {"Open this menu", 200}, {"Close the game", 201},
 +};
 +inline constexpr int kControlInputCount = static_cast<int>(sizeof(kControlInputs) / sizeof(kControlInputs[0]));
 +
@@ -1058,6 +1061,114 @@ index 0000000000..b99dd7f8ce
 +    return (bits & bit) != 0;
 +}
 +} // namespace KartRoomFast
+diff --git a/src/common/kart_shortcuts.h b/src/common/kart_shortcuts.h
+new file mode 100644
+index 0000000000..bb30652f7a
+--- /dev/null
++++ b/src/common/kart_shortcuts.h
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: controller shortcuts that work on every controller: open the in-game menu (L3+R3 unless changed) and close the game
++// (nothing unless bound). A shortcut is a set of buttons that must all be held, kept as a bit mask of SDL gamepad buttons plus the two
++// triggers. Stored in <config dir>/shortcuts.ini, which the launcher's Controllers tab also reads and writes
++// (app/src/controller_mapper.cpp), so keep the format in step:
++//
++//   menu=leftstick+rightstick
++//   menu_name=L3 + R3
++//   quit=
++//   quit_name=
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <fstream>
++#include <string>
++#include <string_view>
++
++namespace KartShortcuts {
++
++enum Shortcut { kMenu, kQuit, kCount };
++inline constexpr const char* kKeys[kCount] = {"menu", "quit"};
++
++/// Bit number -> name. 0..25 are SDL_GamepadButton values (checked in sdl_driver.cpp), then the triggers.
++inline constexpr std::array<const char*, 28> kButtonNames{
++    "a", "b", "x", "y", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder", "rightshoulder", "dpup", "dpdown", "dpleft",
++    "dpright", "misc1", "paddle1", "paddle2", "paddle3", "paddle4", "touchpad", "misc2", "misc3", "misc4", "misc5", "misc6",
++    "lefttrigger", "righttrigger"};
++inline constexpr int kLeftTrigger = 26, kRightTrigger = 27;
++inline constexpr uint32_t kTriggerBits = (1u << kLeftTrigger) | (1u << kRightTrigger);
++inline constexpr uint32_t kDefaults[kCount] = {(1u << 7) | (1u << 8), 0}; // L3 + R3; nothing
++inline constexpr const char* kDefaultNames[kCount] = {"L3 + R3", ""};
++
++inline std::array<std::atomic<uint32_t>, kCount>& Masks() {
++    static std::array<std::atomic<uint32_t>, kCount> masks{kDefaults[kMenu], kDefaults[kQuit]};
++    return masks;
++}
++/// What the buttons are called, for the Controls page (window thread only).
++inline std::array<std::string, kCount>& Names() {
++    static std::array<std::string, kCount> names{kDefaultNames[kMenu], kDefaultNames[kQuit]};
++    return names;
++}
++
++/// "leftstick+rightstick" -> mask. A name that is not known makes the whole text invalid (false): part of a combination is not it.
++inline bool Parse(std::string_view text, uint32_t& mask) {
++    uint32_t out = 0;
++    while (!text.empty()) {
++        const auto plus = text.find('+');
++        const std::string_view name = text.substr(0, plus);
++        bool known = false;
++        for (size_t i = 0; i < kButtonNames.size(); ++i) {
++            if (name == kButtonNames[i]) {
++                out |= 1u << i;
++                known = true;
++            }
++        }
++        if (!known) return false;
++        text = plus == std::string_view::npos ? std::string_view{} : text.substr(plus + 1);
++    }
++    mask = out;
++    return true;
++}
++inline std::string Text(uint32_t mask) {
++    std::string out;
++    for (size_t i = 0; i < kButtonNames.size(); ++i) {
++        if (mask & (1u << i)) out += (out.empty() ? "" : "+") + std::string{kButtonNames[i]};
++    }
++    return out;
++}
++
++/// One would fire while the other is being pressed.
++inline bool Clash(uint32_t a, uint32_t b) {
++    return a && b && ((a & b) == a || (a & b) == b);
++}
++
++inline void Load(const std::string& path) {
++    std::ifstream in(path);
++    for (std::string line; std::getline(in, line);) {
++        if (!line.empty() && line.back() == '\r') line.pop_back();
++        const auto eq = line.find('=');
++        if (eq == std::string::npos) continue;
++        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
++        for (int s = 0; s < kCount; ++s) {
++            const size_t i = static_cast<size_t>(s);
++            uint32_t mask = 0;
++            if (key == kKeys[s] && Parse(value, mask)) Masks()[i].store(mask);
++            else if (key == std::string{kKeys[s]} + "_name") Names()[i] = value;
++        }
++    }
++}
++inline bool Save(const std::string& path) {
++    std::ofstream out(path, std::ios::trunc);
++    for (int s = 0; s < kCount; ++s) {
++        const size_t i = static_cast<size_t>(s);
++        out << kKeys[s] << '=' << Text(Masks()[i].load()) << '\n' << kKeys[s] << "_name=" << Names()[i] << '\n';
++    }
++    out.flush();
++    return out.good();
++}
++
++} // namespace KartShortcuts
 diff --git a/src/common/kart_tune_sites.h b/src/common/kart_tune_sites.h
 new file mode 100644
 index 0000000000..53119f50fd
@@ -2089,10 +2200,10 @@ index a1671ea1e7..3a27d2427e 100644
      void ClearInstructionCache() override;
 diff --git a/src/core/arm/recomp/ctgp_dx.cpp b/src/core/arm/recomp/ctgp_dx.cpp
 new file mode 100644
-index 0000000000..7aba70afa9
+index 0000000000..d2ec17ccfb
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_dx.cpp
-@@ -0,0 +1,1806 @@
+@@ -0,0 +1,1855 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/ctgp_dx.h"
 +
@@ -3707,7 +3818,56 @@ index 0000000000..7aba70afa9
 +}
 +
 +
++/// Course-info screen (race intro), right before the platform text is set (plugin FUN_16724): the author line. CTGP's layout has the
++/// panes T_Author and T_AuthorHeader, which the game does not know: without this they keep the layout's placeholder text ("WWW...").
++/// Every course has an author label, the game's own ones "Nintendo". x21 = layout, [x20 + 0x1a0] = course index.
++bool H_CourseAuthor(RecompHooks::HookContext& ctx, const Site&) {
++    const u64 layout = ctx.x[21], singleton = ctx.x[20];
++    if (!layout || !singleton) return false;
++    const u64 id = static_cast<u64>(ctx.system.ApplicationMemory().Read32(singleton + 0x1a0)) + 1;
++    const int author = id < g_courses.size() ? g_courses[id].author : -1;
++    const std::array<u64, 2> names{GuestSafeString(ctx.system, "T_Author"), GuestSafeString(ctx.system, "T_AuthorHeader")};
++    if (!names[0] || !names[1]) return false;
++    const std::array<int, 2> labels{author, author < 0 ? -1 : 600000};
++    const u64 empty = EmptyText(ctx.system);
++    const u64 find_pane = Fn(Ui().find_pane), set_text = Fn(Ui().set_text), message = Fn(Mf().message);
++    // per pane: find it, look its text up, set it
++    return CallGuestSeq(ctx, [=, at = size_t{0}, step = 0, pane = u64{0}](u64 r, GuestCall& next) mutable {
++        while (at < names.size()) {
++            switch (step) {
++            case 0:
++                step = 1;
++                next = {find_pane, {layout, names[at]}};
++                return true;
++            case 1:
++                pane = r;
++                if (!pane) { // not CTGP's layout
++                    step = 0;
++                    ++at;
++                    continue;
++                }
++                if (labels[at] < 0) {
++                    step = 0;
++                    ++at;
++                    next = {set_text, {pane, empty}};
++                    return true;
++                }
++                step = 2;
++                next = {message, {static_cast<u64>(static_cast<u32>(labels[at]))}};
++                return true;
++            default:
++                step = 0;
++                ++at;
++                next = {set_text, {pane, r ? r : empty}};
++                return true;
++            }
++        }
++        return false;
++    });
++}
++
 +constexpr NamedHandler kHandlers[] = {
++    {"course_author", H_CourseAuthor},
 +    {"name_getter", H_NameGetter}, {"scene_labels", H_SceneLabels}, {"cup_label", H_CupLabel},   {"cup_select", H_CupSelect},
 +    {"gp_slot", H_GpSlot},         {"gp_labels", H_GpLabels},       {"bgm_index", H_BgmIndex},   {"music_path", H_MusicPath},
 +    {"mapobj_path", H_MapObjPath}, {"speed_load", H_SpeedLoad},     {"speed_scale", H_SpeedScale}, {"timer_limit", H_TimerLimit},
@@ -3980,10 +4140,10 @@ index 0000000000..042efbc79a
 +} // namespace Core::CtgpDx
 diff --git a/src/core/arm/recomp/ctgp_sites.inc b/src/core/arm/recomp/ctgp_sites.inc
 new file mode 100644
-index 0000000000..7e4a7a10cb
+index 0000000000..3599a5e91f
 --- /dev/null
 +++ b/src/core/arm/recomp/ctgp_sites.inc
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,165 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// Generated by tools/ctgp/gen_sites.py from tools/ctgp/sites_401.txt (docs/CTGP_PORT.md). Do not edit by hand.
 +// CTGP_SITE(hook offset in 3.0.4 main, in 4.0.1 main, action, register, argument, 3.0.4 branch target, handler, note)
@@ -4125,29 +4285,30 @@ index 0000000000..7e4a7a10cb
 +CTGP_SITE(0x4c64f8, 0x4c9a04, Call, 0, 0x23, 0x0, "accept_mask", "0x50ae04")
 +CTGP_SITE(0x403f54, 0x405fa4, Set, 3, 0x300, 0x0, "", "0x436928 (0x96 -> 0x300)")
 +CTGP_SITE(0x404740, 0x406794, Set, 3, 0x150, 0x0, "", "0x437144 (0x46 -> 0x150)")
-+CTGP_SITE(0x50f708, 0x512e1c, Call, 0, 0x24, 0x0, "speedo_update", "ui 0x55d32c (speedometer text; lap counter part update, matched by its lap-byte compare)")
-+CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x25, 0x0, "speedo_init", "0x55ceb0 (speedometer panes)")
-+CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x26, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
-+CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x27, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
++CTGP_SITE(0x5098a8, 0x50cfbc, Call, 0, 0x24, 0x0, "course_author", "0x556ce0 (author line of the course-info screen)")
++CTGP_SITE(0x50f708, 0x512e1c, Call, 0, 0x25, 0x0, "speedo_update", "ui 0x55d32c (speedometer text; lap counter part update, matched by its lap-byte compare)")
++CTGP_SITE(0x50f29c, 0x5129b0, Call, 0, 0x26, 0x0, "speedo_init", "0x55ceb0 (speedometer panes)")
++CTGP_SITE(0x9c21c, 0x9d174, Call, 0, 0x27, 0x0, "bgm_none", "0xa5ce4 (CTGP race music 'None')")
++CTGP_SITE(0x52e548, 0x531d94, Call, 0, 0x28, 0x0, "race_timer", "0x57ee90 (CTGP Race Timer: the time trial timer in other races)")
 +CTGP_SITE(0x854ec8, 0x84820c, Cmp, 10, 0xbb, 0x0, "", "0x8de8ec (course count)")
 +CTGP_SITE(0x830d30, 0x824048, Cmp, 8, 0xbb, 0x0, "", "0x8b90bc (course count)")
-+CTGP_SITE(0x4e3fac, 0x4e75a8, Call, 0, 0x28, 0x0, "on_random", "0x52c6e8")
-+CTGP_SITE(0x830c8c, 0x823fa4, Call, 0, 0x29, 0x0, "on_str_course", "0x8b9010")
-+CTGP_SITE(0x830ae4, 0x823dfc, Call, 0, 0x2a, 0x0, "on_store_record", "0x8b8e68 (after the byte store)")
-+CTGP_SITE(0x830cf0, 0x824008, Call, 0, 0x2b, 0x0, "on_store_flagged", "0x8b9074 (after the byte store)")
-+CTGP_SITE(0x830c84, 0x823f9c, Call, 0, 0x2c, 0x0, "on_load_flag", "0x8b9004 (after the byte store)")
-+CTGP_SITE(0x85a77c, 0x84db08, Call, 22, 0x2d, 0x0, "on_load_course0", "0x8e4a24")
-+CTGP_SITE(0x855f00, 0x849244, Call, 8, 0x2e, 0x0, "on_load_course0", "0x8dfb94")
-+CTGP_SITE(0x857948, 0x84acb0, Call, 8, 0x2f, 0x0, "on_load_course0", "0x8e184c")
-+CTGP_SITE(0x85fda8, 0x85313c, Call, 8, 0x30, 0x0, "on_load_course8", "0x8ea698")
-+CTGP_SITE(0x857860, 0x84abc8, Call, 26, 0x31, 0x0, "on_load_course8", "0x8e1784")
-+CTGP_SITE(0x855e64, 0x8491a8, Call, 0, 0x32, 0x0, "on_store_course", "0x8dfac8")
-+CTGP_SITE(0x85a874, 0x84dc00, Call, 0, 0x33, 0x0, "on_update_course", "0x8e4b14")
-+CTGP_SITE(0x84d3b8, 0x8406fc, Call, 0, 0x34, 0x0, "on_key", "0x8d62d8 (CTGPDelux010101)")
-+CTGP_SITE(0x858454, 0x84b7bc, Call, 0, 0x35, 0x0, "on_vote", "0x8e2374")
++CTGP_SITE(0x4e3fac, 0x4e75a8, Call, 0, 0x29, 0x0, "on_random", "0x52c6e8")
++CTGP_SITE(0x830c8c, 0x823fa4, Call, 0, 0x2a, 0x0, "on_str_course", "0x8b9010")
++CTGP_SITE(0x830ae4, 0x823dfc, Call, 0, 0x2b, 0x0, "on_store_record", "0x8b8e68 (after the byte store)")
++CTGP_SITE(0x830cf0, 0x824008, Call, 0, 0x2c, 0x0, "on_store_flagged", "0x8b9074 (after the byte store)")
++CTGP_SITE(0x830c84, 0x823f9c, Call, 0, 0x2d, 0x0, "on_load_flag", "0x8b9004 (after the byte store)")
++CTGP_SITE(0x85a77c, 0x84db08, Call, 22, 0x2e, 0x0, "on_load_course0", "0x8e4a24")
++CTGP_SITE(0x855f00, 0x849244, Call, 8, 0x2f, 0x0, "on_load_course0", "0x8dfb94")
++CTGP_SITE(0x857948, 0x84acb0, Call, 8, 0x30, 0x0, "on_load_course0", "0x8e184c")
++CTGP_SITE(0x85fda8, 0x85313c, Call, 8, 0x31, 0x0, "on_load_course8", "0x8ea698")
++CTGP_SITE(0x857860, 0x84abc8, Call, 26, 0x32, 0x0, "on_load_course8", "0x8e1784")
++CTGP_SITE(0x855e64, 0x8491a8, Call, 0, 0x33, 0x0, "on_store_course", "0x8dfac8")
++CTGP_SITE(0x85a874, 0x84dc00, Call, 0, 0x34, 0x0, "on_update_course", "0x8e4b14")
++CTGP_SITE(0x84d3b8, 0x8406fc, Call, 0, 0x35, 0x0, "on_key", "0x8d62d8 (CTGPDelux010101)")
++CTGP_SITE(0x858454, 0x84b7bc, Call, 0, 0x36, 0x0, "on_vote", "0x8e2374")
 +CTGP_SITE(0x857318, 0x84a680, Nop, 0, 0x0, 0x0, "", "0x8e11b8")
 +CTGP_SITE(0x857534, 0x84a89c, Nop, 0, 0x0, 0x0, "", "0x8e1468")
-+CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x36, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
++CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x37, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
 index 0000000000..9d3bb0ff5f
