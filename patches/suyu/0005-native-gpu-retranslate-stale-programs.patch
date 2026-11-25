@@ -1,0 +1,61 @@
+diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
+index 39c640223..1c3ad6bac 100644
+--- a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
++++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
+@@ -2351,7 +2351,7 @@ private:
+         const std::vector<u64>& datas = keyed;
+         if (const auto it = programs.find(datas); it != programs.end()) {
+             if (it->second.speculative) {
+-                if (SpeculationHolds(it->second, st.textures)) {
++                if (SpeculationHolds(it->second, stages, st.textures)) {
+                     it->second.speculative = false;
+                 } else {
+                     DestroyProgram(it->second);
+@@ -2370,9 +2370,21 @@ private:
+         return &entry;
+     }
+ 
+-    /// A speculative program is right when every texture slot its translation
+-    /// asked about still reads as 2D with the real bindings.
+-    static bool SpeculationHolds(const ProgramEntry& e, const TextureTable& textures) {
++    /// A speculative program is right when its code is still the code it was
++    /// translated from, and every texture slot its translation asked about still
++    /// reads as 2D with the real bindings.
++    static bool SpeculationHolds(const ProgramEntry& e, const std::vector<u64>& datas, const TextureTable& textures) {
++        // Programs are translated when the game sets their shaders, which can be before the code is in memory. The GP trophy
++        // ceremony's fragment shader was read while its memory still held something else, translated as a vertex shader, and
++        // the program reached the NVIDIA driver with two vertex stages, which crashed it.
++        if (e.code_hash != CodeHash(datas)) {
++            static std::atomic<int> logged{0};
++            if (logged++ < 8) {
++                LOG_INFO(Frontend, "nvn-host vulkan: program {:016x} was translated before its code was in place: translated again",
++                         e.code_hash);
++            }
++            return false;
++        }
+         for (const auto& [stage, slot] : e.texture_queries) {
+             const u32 raw = static_cast<u32>(textures[stage][slot]);
+             if (Core::NvnHost::TextureTypeForHandle(raw) != Shader::TextureType::Color2D) {
+@@ -2508,7 +2520,7 @@ private:
+             case Op::Draw:
+                 if (bound.empty()) break;
+                 if (const auto it = programs.find(bound); it != programs.end() && it->second.speculative) {
+-                    if (SpeculationHolds(it->second, textures)) {
++                    if (SpeculationHolds(it->second, bound, textures)) {
+                         it->second.speculative = false;
+                     } else {
+                         DestroyProgram(it->second);
+@@ -2748,11 +2760,12 @@ private:
+             const u64 handle = textures[stage][TextureSlot(offset)];
+             return static_cast<u32>(offset % 8 == 0 ? handle : handle >> 32);
+         };
++        // Hashed before translating: code that changes meanwhile then fails SpeculationHolds instead of passing it.
++        entry.code_hash = CodeHash(datas);
+         const auto translated = Core::NvnHost::TranslateProgramStages(reader, datas, cbuf, uint_outputs);
+         std::sort(queries.begin(), queries.end());
+         queries.erase(std::unique(queries.begin(), queries.end()), queries.end());
+         entry.texture_queries = std::move(queries);
+-        entry.code_hash = CodeHash(datas);
+         for (const auto& t : translated) {
+             if (!t.ok) {
+                 entry.error = t.error;
