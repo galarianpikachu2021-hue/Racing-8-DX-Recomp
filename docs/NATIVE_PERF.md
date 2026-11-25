@@ -150,3 +150,24 @@ punches holes for whole zero pages would catch it; that is the native-SDK direct
 (`Tegra::GPU`, memory manager, macro engine: ~40 MB, unused with the native renderer), and the speculative shader builder (~160 MB
 with the driver's compiler). Windows: hole punching is Linux-only (Windows keeps memset; `DiscardVirtualMemory`/`VirtualAlloc(MEM_RESET)`
 would be the equivalent), the fiber-stack change applies to both.
+
+## Steam Deck logs (2026-11-25): per-draw CPU cost
+
+A Deck race (4.0.1, handheld quality, 800p to 1440p) was CPU-bound: frame time about 12-13 ms + 10.5-11.5 us per draw, the same at 800p
+and 1080p (1,000 draws = 43-44 fps). `GPU frame time` in the log includes the gaps while the CPU records (the frame is submitted in
+parts), so it overstates the GPU there. The Deck's game thread is busy, then waits for the worker that records (54% of its sleeps) and the
+thread in `nvnQueueSubmitCommands` (18-20%).
+
+Reproduction here: `local/exp/deckbench.sh <label> <engine>` (4 cores, 720p, `KARTRECOMP_NVN_NO_PACING=2700` lifts the cap from frame 2700
+on, average over frames 3000-9000; same shape as the Deck, 2.9x faster). `local/exp/decktab.py <log>` tabulates fps against draws;
+`local/exp/waitcorr.py <wall profile> <engine>` shows who runs while the game thread sleeps.
+
+| step | ms/frame |
+|---|---|
+| before | 7.29-7.73 (5 runs) |
+| d1: hook table without locks, recording calls without the model lock, submit outside it, fewer static-buffer probes, old lists freed on the render thread | 6.55-6.86 |
+| d2: `Command` 400 -> 136 bytes | 6.0-6.7 (9 of 10 runs; one run was 8.8 from frame ~4200 on, unexplained) |
+
+`program_lock` is taken after `State::lock`, never before: the first d1 held it across `Append` and deadlocked within a minute.
+`KARTRECOMP_HUGE_CODE=1/2/3` (2 MiB pages for the game's code / + its tables / + all modules, about 0.5 GB more memory): no clear gain on a Ryzen 9700X;
+off by default, to be tried on the Deck (Zen 2, small TLBs).

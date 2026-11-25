@@ -4311,10 +4311,10 @@ index 0000000000..3599a5e91f
 +CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x37, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
-index 0000000000..9d3bb0ff5f
+index 0000000000..fce2ab81bb
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.cpp
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,247 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <array>
 +#include "core/arm/recomp/host_hooks.h"
@@ -4361,6 +4361,53 @@ index 0000000000..9d3bb0ff5f
 +// Immutable once published: Dispatch takes a reference instead of copying.
 +std::unordered_map<u64, std::shared_ptr<const std::vector<HookFn>>> g_hooks;
 +std::unordered_map<u64, std::vector<ReturnWatch>> g_returns;
++std::atomic<u32> g_return_count{0}; ///< addresses in g_returns
++
++// What Dispatch reads: the graphics calls come through here thousands of times a frame from several threads, and a shared lock plus
++// a reference count per call bounced their cache lines between the cores. Slots are only ever added (a removed hook leaves an empty
++// list), and a list that was replaced stays alive (g_retired), so readers need neither.
++struct Slot {
++    std::atomic<u64> pc{0};
++    std::atomic<const std::vector<HookFn>*> hooks{nullptr};
++};
++constexpr size_t kSlots = 1u << 14;
++std::array<Slot, kSlots> g_slots{};
++std::atomic<bool> g_slots_full{false}; ///< then Dispatch looks in g_hooks under the lock
++size_t g_slots_used = 0;
++std::vector<std::shared_ptr<const std::vector<HookFn>>> g_retired;
++
++size_t SlotIndex(u64 pc) {
++    return static_cast<size_t>(((pc >> 2) * 0x9E3779B97F4A7C15ULL) >> 50) & (kSlots - 1);
++}
++
++/// g_lock held. `hooks` must stay alive for good (g_hooks or g_retired).
++void PublishSlot(u64 pc, const std::vector<HookFn>* hooks) {
++    for (size_t i = SlotIndex(pc);; i = (i + 1) & (kSlots - 1)) {
++        const u64 at = g_slots[i].pc.load(std::memory_order_relaxed);
++        if (at == pc) {
++            g_slots[i].hooks.store(hooks, std::memory_order_release);
++            return;
++        }
++        if (at != 0) continue;
++        if (!hooks) return;
++        if (g_slots_used >= kSlots / 2) {
++            g_slots_full.store(true, std::memory_order_release);
++            return;
++        }
++        ++g_slots_used;
++        g_slots[i].hooks.store(hooks, std::memory_order_relaxed);
++        g_slots[i].pc.store(pc, std::memory_order_release);
++        return;
++    }
++}
++
++const std::vector<HookFn>* FindSlot(u64 pc) {
++    for (size_t i = SlotIndex(pc);; i = (i + 1) & (kSlots - 1)) {
++        const u64 at = g_slots[i].pc.load(std::memory_order_acquire);
++        if (at == pc) return g_slots[i].hooks.load(std::memory_order_acquire);
++        if (at == 0) return nullptr;
++    }
++}
 +
 +// Return traps live in a range no guest module maps, aligned like code.
 +constexpr u64 kTrapBase = 0xFFFF'FFFE'0000'0000ULL;
@@ -4373,6 +4420,7 @@ index 0000000000..9d3bb0ff5f
 +u64 g_next_trap = 0;
 +
 +void Refresh() {
++    g_return_count.store(static_cast<u32>(g_returns.size()), std::memory_order_release);
 +    g_active.store(!g_hooks.empty() || !g_returns.empty() || !g_traps.empty(),
 +                   std::memory_order_release);
 +}
@@ -4386,18 +4434,28 @@ index 0000000000..9d3bb0ff5f
 +    auto& slot = g_hooks[pc];
 +    auto next = slot ? std::make_shared<std::vector<HookFn>>(*slot) : std::make_shared<std::vector<HookFn>>();
 +    next->push_back(std::move(fn));
++    if (slot) g_retired.push_back(std::move(slot));
 +    slot = std::move(next);
++    PublishSlot(pc, slot.get());
 +    Refresh();
 +}
 +
 +void Remove(u64 pc) {
 +    std::unique_lock lock{g_lock};
-+    g_hooks.erase(pc);
++    if (const auto it = g_hooks.find(pc); it != g_hooks.end()) {
++        PublishSlot(pc, nullptr);
++        g_retired.push_back(std::move(it->second)); // a thread may be running it
++        g_hooks.erase(it);
++    }
 +    Refresh();
 +}
 +
 +void Clear() {
 +    std::unique_lock lock{g_lock};
++    for (auto& [pc, hooks] : g_hooks) {
++        PublishSlot(pc, nullptr);
++        g_retired.push_back(std::move(hooks));
++    }
 +    g_hooks.clear();
 +    g_returns.clear();
 +    Refresh();
@@ -4455,18 +4513,19 @@ index 0000000000..9d3bb0ff5f
 +        return false;
 +    }
 +    std::function<void(HookContext&)> on_return;
-+    std::shared_ptr<const std::vector<HookFn>> hooks;
++    const std::vector<HookFn>* hooks = FindSlot(pc);
++    std::shared_ptr<const std::vector<HookFn>> held;
 +    bool has_return = false;
-+    {
++    if (g_return_count.load(std::memory_order_acquire) != 0 || (!hooks && g_slots_full.load(std::memory_order_acquire))) {
 +        std::shared_lock lock{g_lock};
 +        has_return = g_returns.contains(pc);
-+        const auto it = g_hooks.find(pc);
-+        if (!has_return && it == g_hooks.end()) {
-+            return false;
++        if (const auto it = g_hooks.find(pc); !hooks && it != g_hooks.end()) {
++            held = it->second;
++            hooks = held.get();
 +        }
-+        if (it != g_hooks.end()) {
-+            hooks = it->second;
-+        }
++    }
++    if (!has_return && !hooks) {
++        return false;
 +    }
 +    // Return watches are matched by stack pointer, so a block reached by some
 +    // other path (or by another thread) does not consume them.
@@ -16707,10 +16766,10 @@ index a7dc92a2e3..6a761feb42 100644
                      "Attempted to read input state, but applet resource is not initialized!");
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..3e1caf4a24
+index 0000000000..15957109ff
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
-@@ -0,0 +1,1456 @@
+@@ -0,0 +1,1532 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/nvn_host/nvn_host.h"
 +#include "common/settings.h"
@@ -16755,6 +16814,11 @@ index 0000000000..3e1caf4a24
 +
 +struct State {
 +    std::mutex lock;
++    /// Taken before `lock`, by submits and presents only: the backends' frame building runs under this one, so a submit (2-4 ms on a
++    /// Steam Deck) does not hold up the threads recording the next command lists.
++    std::mutex submit_lock;
++    std::shared_mutex program_lock; ///< `programs` and `polygon_offset_enables` (readers record without `lock`); taken after `lock`, never before
++    std::vector<CommandList> retired; ///< replaced lists, freed with the next frame (on the render thread)
 +    // KARTRECOMP_NVN_COUNTER_PROBE=1 (research): what the counter reports hold a few frames after they were recorded.
 +    std::vector<std::tuple<u32, u64, u64>> counter_probe; ///< type, GPU address, frame
 +    u64 probe_frame = 0;
@@ -16890,7 +16954,36 @@ index 0000000000..3e1caf4a24
 +    return DecodeTextureStruct(Mem(ctx), texture);
 +}
 +
++/// Set while a handler that needs nothing but its own command buffer runs without State::lock.
++thread_local bool t_unlocked = false;
++
++/// Appends without State::lock: a command buffer is recorded by one thread at a time and the map's nodes do not move, so a thread may
++/// keep a pointer to its own list until a recording starts or ends anywhere (the generation changes).
++void AppendUnlocked(State& st, u64 cmdbuf, Command&& cmd) {
++    struct RecordingCache {
++        u64 cmdbuf = 0;
++        std::vector<Command>* list = nullptr;
++        u64 generation = ~u64{0};
++    };
++    static thread_local RecordingCache cache;
++    const u64 gen = st.recording_generation.load(std::memory_order_acquire);
++    if (cache.list && cache.cmdbuf == cmdbuf && cache.generation == gen) {
++        cache.list->push_back(std::move(cmd));
++        return;
++    }
++    std::scoped_lock lock{st.lock};
++    cache = {};
++    if (const auto it = st.recording.find(cmdbuf); it != st.recording.end()) {
++        it->second.push_back(std::move(cmd));
++        cache = {cmdbuf, &it->second, st.recording_generation.load(std::memory_order_relaxed)};
++    }
++}
++
 +void Append(State& s, u64 cmdbuf, Command&& cmd) {
++    if (t_unlocked) {
++        AppendUnlocked(s, cmdbuf, std::move(cmd));
++        return;
++    }
 +    // Commands outside Begin/EndRecording are not part of any list; ignore them.
 +    if (const auto it = s.recording.find(cmdbuf); it != s.recording.end()) {
 +        it->second.push_back(std::move(cmd));
@@ -16901,7 +16994,7 @@ index 0000000000..3e1caf4a24
 +    out.lists.push_back(list);
 +    for (const auto& cmd : *list) {
 +        if (cmd.op == Op::Call) {
-+            if (cmd.call && depth < 8) FlattenList(cmd.call, out, depth + 1);
++            if (const auto& call = cmd.Ex().call; call && depth < 8) FlattenList(call, out, depth + 1);
 +        } else {
 +            out.commands.push_back(&cmd);
 +        }
@@ -16918,6 +17011,19 @@ index 0000000000..3e1caf4a24
 +}
 +
 +std::function<void()> g_frame_displayed;
++
++/// What this thread's nvnQueueSubmitCommands collected, until the backends have taken it.
++thread_local SubmitData t_submit;
++
++/// submit_lock held, `lock` not.
++void SubmitToBackends(State& s) {
++    for (size_t i = 0; i < s.backends.size(); ++i) {
++        const auto tb = std::chrono::steady_clock::now();
++        s.backends[i]->Submit(t_submit);
++        s.submit_backend_ns[std::min<size_t>(i, 3)] += static_cast<u64>((std::chrono::steady_clock::now() - tb).count());
++    }
++    t_submit = {};
++}
 +
 +/// Native queue: set by a hook that must wait (outside the model lock) before returning to the game.
 +thread_local std::chrono::steady_clock::time_point t_wait_until{};
@@ -17093,7 +17199,7 @@ index 0000000000..3e1caf4a24
 +        for (const Command* c : submit.commands) {
 +            ++ops[static_cast<int>(c->op)];
 +            if (c->op == Op::SetRenderTargets) {
-+                for (const auto& t : c->colors) {
++                for (const auto& t : c->Ex().colors) {
 +                    if (t.valid) {
 +                        targets.insert({t.width, t.height, t.format});
 +                        storages.insert({t.pool, t.offset});
@@ -17321,7 +17427,7 @@ index 0000000000..3e1caf4a24
 +        Command c{.op = Op::SetRenderTargets};
 +        const u32 count = Arg32(ctx, 1);
 +        for (u32 i = 0; i < count && i < 8; ++i) {
-+            c.colors.push_back(ResolveTexture(ctx, s, Mem(ctx).Read64(ctx.x[2] + i * 8)));
++            c.MutableEx().colors.push_back(ResolveTexture(ctx, s, Mem(ctx).Read64(ctx.x[2] + i * 8)));
 +            // NVNtextureView (learned from its setters): word0 = flags (bit0 levels,
 +            // bit1 layers, bit2 format, ...) | base level << 8 | level count << 16;
 +            // word1 = base layer | layer count << 16; word2 = format override.
@@ -17334,17 +17440,17 @@ index 0000000000..3e1caf4a24
 +                    if (w0 & 4) view_format = Mem(ctx).Read32(view + 8);
 +                }
 +            }
-+            c.color_levels.push_back(level);
-+            c.color_view_formats.push_back(view_format);
-+            c.color_layers.push_back(layer);
++            c.MutableEx().color_levels.push_back(level);
++            c.MutableEx().color_view_formats.push_back(view_format);
++            c.MutableEx().color_layers.push_back(layer);
 +            if (KartRe::Enabled() && ctx.x[3]) {
 +                static std::atomic<int> shown{0};
 +                const u64 view = Mem(ctx).Read64(ctx.x[3] + i * 8);
-+                const auto& tt = c.colors.back();
++                const auto& tt = c.MutableEx().colors.back();
 +                if (view && (tt.width == 960 || tt.width == 480) && shown.fetch_add(1) < 400) {
 +                    u32 w[12]{};
 +                    Mem(ctx).ReadBlock(view, w, sizeof(w));
-+                    const auto& t = c.colors.back();
++                    const auto& t = c.MutableEx().colors.back();
 +                    KartRe::Log("rt-view levels={} {}x{} f{} slot {} view {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
 +                                "{:08x} {:08x} {:08x} {:08x}",
 +                                t.levels, t.width, t.height, t.format, i, w[0], w[1], w[2], w[3], w[4], w[5],
@@ -17353,9 +17459,9 @@ index 0000000000..3e1caf4a24
 +            }
 +        }
 +        if (ctx.x[4] != 0) {
-+            c.depth = ResolveTexture(ctx, s, ctx.x[4]);
++            c.MutableEx().depth = ResolveTexture(ctx, s, ctx.x[4]);
 +            if (ctx.x[5] != 0 && (Mem(ctx).Read32(ctx.x[5]) & 2)) {
-+                c.depth_layer = Mem(ctx).Read32(ctx.x[5] + 4) & 0xFFFF;
++                c.MutableEx().depth_layer = Mem(ctx).Read32(ctx.x[5] + 4) & 0xFFFF;
 +            }
 +        }
 +        Append(s, ctx.x[0], std::move(c));
@@ -17388,7 +17494,7 @@ index 0000000000..3e1caf4a24
 +            const u64 handle = Mem(ctx).Read64(ctx.x[2] + i * 8);
 +            if (const auto l = s.lists.find(handle); l != s.lists.end() && l->second) {
 +                Command c{.op = Op::Call};
-+                c.call = l->second; // shared, expanded at submit
++                c.MutableEx().call = l->second; // shared, expanded at submit
 +                it->second.push_back(std::move(c));
 +            } else {
 +                ++s.missing_call_handles;
@@ -17431,20 +17537,26 @@ index 0000000000..3e1caf4a24
 +        const auto now = std::chrono::steady_clock::now();
 +        while (!s.display_times.empty() && s.display_times.front() <= now) s.display_times.pop_front();
 +        const size_t may_wait = count >= 2 ? count - 2 : 0;
-+        static const bool no_pacing = std::getenv("KARTRECOMP_NVN_NO_PACING") != nullptr; // experiments: never wait here
-+        if (!no_pacing && s.display_times.size() > may_wait) t_wait_until = s.display_times[s.display_times.size() - may_wait - 1];
++        // Experiments: KARTRECOMP_NVN_NO_PACING=<n>: never wait here from the game's frame n on (1: always).
++        static const u64 no_pacing_from = [] {
++            const char* v = std::getenv("KARTRECOMP_NVN_NO_PACING");
++            return v ? std::strtoull(v, nullptr, 10) : ~u64{0};
++        }();
++        if (s.probe_frame < no_pacing_from && s.display_times.size() > may_wait) t_wait_until = s.display_times[s.display_times.size() - may_wait - 1];
 +    };
 +
 +    // Queue
 +    h["nvnQueueSubmitCommands"] = [](HookContext& ctx, State& s) {
++        // The flattening only; the backends take it in SubmitToBackends, without State::lock.
 +        const auto t0 = std::chrono::steady_clock::now();
-+        SubmitData flat;
++        SubmitData& flat = t_submit;
++        flat = {};
++        flat.lists.swap(s.retired);
 +        const u32 count = Arg32(ctx, 1);
 +        for (u32 i = 0; i < count && i < 256; ++i) {
 +            Flatten(s, Mem(ctx).Read64(ctx.x[2] + i * 8), flat, 0);
 +        }
-+        const auto t1 = std::chrono::steady_clock::now();
-+        s.submit_flatten_ns += static_cast<u64>((t1 - t0).count());
++        s.submit_flatten_ns += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
 +        if (NativeQueue()) {
 +            // Counter reports: what the GPU wrote for this game (value 0, then the GPU time) when the submission is taken.
 +            for (const Command* c : flat.commands) {
@@ -17452,11 +17564,6 @@ index 0000000000..3e1caf4a24
 +                const u64 report[2]{0, GpuTicks(ctx.system)};
 +                WriteGpu(s, c->address, report, sizeof(report));
 +            }
-+        }
-+        for (size_t i = 0; i < s.backends.size(); ++i) {
-+            const auto tb = std::chrono::steady_clock::now();
-+            s.backends[i]->Submit(flat);
-+            s.submit_backend_ns[std::min<size_t>(i, 3)] += static_cast<u64>((std::chrono::steady_clock::now() - tb).count());
 +        }
 +    };
 +    h["nvnQueuePresentTexture"] = [](HookContext& ctx, State& s) {
@@ -17530,18 +17637,26 @@ index 0000000000..3e1caf4a24
 +                b->OnProgram(datas);
 +            }
 +        }
++        std::unique_lock lock{s.program_lock};
 +        s.programs[ctx.x[0]] = std::move(datas);
 +    };
-+    h["nvnProgramFinalize"] = [](HookContext& ctx, State& s) { s.programs.erase(ctx.x[0]); };
++    h["nvnProgramFinalize"] = [](HookContext& ctx, State& s) {
++        std::unique_lock lock{s.program_lock};
++        s.programs.erase(ctx.x[0]);
++    };
 +    h["nvnCommandBufferBindProgram"] = [](HookContext& ctx, State& s) {
 +        Command c{.op = Op::BindProgram};
-+        if (const auto it = s.programs.find(ctx.x[1]); it != s.programs.end()) {
-+            c.shaders = it->second;
++        {
++            std::shared_lock lock{s.program_lock};
++            if (const auto it = s.programs.find(ctx.x[1]); it != s.programs.end()) {
++                c.shader_count = std::min<size_t>(it->second.size(), 6);
++                std::copy_n(it->second.begin(), c.shader_count, c.shader_data);
++            }
 +        }
 +        c.stage = Arg32(ctx, 2);
 +        if (c.stage & 0x20) {
 +            std::string datas;
-+            for (u64 d : c.shaders) datas += fmt::format(" {:#x}", d);
++            for (u64 d : c.Shaders()) datas += fmt::format(" {:#x}", d);
 +            KartRe::Log("nvn-bind-compute program={:#x} datas{}", ctx.x[1], datas);
 +        }
 +        Append(s, ctx.x[0], std::move(c));
@@ -17602,7 +17717,7 @@ index 0000000000..3e1caf4a24
 +        if (dst.valid && region[3] > 0 && region[4] > 0) {
 +            Command c{.op = Op::CopyBufferToTexture};
 +            c.address = ctx.x[1];
-+            c.colors.push_back(dst);
++            c.MutableEx().colors.push_back(dst);
 +            const auto stride = [&ctx](const auto& map) -> u32 {
 +                const auto it = map.find(ctx.x[0]);
 +                return it == map.end() ? 0 : static_cast<u32>(it->second);
@@ -17628,8 +17743,8 @@ index 0000000000..3e1caf4a24
 +        c.size = ctx.x[2];
 +        c.raw = ctx.x[3];
 +        const u64 bytes = std::min<u64>(ctx.x[4], 0x10000);
-+        c.bytes.resize(bytes);
-+        Mem(ctx).ReadBlock(ctx.x[5], c.bytes.data(), bytes);
++        c.MutableEx().bytes.resize(bytes);
++        Mem(ctx).ReadBlock(ctx.x[5], c.MutableEx().bytes.data(), bytes);
 +        static std::atomic<int> shown{0};
 +        if (shown.fetch_add(1) < 30) {
 +            KartRe::Log("update-ubo x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x}", ctx.x[1],
@@ -17667,16 +17782,21 @@ index 0000000000..3e1caf4a24
 +    // state object) rather than decoded: c.index = NVN enables (1 point, 2 line,
 +    // 4 fill). The game uses them for decals and shadow maps.
 +    h["nvnPolygonStateSetPolygonOffsetEnables"] = [](HookContext& ctx, State& s) {
++        std::unique_lock lock{s.program_lock};
 +        s.polygon_offset_enables[ctx.x[0]] = static_cast<u32>(ctx.x[1]);
 +    };
 +    h["nvnPolygonStateSetDefaults"] = [](HookContext& ctx, State& s) {
++        std::unique_lock lock{s.program_lock};
 +        s.polygon_offset_enables.erase(ctx.x[0]);
 +    };
 +    h["nvnCommandBufferBindPolygonState"] = [](HookContext& ctx, State& s) {
 +        Command c{.op = Op::BindPolygon};
 +        c.raw = Mem(ctx).Read32(ctx.x[1]);
-+        const auto it = s.polygon_offset_enables.find(ctx.x[1]);
-+        c.index = it == s.polygon_offset_enables.end() ? 0 : it->second;
++        {
++            std::shared_lock lock{s.program_lock}; // released before Append, which may take State::lock (the setters hold that first)
++            const auto it = s.polygon_offset_enables.find(ctx.x[1]);
++            c.index = it == s.polygon_offset_enables.end() ? 0 : it->second;
++        }
 +        Append(s, ctx.x[0], std::move(c));
 +    };
 +    // (cmdbuf, const float color[4]): the blend constant (bloom upsampling adds
@@ -17828,6 +17948,22 @@ index 0000000000..3e1caf4a24
 +    return names.contains(name);
 +}
 +
++/// Calls whose handler reads its arguments and appends to its own command buffer, nothing else: they run without State::lock
++/// (about 8,000 a race frame, from several game threads at once).
++bool RecordsOnly(const std::string& name) {
++    static const std::set<std::string> names{
++        "nvnCommandBufferBindProgram", "nvnCommandBufferBindVertexAttribState", "nvnCommandBufferBindVertexStreamState",
++        "nvnCommandBufferBindVertexBuffer", "nvnCommandBufferBindUniformBuffer", "nvnCommandBufferBindStorageBuffer",
++        "nvnCommandBufferBindTexture", "nvnCommandBufferBindDepthStencilState", "nvnCommandBufferBindColorState",
++        "nvnCommandBufferBindChannelMaskState", "nvnCommandBufferBindBlendState", "nvnCommandBufferBindPolygonState",
++        "nvnCommandBufferSetBlendColor", "nvnCommandBufferSetDepthClamp", "nvnCommandBufferSetDepthRange",
++        "nvnCommandBufferSetPolygonOffsetClamp", "nvnCommandBufferSetViewport", "nvnCommandBufferSetViewports",
++        "nvnCommandBufferSetScissor", "nvnCommandBufferSetScissors", "nvnCommandBufferSetRasterizerDiscard",
++        "nvnCommandBufferUpdateUniformBuffer",
++    };
++    return names.contains(name);
++}
++
 +/// Returns from a replaced NVN call (all are void): resume at the caller.
 +bool ReturnFromCall(HookContext& ctx) {
 +    ctx.pc = ctx.x[30];
@@ -17846,7 +17982,9 @@ index 0000000000..3e1caf4a24
 +                s.recording_generation.fetch_add(1, std::memory_order_release);
 +                if (!node.empty()) {
 +                    s.recorded_size[cmdbuf] = node.mapped().size();
-+                    s.lists[ret.x[0]] = std::make_shared<const std::vector<Command>>(std::move(node.mapped()));
++                    CommandList& list = s.lists[ret.x[0]];
++                    if (list) s.retired.push_back(std::move(list));
++                    list = std::make_shared<const std::vector<Command>>(std::move(node.mapped()));
 +                }
 +            });
 +            return false;
@@ -17981,6 +18119,7 @@ index 0000000000..3e1caf4a24
 +    std::vector<std::unique_ptr<Backend>> doomed;
 +    {
 +        auto& s = S();
++        std::scoped_lock submit{s.submit_lock};
 +        std::scoped_lock lock{s.lock};
 +        doomed.swap(s.backends);
 +    }
@@ -17989,6 +18128,7 @@ index 0000000000..3e1caf4a24
 +
 +void AddBackend(std::unique_ptr<Backend> backend) {
 +    auto& s = S();
++    std::scoped_lock submit{s.submit_lock};
 +    std::scoped_lock lock{s.lock};
 +    s.backends.push_back(std::move(backend));
 +}
@@ -18073,31 +18213,12 @@ index 0000000000..3e1caf4a24
 +        const bool replaced = Replaced(name);
 +        RecompHooks::Install(address, [entry, op, kind, replaced](HookContext& ctx) {
 +            auto& st = S();
-+            Command c{.op = op, .entry = entry, .draw = kind};
++            Command c{.op = op, .draw = kind, .entry = entry};
 +            std::memcpy(c.args, ctx.x + 1, sizeof(c.args));
 +            if (op == Op::Dispatch) {
 +                KartRe::Log("nvn-dispatch groups={}x{}x{}", ctx.x[1], ctx.x[2], ctx.x[3]);
 +            }
-+            // Draws are most of the NVN calls, and in split-screen several game threads record at once: append without the
-+            // global lock. A command buffer is recorded by one thread at a time, and the map's nodes do not move, so a thread
-+            // may keep a pointer to its own list until a recording starts or ends anywhere (the generation changes).
-+            struct RecordingCache {
-+                u64 cmdbuf = 0;
-+                std::vector<Command>* list = nullptr;
-+                u64 generation = ~u64{0};
-+            };
-+            static thread_local RecordingCache cache;
-+            const u64 gen = st.recording_generation.load(std::memory_order_acquire);
-+            if (cache.list && cache.cmdbuf == ctx.x[0] && cache.generation == gen) {
-+                cache.list->push_back(std::move(c));
-+            } else {
-+                std::scoped_lock lock{st.lock};
-+                cache = {};
-+                if (const auto rit = st.recording.find(ctx.x[0]); rit != st.recording.end()) {
-+                    rit->second.push_back(std::move(c));
-+                    cache = {ctx.x[0], &rit->second, st.recording_generation.load(std::memory_order_relaxed)};
-+                }
-+            }
++            AppendUnlocked(st, ctx.x[0], std::move(c));
 +            return replaced && ReturnFromCall(ctx);
 +        });
 +        return;
@@ -18112,10 +18233,22 @@ index 0000000000..3e1caf4a24
 +    const Handler& handler = it->second;
 +    const bool present = name == "nvnQueuePresentTexture";
 +    const bool replaced = Replaced(name);
++    if (RecordsOnly(name) && !KartRe::Enabled()) {
++        RecompHooks::Install(address, [&handler, replaced](HookContext& ctx) {
++            t_unlocked = true;
++            handler(ctx, S());
++            t_unlocked = false;
++            return replaced && ReturnFromCall(ctx);
++        });
++        return;
++    }
 +    auto* timing = &S().hook_time[it->first]; // node-based map: stable address
-+    RecompHooks::Install(address, [&handler, present, timing, replaced](HookContext& ctx) {
++    const bool submit = name == "nvnQueueSubmitCommands";
++    RecompHooks::Install(address, [&handler, present, submit, timing, replaced](HookContext& ctx) {
 +        auto& st = S();
 +        std::vector<Backend*> throttle;
++        std::unique_lock submit_lock{st.submit_lock, std::defer_lock};
++        if (submit || present) submit_lock.lock();
 +        {
 +            std::scoped_lock lock{st.lock};
 +            // Times 1 call in 16 (scaled below): two clock reads per bind cost more than most handlers.
@@ -18148,6 +18281,8 @@ index 0000000000..3e1caf4a24
 +                for (auto& [n, v] : st.hook_time) v = {};
 +            }
 +        }
++        if (submit) SubmitToBackends(st);
++        if (submit_lock.owns_lock()) submit_lock.unlock();
 +        // Outside the lock: a pacing backend's render thread reads the model.
 +        for (Backend* b : throttle) {
 +            b->Throttle();
@@ -18169,10 +18304,10 @@ index 0000000000..3e1caf4a24
 +} // namespace Core::NvnHost
 diff --git a/src/core/nvn_host/nvn_host.h b/src/core/nvn_host/nvn_host.h
 new file mode 100644
-index 0000000000..3d78e2fddb
+index 0000000000..97affebe32
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.h
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,244 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: nvn-host, the native NVN implementation (shadow stage).
 +//
@@ -18194,6 +18329,7 @@ index 0000000000..3d78e2fddb
 +#include <functional>
 +
 +#include <memory>
++#include <span>
 +#include <string>
 +#include <vector>
 +
@@ -18272,8 +18408,10 @@ index 0000000000..3d78e2fddb
 +    Other,
 +};
 +
-+struct Command {
-+    Op op{};
++struct Command;
++
++/// What only a few commands of a frame carry (render target changes, copies, nested lists).
++struct CommandExtra {
 +    // SetRenderTargets
 +    std::vector<TextureDesc> colors;
 +    TextureDesc depth;
@@ -18285,28 +18423,53 @@ index 0000000000..3d78e2fddb
 +    /// a 2-layer HDR buffer are rendered one layer at a time); same for depth.
 +    std::vector<u32> color_layers;
 +    u32 depth_layer = 0;
++    std::vector<u8> bytes; ///< UpdateUniformBuffer payload, captured at record time
++    std::shared_ptr<const std::vector<Command>> call; ///< Op::Call
++};
++
++/// A race frame records about 8,000 of these on the game's own threads and drops them a frame or two later, so it is kept small
++/// (136 bytes): the fields of different operations share `args`, and CommandExtra is only there when something needs it.
++struct Command {
++    Op op{};
++    DrawKind draw = DrawKind::Other;
++    u16 entry = 0; ///< Draw: which entry point
 +    // ClearColor: index + rgba (as raw float bits) + mask; ClearDepthStencil: depth/stencil
 +    u32 index = 0;
-+    float rgba[4]{};
 +    u32 mask = 0;
-+    float depth_value = 0;
-+    u32 stencil_value = 0;
-+    // Draw: which entry point and its scalar arguments (x1..x7 as passed)
-+    u16 entry = 0;
-+    DrawKind draw = DrawKind::Other;
-+    u64 args[7]{};
-+    // Binds
-+    std::vector<u64> shaders;
-+    std::vector<u32> words;
 +    u32 stage = 0;
++    union {
++        u64 args[7]{}; ///< Draw, Dispatch: the scalar arguments (x1..x7 as passed)
++        struct {
++            float rgba[4];
++            s32 rect[4]; ///< Viewport, Scissor
++            float depth_value;
++            u32 stencil_value;
++        };
++        struct {
++            u64 shader_data[6]; ///< BindProgram
++            u64 shader_count;
++        };
++    };
 +    u64 address = 0;
 +    u64 size = 0;
 +    u64 handle = 0;
 +    u64 raw = 0;
-+    s32 rect[4]{};
-+    std::vector<u8> bytes; ///< UpdateUniformBuffer payload, captured at record time
-+    std::shared_ptr<const std::vector<Command>> call; ///< Op::Call
++    std::vector<u32> words; ///< binds of states; copies
++    std::unique_ptr<CommandExtra> extra;
++
++    std::span<const u64> Shaders() const {
++        return {shader_data, static_cast<size_t>(shader_count)};
++    }
++    const CommandExtra& Ex() const {
++        static const CommandExtra none{};
++        return extra ? *extra : none;
++    }
++    CommandExtra& MutableEx() {
++        if (!extra) extra = std::make_unique<CommandExtra>();
++        return *extra;
++    }
 +};
++static_assert(sizeof(Command) <= 136);
 +
 +/// Recorded command lists are immutable once recording ends and are shared, not
 +/// copied: a submit carries pointers into them plus references keeping them alive.

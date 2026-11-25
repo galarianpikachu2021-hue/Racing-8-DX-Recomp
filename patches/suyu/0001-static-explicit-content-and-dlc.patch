@@ -16477,10 +16477,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..4e3e2b0e46
+index 0000000000..ba12cfa385
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9285 @@
+@@ -0,0 +1,9290 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -17259,17 +17259,22 @@ index 0000000000..4e3e2b0e46
 +        }
 +        t.seen_at = presents_seen + 1;
 +        constexpr u64 kProbes = 8, kProbeBytes = 16;
-+        u64 hash = 0xCBF29CE484222325ULL;
-+        std::array<u64, kProbeBytes / 8> probe{};
-+        for (u64 i = 0; i < kProbes; ++i) {
-+            const u64 room = bytes > kProbeBytes ? bytes - kProbeBytes : 0;
-+            probe.fill(0);
++        // A buffer that counts as static is read live by the render thread anyway: two of its probes per frame, all of them every
++        // four frames (about a thousand buffers in a race frame, and each probe is a cache miss or two).
++        const bool was_static = t.is_static;
++        bool changed = false;
++        const u64 room = bytes > kProbeBytes ? bytes - kProbeBytes : 0;
++        const u64 first = was_static ? (presents_seen * 2) % kProbes : 0;
++        for (u64 i = first; i < (was_static ? first + 2 : kProbes); ++i) {
++            std::array<u64, kProbeBytes / 8> probe{};
 +            Core::NvnHost::ReadGpuMemoryInSubmit(address + room * i / (kProbes - 1), probe.data(), std::min(bytes, kProbeBytes));
++            u64 hash = 0xCBF29CE484222325ULL;
 +            for (const u64 word : probe) hash = (hash ^ word) * 0x100000001B3ULL;
++            hash ^= hash >> 29;
++            changed |= hash != t.probes[i];
++            t.probes[i] = hash;
 +        }
-+        if (hash != t.hash) {
-+            const bool was_static = t.is_static;
-+            t.hash = hash;
++        if (changed) {
 +            t.quiet_frames = 0;
 +            t.is_static = false;
 +            if (was_static) t.required = 1800;
@@ -17325,7 +17330,7 @@ index 0000000000..4e3e2b0e46
 +    /// Bytes a buffer-to-texture copy reads: rows at the row stride (packed when
 +    /// 0), slices at the image stride.
 +    static u64 CopySourceBytes(const Command& c) {
-+        const auto info = MapFormat(c.colors.empty() ? 0 : c.colors[0].format);
++        const auto info = MapFormat(c.Ex().colors.empty() ? 0 : c.Ex().colors[0].format);
 +        if (!info || info->depth) {
 +            return 0;
 +        }
@@ -18705,14 +18710,14 @@ index 0000000000..4e3e2b0e46
 +        st.color_levels.clear();
 +        st.color_layers.clear();
 +        st.bc_copies.clear();
-+        for (size_t ci = 0; ci < c.colors.size(); ++ci) {
-+            const auto& t = c.colors[ci];
-+            const u32 view_fmt = ci < c.color_view_formats.size() ? c.color_view_formats[ci] : 0;
++        for (size_t ci = 0; ci < c.Ex().colors.size(); ++ci) {
++            const auto& t = c.Ex().colors[ci];
++            const u32 view_fmt = ci < c.Ex().color_view_formats.size() ? c.Ex().color_view_formats[ci] : 0;
 +            if (const auto tf = MapFormat(t.format); t.valid && tf && tf->compressed) {
 +                // Render into a block-sized RGBA32UI proxy of this level, copied into
 +                // the compressed image when the pass ends.
-+                const u32 level = ci < c.color_levels.size() ? c.color_levels[ci] : 0;
-+                const u32 layer = ci < c.color_layers.size() ? c.color_layers[ci] : 0;
++                const u32 level = ci < c.Ex().color_levels.size() ? c.Ex().color_levels[ci] : 0;
++                const u32 layer = ci < c.Ex().color_layers.size() ? c.Ex().color_layers[ci] : 0;
 +                Image* bc = GetImage(t, true, false);
 +                TextureDesc proxy = t;
 +                proxy.format = 47;
@@ -18736,7 +18741,7 @@ index 0000000000..4e3e2b0e46
 +                GrowImageLevels(st.colors.back(), std::min(t.levels, max_levels));
 +            }
 +            if (report && st.colors.back()) {
-+                const u32 want_level = ci < c.color_levels.size() ? c.color_levels[ci] : 0;
++                const u32 want_level = ci < c.Ex().color_levels.size() ? c.Ex().color_levels[ci] : 0;
 +                if (want_level >= st.colors.back()->levels &&
 +                    mip_clamp_logged.insert((t.pool << 8) ^ t.offset ^ want_level).second) {
 +                    LOG_WARNING(Frontend,
@@ -18751,14 +18756,14 @@ index 0000000000..4e3e2b0e46
 +            if (st.colors.back() && (view_format == VK_FORMAT_UNDEFINED || !ViewFormatOk(st.colors.back(), view_format, "target")))
 +                view_format = st.colors.back()->info.format; // the attachment's view and the pipeline must name one format
 +            st.color_formats.push_back(view_format);
-+            st.color_levels.push_back(ci < c.color_levels.size() ? c.color_levels[ci] : 0);
-+            st.color_layers.push_back(ci < c.color_layers.size() ? c.color_layers[ci] : 0);
++            st.color_levels.push_back(ci < c.Ex().color_levels.size() ? c.Ex().color_levels[ci] : 0);
++            st.color_layers.push_back(ci < c.Ex().color_layers.size() ? c.Ex().color_layers[ci] : 0);
 +            if (report && !st.colors.back() && t.valid && null_formats.insert(t.format).second) {
 +                KartRe::Log("render target with unmapped NVN format {} ({}x{}x{} levels {} target {}) view format {} level {} layer {}",
 +                            t.format, t.width, t.height, t.depth, t.levels, t.target,
-+                            ci < c.color_view_formats.size() ? c.color_view_formats[ci] : 0,
-+                            ci < c.color_levels.size() ? c.color_levels[ci] : 0,
-+                            ci < c.color_layers.size() ? c.color_layers[ci] : 0);
++                            ci < c.Ex().color_view_formats.size() ? c.Ex().color_view_formats[ci] : 0,
++                            ci < c.Ex().color_levels.size() ? c.Ex().color_levels[ci] : 0,
++                            ci < c.Ex().color_layers.size() ? c.Ex().color_layers[ci] : 0);
 +                LOG_WARNING(Frontend, "nvn-host vulkan: render target format {} not mapped", t.format);
 +            }
 +            if (report && !t.valid) ++invalid_target_slots;
@@ -18772,15 +18777,15 @@ index 0000000000..4e3e2b0e46
 +        // Split-screen: a view's tonemap into the output-size picture with the scene's smaller depth target still bound: without it. Bound,
 +        // the shared depth image would be recreated at the other size, twice a frame. (Not on other screens: the end-of-Grand-Prix
 +        // board is drawn depth-tested.)
-+        st.depth = multi_view && ui_pass && std::fabs(frame_scene_scale - out_scale) > 1e-4f ? nullptr : GetImage(c.depth, true, true);
-+        st.depth_layer = c.depth_layer;
-+        if (report && c.depth.valid && KartRe::Enabled() &&
-+            rt_shapes_logged.insert(fmt::format("depth {}x{}x{} f{} t{} {:x}/{:x} layer {}", c.depth.width,
-+                                                c.depth.height, c.depth.depth, c.depth.format, c.depth.target,
-+                                                c.depth.pool, c.depth.offset, c.depth_layer)).second) {
++        st.depth = multi_view && ui_pass && std::fabs(frame_scene_scale - out_scale) > 1e-4f ? nullptr : GetImage(c.Ex().depth, true, true);
++        st.depth_layer = c.Ex().depth_layer;
++        if (report && c.Ex().depth.valid && KartRe::Enabled() &&
++            rt_shapes_logged.insert(fmt::format("depth {}x{}x{} f{} t{} {:x}/{:x} layer {}", c.Ex().depth.width,
++                                                c.Ex().depth.height, c.Ex().depth.depth, c.Ex().depth.format, c.Ex().depth.target,
++                                                c.Ex().depth.pool, c.Ex().depth.offset, c.Ex().depth_layer)).second) {
 +            KartRe::Log("depth target first used: frame {} {}x{}x{} f{} t{} pool={:#x} off={:#x} layer {} image layers {}",
-+                        frames, c.depth.width, c.depth.height, c.depth.depth, c.depth.format, c.depth.target,
-+                        c.depth.pool, c.depth.offset, c.depth_layer, st.depth ? st.depth->layers : 0);
++                        frames, c.Ex().depth.width, c.Ex().depth.height, c.Ex().depth.depth, c.Ex().depth.format, c.Ex().depth.target,
++                        c.Ex().depth.pool, c.Ex().depth.offset, c.Ex().depth_layer, st.depth ? st.depth->layers : 0);
 +        }
 +        if (st.depth && !st.depth->info.depth) {
 +            st.depth = nullptr;
@@ -19049,7 +19054,7 @@ index 0000000000..4e3e2b0e46
 +            const Command& c = *fc.cmd;
 +            switch (c.op) {
 +            case Op::BindProgram:
-+                if (!(c.stage == 0x20 && c.shaders.size() == 1)) bound = c.shaders;
++                if (!(c.stage == 0x20 && c.Shaders().size() == 1)) bound.assign(c.Shaders().begin(), c.Shaders().end());
 +                break;
 +            case Op::BindTexture:
 +                if (c.stage < 6 && c.index < 32) textures[c.stage][c.index] = c.handle;
@@ -19128,7 +19133,7 @@ index 0000000000..4e3e2b0e46
 +                ApplyRenderTargets(st, c, false);
 +                break;
 +            case Op::BindProgram:
-+                if (!(c.stage == 0x20 && c.shaders.size() == 1)) st.program = c.shaders;
++                if (!(c.stage == 0x20 && c.Shaders().size() == 1)) st.program.assign(c.Shaders().begin(), c.Shaders().end());
 +                break;
 +            case Op::BindVertexAttribs: st.attribs = c.words; break;
 +            case Op::BindVertexStreams: st.streams = c.words; break;
@@ -21464,10 +21469,10 @@ index 0000000000..4e3e2b0e46
 +    /// on first use), which sampling then finds ahead of any guest-memory upload.
 +    void CopyBufferToTexture(const FrameCommand& fc) {
 +        const Command& c = *fc.cmd;
-+        if (!fc.snap || !current_frame || c.colors.empty() || c.words.size() < 10) {
++        if (!fc.snap || !current_frame || c.Ex().colors.empty() || c.words.size() < 10) {
 +            return;
 +        }
-+        Image* img = GetImage(c.colors[0]);
++        Image* img = GetImage(c.Ex().colors[0]);
 +        if (!img || img->info.depth) {
 +            return;
 +        }
@@ -21906,16 +21911,16 @@ index 0000000000..4e3e2b0e46
 +            if (fc.cmd->op == Op::Draw && !passes.empty()) ++passes.back().draws;
 +            if (fc.cmd->op != Op::SetRenderTargets) continue;
 +            const Command& c = *fc.cmd;
-+            Pass p{&c, std::nullopt, c.depth.valid, false};
-+            if (!c.colors.empty() && c.colors[0].valid) {
-+                p.key = key_of(c.colors[0]);
-+                const auto info = MapFormat(c.colors[0].format);
++            Pass p{&c, std::nullopt, c.Ex().depth.valid, false};
++            if (!c.Ex().colors.empty() && c.Ex().colors[0].valid) {
++                p.key = key_of(c.Ex().colors[0]);
++                const auto info = MapFormat(c.Ex().colors[0].format);
 +                p.tonemap_format = info && info->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-+                                   (c.colors[0].width == frame.present.width || c.colors[0].width == PictureWidth(frame));
++                                   (c.Ex().colors[0].width == frame.present.width || c.Ex().colors[0].width == PictureWidth(frame));
 +                // A 3D pass: colour and depth. The tonemap may run with the scene's depth target still bound (a "dt" pass): that
 +                // is the tonemap, not the scene, or the split lands after the HUD (HUD, results and menus at the scene scale, and
 +                // the full-screen tonemap draw jittered).
-+                if (c.depth.valid) {
++                if (c.Ex().depth.valid) {
 +                    last_any_depth = passes.size();
 +                    if (!p.tonemap_format || last_depth == SIZE_MAX) last_depth = passes.size();
 +                }
@@ -21997,7 +22002,7 @@ index 0000000000..4e3e2b0e46
 +        // passes[SIZE_MAX] (the crash at 150%/200% on such frames).
 +        if (scene_ratio > 1.0001f && last_depth != SIZE_MAX && last_depth + 1 < passes.size() && passes[last_depth].key) {
 +            ss_cmd = passes[last_depth + 1].cmd;
-+            ss_desc = passes[last_depth].cmd->colors[0];
++            ss_desc = passes[last_depth].cmd->Ex().colors[0];
 +            ss_key = *passes[last_depth].key;
 +        }
 +        std::optional<ImageKey> t;
@@ -22034,7 +22039,7 @@ index 0000000000..4e3e2b0e46
 +                        hud_cmd = p.cmd;
 +                        tm_cmd = passes[cand].cmd;
 +                        tm_key = *passes[cand].key;
-+                        tm_desc = passes[cand].cmd->colors[0];
++                        tm_desc = passes[cand].cmd->Ex().colors[0];
 +                        ui_key = *p.key;
 +                        return;
 +                    }
@@ -22061,7 +22066,7 @@ index 0000000000..4e3e2b0e46
 +            if (t && p.key == t) {
 +                if (p.depth) continue;
 +                hud_cmd = p.cmd;
-+                tm_desc = passes[t_index].cmd->colors[0];
++                tm_desc = passes[t_index].cmd->Ex().colors[0];
 +                tm_cmd = passes[t_index].cmd;
 +                tm_key = *t;
 +                return;
@@ -22076,7 +22081,7 @@ index 0000000000..4e3e2b0e46
 +            for (size_t i = t_index + 1; i < passes.size(); ++i) {
 +                if (passes[i].key && passes[i].key == present_key) {
 +                    hud_cmd = passes[i].cmd;
-+                    tm_desc = passes[t_index].cmd->colors[0];
++                    tm_desc = passes[t_index].cmd->Ex().colors[0];
 +                    tm_cmd = passes[t_index].cmd;
 +                    tm_key = *t;
 +                    return;
@@ -22245,9 +22250,9 @@ index 0000000000..4e3e2b0e46
 +    void ApplyUiScale(const Command& c) {
 +        ui_pass = false;
 +        if (!ui_key) return;
-+        if (!c.colors.empty() && c.colors[0].valid && c.colors[0].width) {
-+            if (const auto info = MapFormat(c.colors[0].format)) {
-+                ui_pass = ImageKey{c.colors[0].pool, c.colors[0].offset, TexelClass(info->format), c.colors[0].width, c.colors[0].height} == *ui_key;
++        if (!c.Ex().colors.empty() && c.Ex().colors[0].valid && c.Ex().colors[0].width) {
++            if (const auto info = MapFormat(c.Ex().colors[0].format)) {
++                ui_pass = ImageKey{c.Ex().colors[0].pool, c.Ex().colors[0].offset, TexelClass(info->format), c.Ex().colors[0].width, c.Ex().colors[0].height} == *ui_key;
 +            }
 +        }
 +        if (!post_phase) cur_scale = ui_pass ? out_scale : frame_scene_scale;
@@ -22260,7 +22265,7 @@ index 0000000000..4e3e2b0e46
 +
 +    /// Prebuild pass: only the image classes matter (no commands are recorded for the upscale itself).
 +    void PrepareUpscalePoint(const Command& c) {
-+        Image* low = GetImage(tm_desc.valid ? tm_desc : c.colors[0], false);
++        Image* low = GetImage(tm_desc.valid ? tm_desc : c.Ex().colors[0], false);
 +        if (low && UpscalePointNeedsImage(low)) {
 +            up_alias = EnsureUpImage(low);
 +        }
@@ -22304,7 +22309,7 @@ index 0000000000..4e3e2b0e46
 +    /// The upscale point: the tonemapped 3D image at the scene scale becomes an output-size image (FSR 1, a hook
 +    /// backend, or a bilinear blit when no upscaler is on); the HUD and the final pass then draw at the output scale.
 +    void RunUpscalePoint(const Command& c) {
-+        Image* low = GetImage(tm_desc.valid ? tm_desc : c.colors[0], false);
++        Image* low = GetImage(tm_desc.valid ? tm_desc : c.Ex().colors[0], false);
 +        post_phase = true;
 +        cur_scale = out_scale;
 +        static const u64 up_log_from = [] { const char* v = std::getenv("KARTRECOMP_PASS_LOG_FROM"); return v ? std::strtoull(v, nullptr, 10) : 0ull; }();
@@ -24537,7 +24542,7 @@ index 0000000000..4e3e2b0e46
 +                std::vector<u64> bound;
 +                for (const FrameCommand& fc : frame.commands) {
 +            const Command& c = *fc.cmd;
-+                    if (c.op == Op::BindProgram && !(c.stage == 0x20 && c.shaders.size() == 1)) bound = c.shaders;
++                    if (c.op == Op::BindProgram && !(c.stage == 0x20 && c.Shaders().size() == 1)) bound.assign(c.Shaders().begin(), c.Shaders().end());
 +                    if (c.op == Op::Draw && std::find(bound.begin(), bound.end(), dump_on_fs) != bound.end()) {
 +                        dump_frame = true;
 +                        next_fs_dump = frames + 12;
@@ -24553,7 +24558,7 @@ index 0000000000..4e3e2b0e46
 +                std::vector<u64> bound;
 +                for (const FrameCommand& fc : frame.commands) {
 +            const Command& c = *fc.cmd;
-+                    if (c.op == Op::BindProgram && !(c.stage == 0x20 && c.shaders.size() == 1)) bound = c.shaders;
++                    if (c.op == Op::BindProgram && !(c.stage == 0x20 && c.Shaders().size() == 1)) bound.assign(c.Shaders().begin(), c.Shaders().end());
 +                    if (c.op == Op::Draw && bound.size() > 1) ++used[bound.back()];
 +                }
 +                std::string t;
@@ -24584,20 +24589,20 @@ index 0000000000..4e3e2b0e46
 +                NoteSceneTargets(st);
 +                if (dump_frame) {
 +                    std::string t;
-+                    for (const auto& d : c.colors)
++                    for (const auto& d : c.Ex().colors)
 +                        t += d.valid ? fmt::format(" [{}x{}x{} f{} t{} pool={:#x} off={:#x}]", d.width, d.height, d.depth,
 +                                                 d.format, d.target, d.pool, d.offset)
 +                                     : " [null]";
-+                    KartRe::Log("dumpframe pass{:03} set-rt{} depth off={:#x}", pass_index, t, c.depth.offset);
++                    KartRe::Log("dumpframe pass{:03} set-rt{} depth off={:#x}", pass_index, t, c.Ex().depth.offset);
 +                }
-+                for (size_t ci = 0; ci < c.colors.size(); ++ci) {
-+                    if (c.colors[ci].valid && c.colors[ci].target == 2 && lut_logs < 200) {
++                for (size_t ci = 0; ci < c.Ex().colors.size(); ++ci) {
++                    if (c.Ex().colors[ci].valid && c.Ex().colors[ci].target == 2 && lut_logs < 200) {
 +                        ++lut_logs;
 +                        KartRe::Log("3d render target: frame {} slot {} {}x{}x{} f{} pool={:#x} off={:#x} layer {} level {}",
-+                                    frames, ci, c.colors[ci].width, c.colors[ci].height, c.colors[ci].depth,
-+                                    c.colors[ci].format, c.colors[ci].pool, c.colors[ci].offset,
-+                                    ci < c.color_layers.size() ? c.color_layers[ci] : 0,
-+                                    ci < c.color_levels.size() ? c.color_levels[ci] : 0);
++                                    frames, ci, c.Ex().colors[ci].width, c.Ex().colors[ci].height, c.Ex().colors[ci].depth,
++                                    c.Ex().colors[ci].format, c.Ex().colors[ci].pool, c.Ex().colors[ci].offset,
++                                    ci < c.Ex().color_layers.size() ? c.Ex().color_layers[ci] : 0,
++                                    ci < c.Ex().color_levels.size() ? c.Ex().color_levels[ci] : 0);
 +                    }
 +                }
 +                if (ss_cmd && &c == ss_cmd && !ss_alias) {
@@ -24655,10 +24660,10 @@ index 0000000000..4e3e2b0e46
 +                }
 +                break;
 +            case Op::BindProgram:
-+                if (c.stage == 0x20 && c.shaders.size() == 1) {
-+                    st.compute_program = c.shaders[0]; // compute-only bind
++                if (c.stage == 0x20 && c.Shaders().size() == 1) {
++                    st.compute_program = c.Shaders()[0]; // compute-only bind
 +                } else {
-+                    st.program = c.shaders;
++                    st.program.assign(c.Shaders().begin(), c.Shaders().end());
 +                }
 +                break;
 +            case Op::UpdateUniformBuffer: {
@@ -24669,10 +24674,10 @@ index 0000000000..4e3e2b0e46
 +                    shadow.assign(current_frame->snapshot.data() + (fc.snap - 1),
 +                                  current_frame->snapshot.data() + (fc.snap - 1) + fc.snap_size);
 +                }
-+                if (shadow.size() < c.raw + c.bytes.size()) {
-+                    shadow.resize(c.raw + c.bytes.size());
++                if (shadow.size() < c.raw + c.Ex().bytes.size()) {
++                    shadow.resize(c.raw + c.Ex().bytes.size());
 +                }
-+                std::memcpy(shadow.data() + c.raw, c.bytes.data(), c.bytes.size());
++                std::memcpy(shadow.data() + c.raw, c.Ex().bytes.data(), c.Ex().bytes.size());
 +                ++ubo_updates;
 +                break;
 +            }
@@ -25270,7 +25275,7 @@ index 0000000000..4e3e2b0e46
 +    size_t last_snapshot_size = 0;
 +    u64 presents_seen = 0, submit_ns = 0, submit_snap_ns = 0, submit_snap_bytes = 0, submit_snap_count = 0, submit_vb_bytes = 0;
 +    struct VbTrack {
-+        u64 hash = 0;
++        std::array<u64, 8> probes{};
 +        u64 seen_at = 0;
 +        u32 quiet_frames = 0;
 +        u32 required = 240;

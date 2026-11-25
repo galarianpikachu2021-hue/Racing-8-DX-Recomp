@@ -7,6 +7,9 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
   The computer-controlled racers run there. Run Setup again to get it; the game build also takes less disk space.
 - **The picture no longer waits for the GPU:** the renderer starts the next frame while the GPU finishes the last one, and hands each
   frame over in parts. 4K with FSR 3 and frame generation at a race start: 51 -> 60 fps. Helps most on weaker PCs.
+- **Less CPU work per drawn object** (measured with Steam Deck logs): the game's threads no longer wait for each other while they record
+  graphics commands, and each command takes a third of the memory. Uncapped race on four desktop cores: 7.5 -> about 6.2 ms a frame. No new
+  Setup needed for this one.
 - **Object motion vectors only for what moves:** Sydney Sprint holds 60 fps again.
 - **Split-screen: the render scale works there too** (below 100%).
 

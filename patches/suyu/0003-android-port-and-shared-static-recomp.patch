@@ -263,12 +263,88 @@ index afd45206c1..1604a92001 100644
  void Java_org_yuzu_yuzu_1emu_NativeLibrary_logDeviceInfo(JNIEnv* env, jclass clazz) {
      LOG_INFO(Frontend, "suyu Version: {}-{}", Common::g_scm_branch, Common::g_scm_desc);
      LOG_INFO(Frontend, "Host OS: Android API level {}", android_get_device_api_level());
+diff --git a/src/frontend_common/huge_code.h b/src/frontend_common/huge_code.h
+new file mode 100644
+index 0000000000..9cb62faa28
+--- /dev/null
++++ b/src/frontend_common/huge_code.h
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: puts the recompiled game's code and read-only tables on 2 MiB pages (Linux).
++#pragma once
++
++#ifdef __linux__
++#include <cstring>
++#include <string>
++
++#include <link.h>
++#include <sys/mman.h>
++
++#include "common/common_types.h"
++#include "common/logging/log.h"
++
++namespace KartHugeCode {
++
++constexpr u64 kHuge = 2ull << 20;
++
++/// Replaces [at, at + 2 MiB) (aligned, readable, never written again) by a copy of itself in one huge page.
++inline bool RemapChunk(u64 at, int prot) {
++    void* raw = mmap(nullptr, kHuge * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    if (raw == MAP_FAILED) return false;
++    const u64 base = reinterpret_cast<u64>(raw);
++    const u64 fresh = (base + kHuge - 1) & ~(kHuge - 1);
++    if (fresh > base) munmap(raw, fresh - base);
++    munmap(reinterpret_cast<void*>(fresh + kHuge), base + kHuge * 2 - fresh - kHuge);
++    void* p = reinterpret_cast<void*>(fresh);
++    madvise(p, kHuge, MADV_HUGEPAGE);
++    std::memcpy(p, reinterpret_cast<const void*>(at), kHuge);
++    if (mprotect(p, kHuge, prot) != 0 ||
++        mremap(p, kHuge, kHuge, MREMAP_MAYMOVE | MREMAP_FIXED, reinterpret_cast<void*>(at)) == MAP_FAILED) {
++        munmap(p, kHuge);
++        return false;
++    }
++    return true;
++}
++
++inline void Remap(const std::string& file, int level) {
++    struct Arg {
++        const std::string* file;
++        int level;
++        u64 code = 0, data = 0, failed = 0;
++    } arg{&file, level};
++    dl_iterate_phdr(
++        [](dl_phdr_info* info, size_t, void* opaque) {
++            Arg& a = *static_cast<Arg*>(opaque);
++            if (!info->dlpi_name || *a.file != info->dlpi_name) return 0;
++            for (int i = 0; i < info->dlpi_phnum; ++i) {
++                const auto& ph = info->dlpi_phdr[i];
++                const bool code = ph.p_type == PT_LOAD && (ph.p_flags & PF_X);
++                const bool tables = (ph.p_type == PT_LOAD && ph.p_flags == PF_R) || ph.p_type == PT_GNU_RELRO;
++                if (!code && !(tables && a.level >= 2)) continue;
++                u64 lo = info->dlpi_addr + ph.p_vaddr, hi = lo + ph.p_filesz;
++                lo = (lo + kHuge - 1) & ~(kHuge - 1);
++                for (; lo + kHuge <= hi; lo += kHuge) {
++                    if (RemapChunk(lo, code ? PROT_READ | PROT_EXEC : PROT_READ)) {
++                        ++(code ? a.code : a.data);
++                    } else {
++                        ++a.failed;
++                    }
++                }
++            }
++            return 1;
++        },
++        &arg);
++    LOG_INFO(Frontend, "huge pages: {} code and {} table chunks of 2 MiB, {} failed ({})", arg.code, arg.data, arg.failed, file);
++}
++
++} // namespace KartHugeCode
++#endif
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..32071817c4
+index 0000000000..d1e88e9c79
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,500 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
@@ -276,6 +352,7 @@ index 0000000000..32071817c4
 +#include "core/arm/recomp/kart_hook_trace.h"
 +#include "common/kart_tune_sites.h"
 +#include "frontend_common/kart_static_recomp.h"
++#include "frontend_common/huge_code.h"
 +
 +#include <algorithm>
 +#include <cstdlib>
@@ -488,6 +565,11 @@ index 0000000000..32071817c4
 +            fpx_modules = has_fpx ? 1 : 0;
 +            fpx = fpx_answer;
 +        }
++#ifdef __linux__
++        if (const char* v = std::getenv("KARTRECOMP_HUGE_CODE"); v && std::atoi(v) >= (name == "image" ? 1 : 3)) {
++            KartHugeCode::Remap(file.string(), std::atoi(v));
++        }
++#endif
 +        auto guard = reinterpret_cast<unsigned (*)(unsigned)>(FindSym(h, "recomp_image_guard_v2"));
 +        modules.push_back({lookup, set_base, run_slice, abi, guard, name == "image" ? "main" : name});
 +        LOG_INFO(Frontend, "Recompiled module [{}] loaded from {}", modules.size() - 1, file.string());
