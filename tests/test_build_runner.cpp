@@ -234,6 +234,11 @@ private slots:
         QVERIFY(jobs[2].hot && !jobs[1].hot);
         QVERIFY(jobs[1].args.contains("-O0") && !jobs[2].args.contains("-O0"));
         QVERIFY(jobs[2].args.contains("-O2") && jobs[2].args.contains("-march=x86-64-v3"));
+        QCOMPARE(jobs[2].args.contains("-DRECOMP_GUARD_WHOLE=1"), BuildRunner::FastCode());
+        QCOMPARE(jobs[2].args.contains("-DRECOMP_DIRECT_MEM=1"), BuildRunner::DirectMemory());
+#ifdef Q_OS_WIN
+        QVERIFY(!BuildRunner::DirectMemory()); // a Windows engine refuses direct-memory modules
+#endif
     }
     void aFinishedCompileWritesTheMarkerAndAFailedOneDoesNot() {
         NEEDS_SH();

@@ -102,7 +102,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QFile list(QDir(layout.exportDir()).filePath("code_patches.txt"));
         if (list.open(QIODevice::ReadOnly)) plan.codePatches = list.readAll();
     }
-    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::FastCode() ? "|hot-O3-fast1" : "|hot-O3");
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::DirectMemory() ? "|hot-O3-fast1" : BuildRunner::FastCode() ? "|hot-O3-fast1-nodm" : "|hot-O3");
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QCoreApplication::translate("Messages", "Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);

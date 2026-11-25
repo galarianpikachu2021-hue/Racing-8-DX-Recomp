@@ -50,9 +50,11 @@ public:
     /// Concurrent compiles that fit: 2 GB per job, at least 1, at most `threads`; 0 when under 3 GB is free (refuse).
     /// recompiled_<name>.so on Linux, recompiled_<name>.dll on Windows: what the engine looks for in the module folder.
     static QString ModuleFileName(const QString& name);
-    /// True when the game is built as fast code: direct memory, one code check per module, chained branches and native calls
-    /// (Linux; KARTRECOMP_NO_FAST_CODE=1 at Setup time builds the older, slower form).
+    /// True when the game is built as fast code: one code check per module, chained branches and native calls
+    /// (KARTRECOMP_NO_FAST_CODE=1 at Setup time builds the older, slower form).
     static bool FastCode();
+    /// Fast code plus direct memory (Linux only: it needs the engine's fault handler).
+    static bool DirectMemory();
     /// Free RAM the build can use (MemAvailable on Linux, GlobalMemoryStatusEx on Windows); 8 GiB if the system will not say.
     static qint64 AvailableMemoryBytes();
     static int JobsForRam(qint64 availableBytes, int threads);
