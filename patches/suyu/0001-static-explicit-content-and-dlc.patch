@@ -16335,10 +16335,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..8a20513955
+index 0000000000..953098c6ee
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9171 @@
+@@ -0,0 +1,9260 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -17547,17 +17547,21 @@ index 0000000000..8a20513955
 +        cbai.commandPool = pool;
 +        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 +        cbai.commandBufferCount = 1;
-+        vk.vkAllocateCommandBuffers(device, &cbai, &cmd);
++        for (auto& f : flights) {
++            for (auto& c : f.cmds) vk.vkAllocateCommandBuffers(device, &cbai, &c);
++        }
++        cmd = flights[0].cmds[0];
 +        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 +        fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-+        vk.vkCreateFence(device, &fci, nullptr, &fence);
++        for (auto& f : flights) vk.vkCreateFence(device, &fci, nullptr, &f.fence);
 +        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-+        vk.vkCreateSemaphore(device, &sci, nullptr, &acquired);
++        for (auto& f : flights) vk.vkCreateSemaphore(device, &sci, nullptr, &f.acquired);
++        acquired = flights[0].acquired;
 +        vk.vkCreateSemaphore(device, &sci, nullptr, &rendered);
 +        {
 +            VkQueryPoolCreateInfo gqci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
 +            gqci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-+            gqci.queryCount = 4;
++            gqci.queryCount = 4 * kFlights;
 +            vk.vkCreateQueryPool(device, &gqci, nullptr, &gpu_queries);
 +        }
 +        vk.vkAllocateCommandBuffers(device, &cbai, &cmd2);
@@ -17627,8 +17631,11 @@ index 0000000000..8a20513955
 +        dpci.maxSets = 8192;
 +        dpci.poolSizeCount = static_cast<u32>(std::size(sizes));
 +        dpci.pPoolSizes = sizes;
-+        return vk.vkCreateDescriptorPool(device, &dpci, nullptr, &descriptor_pool) == VK_SUCCESS ||
-+               Fail("descriptor pool");
++        for (auto& f : flights) {
++            if (vk.vkCreateDescriptorPool(device, &dpci, nullptr, &f.descriptors) != VK_SUCCESS) return Fail("descriptor pool");
++        }
++        descriptor_pool = flights[0].descriptors;
++        return true;
 +    }
 +
 +    bool CreateSamplers() {
@@ -18434,7 +18441,7 @@ index 0000000000..8a20513955
 +    /// Bump allocation in this frame's upload ring; nullopt when full.
 +    std::optional<u64> Allocate(u64 size, u64 align) {
 +        const u64 offset = (ring_head + align - 1) & ~(align - 1);
-+        if (offset + size > kRingSize) {
++        if (offset + size > (flight + 1) * (kRingSize / kFlights)) { // this frame's part of the ring
 +            ++ring_overflows;
 +            return std::nullopt;
 +        }
@@ -21923,8 +21930,6 @@ index 0000000000..8a20513955
 +        fg_on = overlay && overlay->Settings().framegen != 0 && upscaler.Enabled() && !fsr1_selected && !fg_failed;
 +        opaque_captured = false;
 +        ++mv_frame_counter;
-+        CollectMvTiming();
-+        CollectGpuTiming();
 +        cam_scanned.clear();
 +        cam_wanted = upscaler.Enabled() && scene_ratio <= 1.0001f; // supersampling has no temporal upscaler
 +        // Frame generation needs motion vectors (and so the game camera) also when the render scale supersamples (150%/200%),
@@ -22096,6 +22101,39 @@ index 0000000000..8a20513955
 +        cur_scale = out_scale;
 +    }
 +
++    /// Waits until the previous frame is off the GPU: before anything there is only one of is touched (the descriptor sets of the
++    /// upscaler, motion vectors, HDR, overlay and frame generation, plugins). The scene before that needs none of it, so most of a
++    /// frame is recorded while the GPU still finishes the last one.
++    void WaitPrevFrame() {
++        if (prev_frame_done) return;
++        prev_frame_done = true;
++        Profile::Scope ps{prof, Profile::Wait};
++        const u32 prev = next_flight != flight ? flight : (flight + kFlights - 1) % kFlights; // (before / after this frame took its slot)
++        vk.vkWaitForFences(device, 1, &flights[prev].fence, VK_TRUE, UINT64_MAX);
++        vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
++    }
++
++    /// Hands the GPU what is recorded so far (between render passes) and goes on in the next command buffer, so the GPU works while the
++    /// rest of the frame is being recorded: with one frame in flight, recording and GPU time added up before. The frame's fence, on
++    /// the last part, covers all of them (a fence's scope includes everything submitted to the queue before it).
++    void SubmitPart() {
++        vk.vkEndCommandBuffer(cmd);
++        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
++        si.commandBufferCount = 1;
++        si.pCommandBuffers = &cmd;
++        {
++            std::scoped_lock lock{queue_mutex};
++            vk.vkQueueSubmit(queue_handle, 1, &si, VK_NULL_HANDLE);
++        }
++        cmd = flights[flight].cmds[++frame_part];
++        vk.vkResetCommandBuffer(cmd, 0);
++        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++        vk.vkBeginCommandBuffer(cmd, &bi);
++        MemoryBarrier();
++        part_draws_from = draws_executed;
++    }
++
 +    /// The upscale point: the tonemapped 3D image at the scene scale becomes an output-size image (FSR 1, a hook
 +    /// backend, or a bilinear blit when no upscaler is on); the HUD and the final pass then draw at the output scale.
 +    void RunUpscalePoint(const Command& c) {
@@ -22114,7 +22152,7 @@ index 0000000000..8a20513955
 +        if (!up) return;
 +        up_alias = up;
 +        frame_upscaled = true;
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, 1);
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, flight * 4 + 1);
 +        MemoryBarrier();
 +        // 150% / 200%: no temporal upscaler (no jitter, no vectors). Usually the scene was averaged down already (RunSupersamplePoint).
 +        const bool supersampled = ss_alias != nullptr || low->width > up->width || low->height > up->height;
@@ -22130,7 +22168,7 @@ index 0000000000..8a20513955
 +        MemoryBarrier();
 +        if (!fsr1_selected) SharpenUp(up, overlay->SharpenStrength()); // FSR 1 has its own RCAS
 +        CaptureHdrClean(up);
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, 2);
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, flight * 4 + 2);
 +        gpu_ts_upscale = true;
 +        if (++hook_runs % 600 == 1) {
 +            LOG_INFO(Frontend, "upscale point: 3D {}x{} -> {}x{} with {} (HUD and final pass at {:.2f}x; translucent-effect capture {})",
@@ -22214,7 +22252,7 @@ index 0000000000..8a20513955
 +        vk.vkCreateSampler(device, &sci, nullptr, &mv_linear);
 +        VkQueryPoolCreateInfo qci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
 +        qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-+        qci.queryCount = 2;
++        qci.queryCount = 2 * kFlights;
 +        vk.vkCreateQueryPool(device, &qci, nullptr, &mv_queries);
 +        const VkDescriptorSetLayoutBinding bindings[8] = {
 +            {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
@@ -22490,6 +22528,7 @@ index 0000000000..8a20513955
 +        w[2] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, objmv_set, 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &mo};
 +        w[3] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, objmv_set, 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &mm};
 +        w[4] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, objmv_set, 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &dv};
++        WaitPrevFrame();
 +        vk.vkUpdateDescriptorSets(device, 5, w, 0, nullptr);
 +        MemoryBarrier();
 +        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -22703,16 +22742,17 @@ index 0000000000..8a20513955
 +        w[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, mv_set, 5, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &li};
 +        w[6] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, mv_set, 6, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &mi};
 +        w[7] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, mv_set, 7, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &pmi};
++        WaitPrevFrame();
 +        vk.vkUpdateDescriptorSets(device, 8, w, 0, nullptr);
 +        MemoryBarrier();
-+        vk.vkCmdResetQueryPool(cmd, mv_queries, 0, 2);
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, mv_queries, 0);
++        vk.vkCmdResetQueryPool(cmd, mv_queries, flight * 2, 2);
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, mv_queries, flight * 2);
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mv_pipe);
 +        vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mv_layout, 0, 1, &mv_set, 0, nullptr);
 +        vk.vkCmdPushConstants(cmd, mv_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 +        vk.vkCmdDispatch(cmd, (low->width + 7) / 8, (low->height + 7) / 8, 1);
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, mv_queries, 1);
-+        mv_ts_pending = true;
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, mv_queries, flight * 2 + 1);
++        flights[flight].mv_pending = true;
 +        MemoryBarrier();
 +        if (objmv_record && push.valid > 0.5f) RunObjectMotion(low, vis);
 +        {
@@ -22732,11 +22772,11 @@ index 0000000000..8a20513955
 +    /// Reads last frame's motion-vector pass time (its fence has signalled) and logs the average now and then.
 +    /// GPU time of last frame (race frames, which have an upscale point): logged as an average every 600 frames.
 +    void CollectGpuTiming() {
-+        if (!gpu_ts_pending || !gpu_queries) return;
-+        gpu_ts_pending = false;
-+        if (!gpu_ts_up_done) return;
++        if (!flights[flight].ts_pending || !gpu_queries) return;
++        flights[flight].ts_pending = false;
++        if (!flights[flight].ts_up_done) return;
 +        u64 t[4]{};
-+        if (vk.vkGetQueryPoolResults(device, gpu_queries, 0, 4, sizeof(t), t, sizeof(u64), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
++        if (vk.vkGetQueryPoolResults(device, gpu_queries, flight * 4, 4, sizeof(t), t, sizeof(u64), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
 +        const double ms = timestamp_period * 1e-6;
 +        gpu_ms_sum[0] += static_cast<double>(t[1] - t[0]) * ms;
 +        gpu_ms_sum[1] += static_cast<double>(t[2] - t[1]) * ms;
@@ -22751,10 +22791,10 @@ index 0000000000..8a20513955
 +    }
 +
 +    void CollectMvTiming() {
-+        if (!mv_ts_pending || !mv_queries) return;
-+        mv_ts_pending = false;
++        if (!flights[flight].mv_pending || !mv_queries) return;
++        flights[flight].mv_pending = false;
 +        u64 t[2]{};
-+        if (vk.vkGetQueryPoolResults(device, mv_queries, 0, 2, sizeof(t), t, sizeof(u64),
++        if (vk.vkGetQueryPoolResults(device, mv_queries, flight * 2, 2, sizeof(t), t, sizeof(u64),
 +                                     VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
 +            return;
 +        }
@@ -22828,6 +22868,7 @@ index 0000000000..8a20513955
 +        VkWriteDescriptorSet w[2]{};
 +        w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sharpen_set, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &si};
 +        w[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sharpen_set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &di};
++        WaitPrevFrame();
 +        vk.vkUpdateDescriptorSets(device, 2, w, 0, nullptr);
 +        MemoryBarrier();
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sharpen_pipe);
@@ -22888,6 +22929,7 @@ index 0000000000..8a20513955
 +            up_w = low->width;
 +            up_h = low->height;
 +        }
++        WaitPrevFrame();
 +        if (!upscaler.Configure(low->width, low->height, up->width, up->height, low->info.format)) return;
 +        KrUpscalerFrame f{};
 +        f.cmd = cmd;
@@ -23100,6 +23142,7 @@ index 0000000000..8a20513955
 +            w.descriptorCount = 1;
 +            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 +            w.pImageInfo = &info;
++            WaitPrevFrame();
 +            vk.vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
 +        };
 +        u32 easu[16]{};
@@ -23212,6 +23255,7 @@ index 0000000000..8a20513955
 +            write.descriptorCount = 1;
 +            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 +            write.pImageInfo = &image_info;
++            WaitPrevFrame();
 +            vk.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 +        }
 +
@@ -23656,6 +23700,7 @@ index 0000000000..8a20513955
 +            w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, fg_set, i, 0, 1,
 +                    (i < 4 || i == 6) ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &infos[i]};
 +        }
++        WaitPrevFrame();
 +        vk.vkUpdateDescriptorSets(device, 7, w, 0, nullptr);
 +        MemoryBarrier();
 +        vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fg_pipe);
@@ -23775,6 +23820,7 @@ index 0000000000..8a20513955
 +        {
 +            std::scoped_lock lock{queue_mutex};
 +            vk.vkQueueSubmit(queue_handle, 1, &si, fence2);
++            fence2_frame = flight_no;
 +        }
 +        // The image is drawn; only presenting it waits ((n-1)/n of a frame), and that wait happens on a thread of its own so the
 +        // renderer can start on the next frame (the game stalled on a renderer that slept).
@@ -23874,6 +23920,7 @@ index 0000000000..8a20513955
 +            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 +            writes[i].pImageInfo = &infos[i];
 +        }
++        WaitPrevFrame();
 +        vk.vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 +        auto view_it = swap_views.find(target);
 +        if (view_it == swap_views.end()) {
@@ -24185,9 +24232,14 @@ index 0000000000..8a20513955
 +        VkResult acq;
 +        {
 +            Profile::Scope ps{prof, Profile::Wait};
-+            vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-+            vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
-+            acq = AcquireNext(acquired, &index);
++            // The frame before the last (whose command buffers, descriptor pool and part of the upload ring this frame reuses) must be
++            // done; the last one may still be on the GPU (WaitPrevFrame).
++            next_flight = (flight + 1) % kFlights;
++            prev_frame_done = false;
++            vk.vkWaitForFences(device, 1, &flights[next_flight].fence, VK_TRUE, UINT64_MAX);
++            if (fence2_frame + kFlights <= flight_no) vk.vkWaitForFences(device, 1, &fence2, VK_TRUE, UINT64_MAX);
++            if (frames_in_flight < 2) WaitPrevFrame();
++            acq = AcquireNext(flights[next_flight].acquired, &index);
 +        }
 +        const auto record_start = std::chrono::steady_clock::now();
 +        const size_t programs_at_start = programs.size(), pipelines_at_start = pipelines.size();
@@ -24200,10 +24252,15 @@ index 0000000000..8a20513955
 +        } else if (acq != VK_SUCCESS) {
 +            return;
 +        }
++        flight = next_flight;
++        ++flight_no;
++        fence = flights[flight].fence;
++        acquired = flights[flight].acquired;
++        descriptor_pool = flights[flight].descriptors;
 +        vk.vkResetFences(device, 1, &fence);
-+        DestroyRetired(); // the previous frame (which may still use them) has finished
++        DestroyRetired(); // what was replaced while the frame before the last was recorded: no frame on the GPU can use it
 +        vk.vkResetDescriptorPool(device, descriptor_pool, 0);
-+        ring_head = 0;
++        ring_head = flight * (kRingSize / kFlights);
 +        ApplyOverlay();
 +        UpdateJitter();
 +        ScanTextureDescriptors();
@@ -24211,12 +24268,18 @@ index 0000000000..8a20513955
 +        hook_done = false;
 +        upload_cache.clear();
 +        descriptor_cache.clear(); // the pool is reset with the frame
++        cmd = flights[flight].cmds[0];
++        frame_part = 0;
++        part_draws_from = draws_executed;
 +        vk.vkResetCommandBuffer(cmd, 0);
 +        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 +        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 +        vk.vkBeginCommandBuffer(cmd, &bi);
-+        vk.vkCmdResetQueryPool(cmd, gpu_queries, 0, 4);
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, 0);
++        MemoryBarrier(); // after the previous frame, which may still be running
++        CollectGpuTiming(); // this slot's last frame (done): before its queries are reset
++        CollectMvTiming();
++        vk.vkCmdResetQueryPool(cmd, gpu_queries, flight * 4, 4);
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, flight * 4);
 +        gpu_ts_upscale = false;
 +        if (!dummies_cleared) {
 +            VkClearColorValue white{{1.0f, 1.0f, 1.0f, 1.0f}};
@@ -24350,6 +24413,7 @@ index 0000000000..8a20513955
 +            switch (c.op) {
 +            case Op::SetRenderTargets:
 +                EndRendering();
++                if (frame_parts > 1 && frame_part + 1 < frame_parts && draws_executed - part_draws_from >= kPartDraws && !dump_frame) SubmitPart();
 +                NoteSceneTargets(st);
 +                if (dump_frame) {
 +                    std::string t;
@@ -24657,9 +24721,9 @@ index 0000000000..8a20513955
 +            }
 +            MemoryBarrier();
 +        }
-+        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, 3);
-+        gpu_ts_pending = true;
-+        gpu_ts_up_done = gpu_ts_upscale;
++        vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, gpu_queries, flight * 4 + 3);
++        flights[flight].ts_pending = true;
++        flights[flight].ts_up_done = gpu_ts_upscale;
 +        vk.vkEndCommandBuffer(cmd);
 +        {
 +            const double rec_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
@@ -25005,10 +25069,10 @@ index 0000000000..8a20513955
 +        for (auto& [k, smp] : game_samplers) vk.vkDestroySampler(device, smp, nullptr);
 +        vk.vkDestroySampler(device, sampler, nullptr);
 +        vk.vkDestroySampler(device, shadow_sampler, nullptr);
-+        vk.vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
++        for (auto& f : flights) vk.vkDestroyDescriptorPool(device, f.descriptors, nullptr);
 +        vk.vkDestroyBuffer(device, ring, nullptr);
 +        vk.vkFreeMemory(device, ring_memory, nullptr);
-+        vk.vkDestroySemaphore(device, acquired, nullptr);
++        for (auto& f : flights) vk.vkDestroySemaphore(device, f.acquired, nullptr);
 +        vk.vkDestroySemaphore(device, rendered, nullptr);
 +        for (VkSemaphore s : rendered_sems) vk.vkDestroySemaphore(device, s, nullptr);
 +        for (VkSemaphore s : rendered2_sems) vk.vkDestroySemaphore(device, s, nullptr);
@@ -25017,7 +25081,7 @@ index 0000000000..8a20513955
 +            vk.vkDestroyFence(device, x.fence, nullptr);
 +            vk.vkDestroySemaphore(device, x.acquired, nullptr);
 +        }
-+        vk.vkDestroyFence(device, fence, nullptr);
++        for (auto& f : flights) vk.vkDestroyFence(device, f.fence, nullptr);
 +        vk.vkDestroyCommandPool(device, pool, nullptr);
 +        vk.vkDestroySwapchainKHR(device, swapchain, nullptr);
 +        vk.vkDestroyDevice(device, nullptr);
@@ -25273,6 +25337,31 @@ index 0000000000..8a20513955
 +    VkSampler fg_sampler = VK_NULL_HANDLE;
 +    VkCommandBuffer cmd2 = VK_NULL_HANDLE;   ///< the real frame's present, when a generated frame went first
 +    VkFence fence2 = VK_NULL_HANDLE;
++    /// Frames on the GPU and being recorded at once, and what each has of its own. KARTRECOMP_FRAMES_IN_FLIGHT=1: one, as before.
++    static constexpr u32 kFlights = 2;
++    struct Flight {
++        std::array<VkCommandBuffer, 4> cmds{};
++        VkFence fence = VK_NULL_HANDLE;
++        VkSemaphore acquired = VK_NULL_HANDLE;
++        VkDescriptorPool descriptors = VK_NULL_HANDLE;
++        bool ts_pending = false, ts_up_done = false, mv_pending = false;
++    };
++    std::array<Flight, kFlights> flights{};
++    u32 flight = 0, next_flight = 0;
++    u64 flight_no = 0, fence2_frame = 0;
++    bool prev_frame_done = true;
++    u32 frames_in_flight = [] {
++        const char* v = std::getenv("KARTRECOMP_FRAMES_IN_FLIGHT");
++        return v && *v == '1' ? 1u : 2u;
++    }();
++    /// The frame's command buffers, submitted in parts (SubmitPart). KARTRECOMP_FRAME_PARTS=1 submits whole frames, as before; 2-4.
++    static constexpr u64 kPartDraws = 150;
++    u32 frame_part = 0;
++    u32 frame_parts = [] {
++        const char* v = std::getenv("KARTRECOMP_FRAME_PARTS");
++        return v ? static_cast<u32>(std::clamp(std::atoi(v), 1, 4)) : 4u;
++    }();
++    u64 part_draws_from = 0;
 +    VkSemaphore acquired2 = VK_NULL_HANDLE, rendered2 = VK_NULL_HANDLE;
 +    std::chrono::steady_clock::time_point fg_last_present{};
 +    double fg_period_ms = 16.7;
@@ -25384,10 +25473,10 @@ index 0000000000..8a20513955
 +    float timestamp_period = 1.0f;
 +    VkQueryPool mv_queries = VK_NULL_HANDLE;
 +    VkQueryPool gpu_queries = VK_NULL_HANDLE; ///< GPU time of the frame: start, upscale point start and end, end
-+    bool gpu_ts_pending = false, gpu_ts_upscale = false, gpu_ts_up_done = false;
++    bool gpu_ts_upscale = false;
 +    double gpu_ms_sum[3] = {0, 0, 0};   ///< scene, upscale point (upscaler, motion vectors, sharpening), HUD and present
 +    u32 gpu_ms_count = 0;
-+    bool mv_ts_pending = false, mv_reset = true;
++    bool mv_reset = true;
 +    double mv_ms_sum = 0;
 +    u32 mv_ms_count = 0;
 +    float mv_jit_prev_x = 0, mv_jit_prev_y = 0;

@@ -8637,10 +8637,10 @@ index 6363a9e0ab..e8a6b4f715 100644
  
 diff --git a/src/core/hle/kernel/native_audio_service.cpp b/src/core/hle/kernel/native_audio_service.cpp
 new file mode 100644
-index 0000000000..50ebedf63e
+index 0000000000..1dbc105bb4
 --- /dev/null
 +++ b/src/core/hle/kernel/native_audio_service.cpp
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,382 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the audio renderer service ("audren:u") answered by the runtime. The renderer itself - voices, mixes, effects,
 +// sinks, the DSP command lists and the output to the host's audio device - is suyu's audio_core library; this replaces the
@@ -8651,8 +8651,11 @@ index 0000000000..50ebedf63e
 +#include <mutex>
 +#include <vector>
 +
++#include "audio_core/audio_out_manager.h"
 +#include "audio_core/audio_render_manager.h"
 +#include "audio_core/common/audio_renderer_parameter.h"
++#include "audio_core/out/audio_out.h"
++#include "audio_core/out/audio_out_system.h"
 +#include "audio_core/renderer/audio_device.h"
 +#include "audio_core/renderer/audio_renderer.h"
 +#include "audio_core/audio_core.h"
@@ -8808,9 +8811,147 @@ index 0000000000..50ebedf63e
 +    return s;
 +}
 +
++/// One plain audio output ("audout:u": the sound of the game's movies - highlight reels): audio_core's output and its buffer event.
++struct OutSession {
++    OutSession(Core::System& system, AudioCore::AudioOut::Manager& manager_, size_t id)
++        : context{system, "native IAudioOut"}, event{context.CreateEvent("native AudioOutEvent")}, manager{manager_},
++          out{std::make_shared<AudioCore::AudioOut::Out>(system, manager_, event, id)} {}
++    ~OutSession() {
++        Close();
++        context.CloseEvent(event);
++        if (process && kernel) process->Close(*kernel);
++    }
++    void Close() {
++        std::scoped_lock lk{lock};
++        if (!out) return;
++        out->StopSystem();
++        out->Free(); // gives the manager's session id back
++        out.reset();
++    }
++    std::shared_ptr<AudioCore::AudioOut::Out> Get() {
++        std::scoped_lock lk{lock};
++        return out;
++    }
++    ::Service::KernelHelpers::ServiceContext context;
++    Kernel::KEvent* event;
++    AudioCore::AudioOut::Manager& manager;
++    std::mutex lock;
++    std::shared_ptr<AudioCore::AudioOut::Out> out;
++    Kernel::KProcess* process = nullptr;
++    KernelCore* kernel = nullptr;
++};
++std::vector<std::weak_ptr<OutSession>> g_outs;
++
++std::shared_ptr<Service> AudioOutSession(KernelCore& kernel, std::shared_ptr<OutSession> o) {
++    using AudioCore::AudioOut::AudioOutBuffer;
++    auto s = std::make_shared<Service>("IAudioOut");
++    const auto on = [&s, o](uint32_t cmd, std::function<void(Context&, AudioCore::AudioOut::Out&)> h) {
++        s->On(cmd, [o, h = std::move(h)](Context& c) {
++            const auto out = o->Get();
++            if (!out) return c.SetResult(::Service::Audio::ResultOperationFailed.raw);
++            h(c, *out);
++        });
++    };
++    on(0, [](Context& c, auto& out) { c.Push<u32>(static_cast<u32>(out.GetState())); });
++    on(1, [](Context& c, auto& out) { if (const Result r = out.StartSystem(); r.IsError()) c.SetResult(r.raw); });
++    on(2, [](Context& c, auto& out) { if (const Result r = out.StopSystem(); r.IsError()) c.SetResult(r.raw); });
++    const auto append = [](Context& c, AudioCore::AudioOut::Out& out) { // AppendAudioOutBuffer(Auto)(buffer, tag)
++        const u64 tag = c.Pop<u64>();
++        const auto raw = c.ReadBuffer(0);
++        if (raw.size() < sizeof(AudioOutBuffer)) return c.SetResult(::Service::Audio::ResultInsufficientBuffer.raw);
++        AudioOutBuffer b;
++        std::memcpy(&b, raw.data(), sizeof(b));
++        if (const Result r = out.AppendBuffer(b, tag); r.IsError()) c.SetResult(r.raw);
++    };
++    on(3, append);
++    on(7, append);
++    on(4, [&kernel](Context& c, auto& out) { c.PushCopyHandle(MirrorKernelEvent(kernel, &out.GetBufferEvent())); });
++    const auto released = [](Context& c, AudioCore::AudioOut::Out& out) { // GetReleasedAudioOutBuffers(Auto) -> tags, count
++        std::vector<u64> tags(c.WriteBufferSize(0) / sizeof(u64));
++        const u32 n = out.GetReleasedBuffers(tags);
++        if (!tags.empty()) c.WriteBuffer(tags.data(), tags.size() * sizeof(u64), 0);
++        c.Push<u32>(n);
++    };
++    on(5, released);
++    on(8, released);
++    on(6, [](Context& c, auto& out) { const u64 tag = c.Pop<u64>(); c.Push<u8>(out.ContainsAudioBuffer(tag) ? 1 : 0); });
++    on(9, [](Context& c, auto& out) { c.Push<u32>(out.GetBufferCount()); });
++    on(10, [](Context& c, auto& out) { c.Push<u64>(out.GetPlayedSampleCount()); });
++    on(11, [](Context& c, auto& out) { c.Push<u8>(out.FlushAudioOutBuffers() ? 1 : 0); });
++    on(12, [](Context& c, auto& out) { out.SetVolume(c.Pop<f32>()); });
++    on(13, [](Context& c, auto& out) { c.Push<f32>(out.GetVolume()); });
++    return s;
++}
++
 +} // namespace
 +
++std::shared_ptr<Service> MakeAudioOutService(KernelCore& kernel) {
++    using namespace AudioCore::AudioOut;
++    Core::System& system = kernel.System();
++    static Manager& manager = *new Manager{system}; // kept to process exit
++    struct DeviceName {
++        char name[0x100];
++    };
++    auto s = std::make_shared<Service>("audout:u");
++    const auto list = [](Context& c) { // ListAudioOuts(Auto) -> names, count
++        const DeviceName name{"DeviceOut"};
++        const bool room = c.WriteBufferSize(0) >= sizeof(name);
++        if (room) c.WriteBuffer(&name, sizeof(name), 0);
++        c.Push<u32>(room ? 1 : 0);
++    };
++    const auto open = [&kernel, &system](Context& c) { // OpenAudioOut(Auto)(name, parameter, aruid; process) -> name, parameters, IAudioOut
++        const auto parameter = c.Pop<AudioOutParameter>();
++        c.Pop<u64>();
++        const u64 aruid = c.Pid();
++        KProcess* game = NativeGame::Process();
++        if (!game) return c.SetResult(0xE401);
++        const auto raw = c.ReadBuffer(0);
++        const std::string device(reinterpret_cast<const char*>(raw.data()), strnlen(reinterpret_cast<const char*>(raw.data()), raw.size()));
++        size_t id = 0;
++        if (const Result r = manager.LinkToManager(); r.IsError()) return c.SetResult(r.raw);
++        if (const Result r = manager.AcquireSessionId(id); r.IsError()) return c.SetResult(r.raw);
++        auto o = std::make_shared<OutSession>(system, manager, id);
++        o->process = game;
++        o->process->Open(kernel);
++        o->kernel = &kernel;
++        auto& out_system = o->out->GetSystem();
++        if (const Result r = out_system.Initialize(device, parameter, game, aruid); r.IsError()) return c.SetResult(r.raw); // (closing frees the id)
++        {
++            std::scoped_lock lk{manager.mutex};
++            manager.sessions[id] = o->out;
++            manager.applet_resource_user_ids[id] = aruid;
++        }
++        {
++            std::scoped_lock lk{g_sessions_lock};
++            g_outs.push_back(o);
++        }
++        const DeviceName name{"DeviceOut"};
++        if (c.WriteBufferSize(0) >= sizeof(name)) c.WriteBuffer(&name, sizeof(name), 0);
++        c.Push(AudioOutParameterInternal{.sample_rate = out_system.GetSampleRate(),
++                                         .channel_count = out_system.GetChannelCount(),
++                                         .sample_format = static_cast<u32>(out_system.GetSampleFormat()),
++                                         .state = static_cast<u32>(out_system.GetState())});
++        c.PushInterface(AudioOutSession(kernel, o));
++        LOG_INFO(Service_Audio, "native services: audio output opened ({} channels)", out_system.GetChannelCount());
++    };
++    s->On(0, list);
++    s->On(1, open);
++    s->On(2, list);
++    s->On(3, open);
++    return s;
++}
++
 +void StopAudioRenderers() {
++    {
++        std::vector<std::shared_ptr<OutSession>> outs;
++        {
++            std::scoped_lock lk{g_sessions_lock};
++            for (auto& w : g_outs)
++                if (auto o = w.lock()) outs.push_back(std::move(o));
++            g_outs.clear();
++        }
++        for (auto& o : outs) o->Close();
++    }
 +    std::vector<std::shared_ptr<RendererSession>> live;
 +    {
 +        std::scoped_lock lk{g_sessions_lock};
@@ -11027,10 +11168,10 @@ index 0000000000..a43679a38f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..b43b27b4db
+index 0000000000..649f31b2e5
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,432 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -11447,6 +11588,7 @@ index 0000000000..b43b27b4db
 +        {"pl:u", [&] { return MakeSharedFont(kernel); }},
 +        {"hid", [&] { return MakeHidService(kernel); }},
 +        {"audren:u", [&] { return MakeAudioRendererService(kernel); }},
++        {"audout:u", [&] { return MakeAudioOutService(kernel); }},
 +        {"nvdrv", [&] { return MakeNvdrvService(kernel, "nvdrv"); }},
 +        {"mii:e", [] { return MakeMiiService("mii:e", true); }},
 +        {"mii:u", [] { return MakeMiiService("mii:u", false); }},
@@ -11464,10 +11606,10 @@ index 0000000000..b43b27b4db
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..1f633e6eef
+index 0000000000..af731a5e5f
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
@@ -11506,6 +11648,7 @@ index 0000000000..1f633e6eef
 +
 +/// The audio renderer service around audio_core (native_audio_service.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeAudioRendererService(KernelCore& kernel);
++std::shared_ptr<KartRuntime::Service> MakeAudioOutService(KernelCore& kernel);
 +/// Stops every renderer the runtime started (engine shutdown, before audio_core goes).
 +void StopAudioRenderers();
 +

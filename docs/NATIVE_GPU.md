@@ -764,3 +764,23 @@ The signed 16-bit index at object+0x884 is -1 ("none"), the array lookup at inde
 - **Mod exefs** folders are ignored in the no-JIT build (code mods cannot run on recompiled code); their romfs still applies.
 - Windows only: mimalloc for `operator new/delete`, P-core pinning on hybrid Intel CPUs, F11 fullscreen toggle, crash stacks in
   `crash_stack.txt`.
+
+## Two frames in flight, frames submitted in parts, exact sky depth (2026-11-25)
+
+- **Two frames in flight** (`flights`, `WaitPrevFrame`; `KARTRECOMP_FRAMES_IN_FLIGHT=1` = one, as before). The renderer used to wait
+  for the GPU to finish a frame before recording the next, so recording and GPU time added up (4K, FSR 3 + frame generation, race
+  start: 8.5 ms + 11 ms = 51 fps). Each flight has its own command buffers, fence, acquire semaphore, descriptor pool, half of the
+  upload ring and timestamp queries. Everything there is one of (descriptor sets of the motion vectors, upscaler, FSR 1, HDR, overlay,
+  frame generation; the plugins) is only touched after `WaitPrevFrame()`, which each of those places calls: the scene before the
+  upscale point needs none of them. `DestroyRetired` already kept replaced objects for two frames. Same scene now: 60 fps, wait 0.04 ms.
+- **Parts** (`SubmitPart`, `KARTRECOMP_FRAME_PARTS=1` = whole frames): at a render pass boundary after 150 draws, at most four parts, so
+  the GPU starts on the shadow maps and the pre-pass while the rest is recorded.
+- **Layout changes close the open pass** (`Barrier`); views only in compatible formats (`ViewFormatOk`); the swapchain is used by one
+  thread at a time (`AcquireNext`, `swap_mutex`). Found with the Vulkan validation layer; still reported and harmless so far: integer
+  vertex attributes read as float by some shaders (the raw bits are what the shader wants), one point-list pipeline without PointSize.
+- **Sky domes on the far plane** (`TranslatedShader::far_plane`): a vertex shader that writes z = w draws with the depth range [1, 1].
+  The sky is drawn in the depth pre-pass and again with an EQUAL test; AMD's interpolated depth was a hair off 1.0, so one layer's
+  triangles lost against the other's (Sky-High Sundae: coral slabs and hairlines; emulators still show it on AMD).
+- `KARTRECOMP_DRAW_CHECK=1` logs draws that break a Vulkan rule, once per kind; `KARTRECOMP_SPV_DUMP=<folder>` writes every translated
+  shader for `spirv-val`.
+- The in-game speed limit row drives the native display clock (`KartOverlay::DisplayClockHz`); it did nothing on the native queue before.
