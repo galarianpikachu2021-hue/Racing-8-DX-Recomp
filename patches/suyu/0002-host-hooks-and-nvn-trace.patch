@@ -11168,10 +11168,10 @@ index 0000000000..a43679a38f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..649f31b2e5
+index 0000000000..f68a3bb3d5
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,433 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -11577,6 +11577,7 @@ index 0000000000..649f31b2e5
 +        {"nifm:a", [&] { return MakeNetwork(runtime, "nifm:a"); }},
 +        {"nifm:s", [&] { return MakeNetwork(runtime, "nifm:s"); }},
 +        {"mm:u", [] { return MakeMultimedia(); }},
++        {"nfp:user", [&] { return MakeAmiibo(runtime, "nfp:user"); }},
 +        {"acc:u0", [&] { return MakeAccount("acc:u0", MakeAccountConfig(system)); }},
 +        {"acc:u1", [&] { return MakeAccount("acc:u1", MakeAccountConfig(system)); }},
 +        {"aoc:u", [&] { return MakeAddOnContent(runtime, MakeAddOnConfig(system)); }},
@@ -24087,10 +24088,10 @@ index 0000000000..3a3ae27860
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/system.h b/src/kart_runtime/services/system.h
 new file mode 100644
-index 0000000000..bbb135c5a5
+index 0000000000..a2b6b801eb
 --- /dev/null
 +++ b/src/kart_runtime/services/system.h
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,321 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the small system services a game opens at boot (docs/NATIVE_ENGINE.md, "native services"): settings
 +// ("set"), performance mode ("apm"), parental controls ("pctl*"), play reports ("prepo:*"), friends ("friend:*"), the system
@@ -24226,6 +24227,35 @@ index 0000000000..bbb135c5a5
 +/// result: the game shows its "can't connect" message and goes back to the main menu. (Without the service the game asked the
 +/// service manager for it, got "not registered" and froze on its communication-error screen.) Playing together over the internet
 +/// is the game's Wireless Play over a multiplayer room, which does not go through this service.
++/// "nfp:user" (amiibo) on a console with no NFC reader: the game opens it for its amiibo screen and stops when nothing answers. Starting
++/// works, no device is ever listed (2115-0064), so the game says it needs a controller that can read amiibo.
++inline std::shared_ptr<Service> MakeAmiibo(NativeKernel& kernel, const char* name) {
++    constexpr uint32_t DeviceNotFound = 115 | (64u << 9); // 2115-0064
++    auto s = std::make_shared<Service>(name);
++    s->On(0, [&kernel, DeviceNotFound](Context& c) { // CreateUserInterface -> IUser
++        struct State {
++            uint32_t state = 0; // NonInitialized / Initialized
++            std::shared_ptr<Event> availability;
++        };
++        auto st = std::make_shared<State>();
++        st->availability = std::make_shared<Event>(kernel, "nfp availability");
++        auto u = std::make_shared<Service>("nfp IUser");
++        u->On(0, [st](Context&) { st->state = 1; }); // Initialize
++        u->On(1, [st](Context&) { st->state = 0; }); // Finalize
++        u->On(2, [DeviceNotFound](Context& c2) {     // ListDevices -> handles, count
++            c2.Push<int32_t>(0);
++            c2.SetResult(DeviceNotFound);
++        });
++        for (const uint32_t cmd : {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 22, 24}) // all need a device
++            u->On(cmd, [DeviceNotFound](Context& c2) { c2.SetResult(DeviceNotFound); });
++        u->On(19, [st](Context& c2) { c2.Push<uint32_t>(st->state); }); // GetState
++        u->On(20, [](Context& c2) { c2.Push<uint32_t>(6); });           // GetDeviceState: Finalized
++        u->On(23, [st](Context& c2) { c2.PushCopyObject(st->availability); }); // AttachAvailabilityChangeEvent
++        c.PushInterface(u);
++    });
++    return s;
++}
++
 +inline std::shared_ptr<Service> MakeNetwork(NativeKernel& kernel, const char* name) {
 +    constexpr uint32_t PendingConnection = 110 | (111u << 9);           // 2110-0111
 +    constexpr uint32_t CommunicationDisabled = 110 | (1111u << 9);      // 2110-1111

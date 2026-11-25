@@ -16335,10 +16335,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..953098c6ee
+index 0000000000..7490b54f5c
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9260 @@
+@@ -0,0 +1,9272 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -17498,6 +17498,18 @@ index 0000000000..953098c6ee
 +                }
 +            }
 +            LOG_INFO(Frontend, "nvn-host vulkan: per-object motion vectors {}", objmv_supported ? "available" : wanted ? "not supported by this device" : "off (KARTRECOMP_OBJMV=0)");
++        }
++        // Point lists whose vertex shader writes no PointSize (a few of the game's) are valid with maintenance5.
++        VkPhysicalDeviceMaintenance5FeaturesKHR m5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
++        if (has_dev_ext(VK_KHR_MAINTENANCE_5_EXTENSION_NAME) && vk.vkGetPhysicalDeviceFeatures2 && !dynamic_rendering_ext) {
++            VkPhysicalDeviceFeatures2 probe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
++            probe.pNext = &m5;
++            vk.vkGetPhysicalDeviceFeatures2(physical, &probe);
++            if (m5.maintenance5) {
++                m5.pNext = f13.pNext;
++                f13.pNext = &m5;
++                dev_exts.push_back(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
++            }
 +        }
 +        VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 +        dci.pNext = &f2;

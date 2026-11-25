@@ -800,7 +800,7 @@ blocks, one source piece. Named after its lowest block.
 
 Measured on 4.0.1, Mario Kart Stadium, 12 racers, 40 s profiles, in samples:
 
-| | main game thread | workers (2) | renderer hook thread | main module |
+| | main game thread | worker thread 1 | worker thread 2 | main module |
 |---|---|---|---|---|
 | before | 17,461 | 8,151 | 9,567 | 956 MB |
 | float bodies out of line | 13,921 | 5,756 | 7,362 | 632 MB |

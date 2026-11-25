@@ -1,8 +1,7 @@
 # Windows session: next beta (Linux session, 2026-11-25)
 
 Your `windows-port` fixes (324fd88: start-up hang #45, `sm.h`, the steady-clock resource, `host_memory.cpp`; 4511a32) and the open pull
-requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the maintainer says so; the engine stamp is in
-"Engine stamp" below and is also what Setup compares. The pull requests are not closed or commented on.
+requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the maintainer says so; **engine stamp 8e297414a5-abi6** (`-DKARTRECOMP_ENGINE_VERSION`, also what Setup compares). The pull requests are not closed or commented on.
 
 **Please build and report (one line each is enough):**
 1. Engine starts and reaches the title screen (#45), with mods off.
@@ -18,7 +17,11 @@ requests #40, #46, #47 and #48 are merged locally. Nothing is pushed until the m
    (87 = Sydney Sprint).
 6. DLSS: render scale 67% at 4K in a **one-player** race: does the log say `camera matrix found` and `render scale on (race)`? (#42)
 7. CTGP DX: press L / R on the cup screen: are there new cups? (#28; the Linux build shows them.) Send `log\suyu_log.txt`.
-8. The runtime kernel still does not boot on Windows; leave it off.
+8. The renderer keeps two frames in flight and submits in parts now (docs/NATIVE_GPU.md, last section). If something flickers or crashes,
+   try `KARTRECOMP_FRAMES_IN_FLIGHT=1` and `KARTRECOMP_FRAME_PARTS=1` and say which one helps. Please also run it under the Vulkan
+   validation layer once on NVIDIA; on AMD/Linux a whole Grand Prix with the credits movie is clean except two known harmless kinds.
+9. `plugins/fsr3` changed (image usage, layouts): rebuild it.
+10. The runtime kernel still does not boot on Windows; leave it off.
 
 # Windows session: build and test v0.2.4 on this PC
 
