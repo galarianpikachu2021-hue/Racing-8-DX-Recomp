@@ -53,7 +53,7 @@ public:
     /// True when the game is built as fast code: one code check per module, chained branches and native calls
     /// (KARTRECOMP_NO_FAST_CODE=1 at Setup time builds the older, slower form).
     static bool FastCode();
-    /// Fast code plus direct memory (Linux only: it needs the engine's fault handler).
+    /// Fast code plus direct memory, on Linux and Windows (KARTRECOMP_NO_DIRECT_MEM=1 at Setup time opts out).
     static bool DirectMemory();
     /// Free RAM the build can use (MemAvailable on Linux, GlobalMemoryStatusEx on Windows); 8 GiB if the system will not say.
     static qint64 AvailableMemoryBytes();
