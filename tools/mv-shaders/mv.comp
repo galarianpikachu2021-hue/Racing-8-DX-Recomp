@@ -31,7 +31,8 @@ layout(push_constant) uniform Params {
     float max_dist;   // only pixels closer than this (view-space units) can be moving objects
     float vis_gain;   // debug view: pixels per full colour
     float wide;      // 1: also search a wide grid (+-12 px) for fast movers (costs about twice as much)
-    float pad2, pad3;
+    float objects;   // 1: moving objects get exact vectors from the object pass (objmv.frag): no guessing here, only the mismatch mask
+    float pad3;
 } p;
 
 const float kLumaTol = 0.06;  // mean 3x3 luminance difference above which the camera vector is doubted
@@ -135,8 +136,8 @@ void main() {
                 cam_cost_px = cam_cost;
                 // Reactive mask for the upscaler: where the picture isn't explained by the camera (animated characters, effects,
                 // anything without motion data of its own) history is wrong, and FSR drags it along as ghosting.
-                mismatch = clamp((cam_cost - 0.03) * 7.0, 0.0, 0.9);
-                if (cam_cost > kLumaTol) {
+                mismatch = clamp((cam_cost - (p.objects > 0.5 ? 0.08 : 0.03)) * 7.0, 0.0, 0.9);
+                if (cam_cost > kLumaTol && p.objects < 0.5) {
                     bad = true;
                     atomicAdd(s_bad, 1u);
                     atomicAdd(s_cam_cost, uint(cam_cost * 1000.0));

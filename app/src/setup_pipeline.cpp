@@ -64,7 +64,11 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QStringList args{"--base", layout.base(), "--update", layout.update(), "--keys", layout.keysFile(), "--out", layout.exportDir(), "--progress-fd", "1"};
         if (in.decrypted()) args = {"--exefs", layout.decryptedExefs(), "--out", layout.exportDir(), "--progress-fd", "1"};
         for (const QString& p : in.patches) args << "--patch" << p;
-        if (BuildRunner::FastCode()) args << "--native-calls" << "--chain-cond"; // --fast-entry (two functions per block) measured no gain and 9% bigger modules: off
+        if (BuildRunner::FastCode()) {
+            args << "--native-calls" << "--chain-cond";
+            // Regions: the hot blocks of one game function become one C function (docs/NATIVE_ENGINE.md "Regions").
+            if (!hotList.isEmpty() && qEnvironmentVariable("KARTRECOMP_NO_REGIONS") != QLatin1String("1")) args << "--regions" << hotList;
+        } // --fast-entry (two functions per block) measured no gain and 9% bigger modules: off
         // 3.0.4 and 4.0.1 are built with block hooks: CTGP DX's extra cups are host hooks on game blocks
         // (core/arm/recomp/kart_hook_trace.cpp, per-build addresses); without them CTGP DX's cups do nothing (issue #28).
         if (updateName == QLatin1String("3.0.4") || updateName == QLatin1String("4.0.1")) {
@@ -102,7 +106,7 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         QFile list(QDir(layout.exportDir()).filePath("code_patches.txt"));
         if (list.open(QIODevice::ReadOnly)) plan.codePatches = list.readAll();
     }
-    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::DirectMemory() ? "|hot-O3-fast1" : BuildRunner::FastCode() ? "|hot-O3-fast1-nodm" : "|hot-O3");
+    plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::DirectMemory() ? "|hot-O3-fast2" : BuildRunner::FastCode() ? "|hot-O3-fast2-nodm" : "|hot-O3");
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QCoreApplication::translate("Messages", "Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);
