@@ -16,6 +16,11 @@ void Write(const QString& path, const QByteArray& bytes, bool exec = false) {
     if (exec) f.setPermissions(f.permissions() | QFileDevice::ExeOwner);
 }
 
+QByteArray ReadAll(const QString& path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
+
 // Fake exporter / compiler / engine as shell scripts, so the pipeline runs end to end without game files.
 struct Fixture {
     QTemporaryDir dir;
@@ -84,6 +89,26 @@ private slots:
         f.paths.engineVersion = "v2";
         QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
         QVERIFY(IsBuilt(f.layout, "v2"));
+    }
+    void aProfileNextToTheHotListIsUsedForEveryCompile() {
+        NEEDS_SH();
+        Fixture f;
+        const QString args = f.dir.filePath("clang-args.txt");
+        Write(f.paths.toolchain + "/bin/clang", "#!/bin/sh\necho \"$*\" >> '" + args.toUtf8() +
+              "'\nout=; while [ $# -gt 0 ]; do [ \"$1\" = -o ] && out=\"$2\"; shift; done; echo o > \"$out\"\n", true);
+        QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
+        QVERIFY(!ReadAll(args).contains("-fprofile-use")); // no profile: nothing changes
+        const QString profile = QFileInfo(f.paths.hotList).dir().filePath("game.profdata");
+        Write(profile, "P");
+        QFile::remove(args);
+        QVERIFY(RunSetupPipeline(f.in, f.layout, f.paths, nullptr, nullptr, {0, 0}).ok);
+        const QStringList compiles = QString::fromUtf8(ReadAll(args)).split('\n', Qt::SkipEmptyParts).filter(" -c ");
+        QVERIFY(!compiles.isEmpty()); // a new profile changes the stamp, so every piece is compiled again, each with it
+        for (const QString& c : compiles) {
+            QVERIFY2(c.contains("-fprofile-use=" + profile), qPrintable(c));
+            // sources go in relative to the cache folder, so the profile's names of static functions match in any install folder
+            QVERIFY2(c.contains(" -c build-work/") || c.contains(" -c export/"), qPrintable(c));
+        }
     }
     void an32BitUpdateStopsBeforeAnythingIsInstalled() {
         NEEDS_SH();

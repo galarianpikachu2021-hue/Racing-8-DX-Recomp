@@ -47,6 +47,8 @@ QStringList CommonArgs(bool hot, const QString& includeDir) {
     // start, and (where the engine has the fault handler) game memory is read in place instead of through a helper call.
     if (BuildRunner::FastCode()) a << "-DRECOMP_GUARD_WHOLE=1";
     if (BuildRunner::DirectMemory()) a << "-DRECOMP_DIRECT_MEM=1";
+    // KARTRECOMP_EXTRA_CFLAGS (e.g. "-fprofile-generate" to record a profile, docs/PGO.md): appended last so they win.
+    a << QProcess::splitCommand(qEnvironmentVariable("KARTRECOMP_EXTRA_CFLAGS"));
     return a;
 }
 } // namespace
@@ -199,7 +201,11 @@ bool BuildRunner::RunCompileJob(const QString& compiler, const CompileJob& job, 
     QProcess p;
     p.setProcessChannelMode(QProcess::SeparateChannels);
     DieWithParent(p);
-    p.start(compiler, job.args + QStringList{"-c", job.source, "-o", job.object});
+    // Relative to the cache folder: clang names a profile's static functions after the source path it is given, so a profile
+    // recorded in one install folder (data/mk8d-<version>/game.profdata) only matches the others if that path leaves the folder out.
+    if (!job.root.isEmpty()) p.setWorkingDirectory(job.root);
+    const QString source = job.root.isEmpty() ? job.source : QDir(job.root).relativeFilePath(job.source);
+    p.start(compiler, job.args + QStringList{"-c", source, "-o", job.object});
     if (!p.waitForStarted()) {
         if (error) *error = QCoreApplication::translate("Messages", "cannot start %1").arg(compiler);
         return false;
@@ -305,7 +311,10 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
     if (modules.isEmpty()) return {false, QCoreApplication::translate("Messages", "%1 holds no exported modules").arg(plan.exportDir)};
 
     for (Module& m : modules)
-        for (CompileJob& j : m.jobs) j.args = plan.compileArgs + j.args;
+        for (CompileJob& j : m.jobs) {
+            j.args = plan.compileArgs + j.args;
+            j.root = QFileInfo(plan.workDir).absolutePath(); // the cache folder, which holds both build-work and export
+        }
     // Each job's key. Paths that differ between installs (the include folder, the toolchain's sysroot) are left out of the options;
     // the headers count by content, the compiler by its size.
     {
@@ -428,7 +437,9 @@ BuildResult BuildRunner::Build(const BuildPlan& plan, const std::function<void(i
             for (const CompileJob& j : mp->jobs) objects << j.object;
             const QString out = QDir(plan.outDir).filePath(ModuleFileName(mp->name));
             QString error;
-            const bool ok = LinkModule(plan.compiler, plan.linkArgs + QStringList{linkThreads}, plan.linkLibs, plan.builtins, objects, out,
+            // KARTRECOMP_EXTRA_LDFLAGS: e.g. the profile runtime library for a -fprofile-generate build (docs/PGO.md).
+            const QStringList extraLink = QProcess::splitCommand(qEnvironmentVariable("KARTRECOMP_EXTRA_LDFLAGS"));
+            const bool ok = LinkModule(plan.compiler, plan.linkArgs + extraLink + QStringList{linkThreads}, plan.linkLibs, plan.builtins, objects, out,
                                        QDir(plan.workDir).filePath(mp->name + ".link.rsp"), &error, cancel);
             std::lock_guard<std::mutex> lock(mutex);
             if (!ok) {

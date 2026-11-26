@@ -107,6 +107,17 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
         if (list.open(QIODevice::ReadOnly)) plan.codePatches = list.readAll();
     }
     plan.stamp = paths.engineVersion + "|" + FileText(paths.toolchain + "/TOOLCHAIN_VERSION") + "|" + FileHash(hotList) + "|" + updateName + (BuildRunner::DirectMemory() ? "|hot-O3-fast2" : BuildRunner::FastCode() ? "|hot-O3-fast2-nodm" : "|hot-O3");
+    // BuildRunner's KARTRECOMP_EXTRA_* flags rebuild the game when they change, and leave the stamp alone when unset.
+    const QString extra = qEnvironmentVariable("KARTRECOMP_EXTRA_CFLAGS") + "|" + qEnvironmentVariable("KARTRECOMP_EXTRA_LDFLAGS");
+    if (extra != "|") plan.stamp += "|extra " + extra;
+    // A clang profile of the game code next to the hot list (data/mk8d-<version>/game.profdata). It is recorded on fast code (with or
+    // without direct memory), so only fast code uses it. Functions whose code no longer matches the profile are compiled without it
+    // (each one warns under -Wbackend-plugin, silenced: there would be one line per function).
+    const QString profile = QFileInfo(hotList).dir().filePath(QStringLiteral("game.profdata"));
+    if (!hotList.isEmpty() && BuildRunner::FastCode() && QFileInfo::exists(profile)) {
+        plan.compileArgs << "-fprofile-use=" + profile << QStringLiteral("-Wno-backend-plugin");
+        plan.stamp += "|pgo " + FileHash(profile);
+    }
     const auto built = BuildRunner::Build(plan, [&](int done, int total, const QString& what) {
         report(100 + 850 * done / std::max(total, 1), QCoreApplication::translate("Messages", "Compiling %1 of %2: %3").arg(done).arg(total).arg(what));
     }, cancel);
