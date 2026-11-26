@@ -5,6 +5,7 @@
 #   tools\    kartrecomp-export.exe (+ the same DLLs)
 #   toolchain\  clang + lld + mingw-w64 (builds the game modules on the user's PC)
 #   data\mk8d-<update>\hot_blocks.txt (one per supported update)
+#   data\mk8d-<update>\pipelines.txt when present (shader preparation, docs/PRECOMPILE.md)
 # Never game files: nothing is read from outside the three inputs and the repository.
 param(
     [Parameter(Mandatory = $true)][string]$Engine,
@@ -24,7 +25,7 @@ if (Test-Path "$Engine\mimalloc-LICENSE.txt") { Copy-Item "$Engine\mimalloc-LICE
 Get-ChildItem $Engine -Filter *.dll | ForEach-Object { Copy-Item $_.FullName "$Out\engine"; Copy-Item $_.FullName "$Out\tools" }
 if ($Plugins -and (Test-Path $Plugins)) { Copy-Item "$Plugins\*" "$Out\engine\plugins" -Recurse }
 Copy-Item $Toolchain "$Out\toolchain" -Recurse
-Get-ChildItem "$repo\data" -Directory -Filter "mk8d-*" | ForEach-Object { New-Item -ItemType Directory -Force -Path "$Out\data\$($_.Name)" | Out-Null; Copy-Item "$($_.FullName)\hot_blocks.txt" "$Out\data\$($_.Name)\"; if (Test-Path "$($_.FullName)\ui_cmn_hashes.txt") { Copy-Item "$($_.FullName)\ui_cmn_hashes.txt" "$Out\data\$($_.Name)\" } }  # ui_cmn_hashes.txt: the launcher's menu-mod merge for 4.0.1 reads it beside the hot list
+Get-ChildItem "$repo\data" -Directory -Filter "mk8d-*" | ForEach-Object { New-Item -ItemType Directory -Force -Path "$Out\data\$($_.Name)" | Out-Null; Copy-Item "$($_.FullName)\hot_blocks.txt" "$Out\data\$($_.Name)\"; foreach ($f in 'ui_cmn_hashes.txt', 'pipelines.txt') { if (Test-Path "$($_.FullName)\$f") { Copy-Item "$($_.FullName)\$f" "$Out\data\$($_.Name)\" } } }  # ui_cmn_hashes.txt: the launcher's menu-mod merge for 4.0.1 reads it beside the hot list; pipelines.txt: the setup's shader preparation (docs/PRECOMPILE.md)
 foreach ($f in 'LEGAL.md', 'LICENSE') { if (Test-Path "$repo\$f") { Copy-Item "$repo\$f" $Out } }
 Copy-Item "$repo\packaging\windows\README-WINDOWS.txt", "$repo\packaging\windows\Collect-Logs.cmd", "$repo\packaging\windows\Diagnose-System.ps1" $Out
 Write-Host "assembled $Out"

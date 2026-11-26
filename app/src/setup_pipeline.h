@@ -22,7 +22,8 @@ struct PipelineLimits {
     qint64 dataBytes = 2LL << 30;  // the finished game and the installed files
 };
 
-/// `progress(permille, text)`: 0..1000 over validate (0-10), export (10-100), compile (100-950), verify (950-990), stamp (1000).
+/// `progress(permille, text)`: 0..1000 over validate (0-10), export (10-100), compile (100-950), verify (950-990), shader
+/// preparation when data/mk8d-<version>/pipelines.txt exists (990-999), stamp (1000).
 PipelineResult RunSetupPipeline(const SetupInputs& inputs, const DataLayout& layout, const BuilderPaths& paths,
                                 const std::function<void(int, const QString&)>& progress, const std::atomic<bool>* cancel,
                                 const PipelineLimits& limits = {});

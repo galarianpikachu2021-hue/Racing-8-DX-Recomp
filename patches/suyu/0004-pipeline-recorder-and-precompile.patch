@@ -1,0 +1,1141 @@
+diff --git a/src/core/nvn_host/shader_translate.cpp b/src/core/nvn_host/shader_translate.cpp
+index 9fc4e141b..709ceda12 100644
+--- a/src/core/nvn_host/shader_translate.cpp
++++ b/src/core/nvn_host/shader_translate.cpp
+@@ -22,7 +22,19 @@
+ #include "video_core/textures/texture.h"
+ 
+ namespace Core::NvnHost {
++namespace {
++thread_local const std::unordered_map<u32, Shader::TextureType>* t_texture_types = nullptr;
++} // namespace
++
++void SetThreadTextureTypes(const std::unordered_map<u32, Shader::TextureType>* types) {
++    t_texture_types = types;
++}
++
+ Shader::TextureType TextureTypeForHandle(u32 raw_handle) {
++    if (t_texture_types) {
++        const auto it = raw_handle ? t_texture_types->find(raw_handle & 0xFFFFF) : t_texture_types->end();
++        return it == t_texture_types->end() ? Shader::TextureType::Color2D : it->second;
++    }
+     Tegra::Texture::TICEntry tic{};
+     if (raw_handle == 0 || !NvnHost::ReadTextureDescriptor(raw_handle & 0xFFFFF, &tic)) {
+         return Shader::TextureType::Color2D;
+diff --git a/src/core/nvn_host/shader_translate.h b/src/core/nvn_host/shader_translate.h
+index ff89224f1..575c40481 100644
+--- a/src/core/nvn_host/shader_translate.h
++++ b/src/core/nvn_host/shader_translate.h
+@@ -10,6 +10,7 @@
+ #include <array>
+ #include <functional>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ #include "common/common_types.h"
+@@ -75,6 +76,10 @@ using CbufQuery = std::function<u32(int nvn_stage, u32 cbuf_index, u32 cbuf_offs
+ /// handle's TIC, Color2D when there is none (handle 0 or unreadable).
+ Shader::TextureType TextureTypeForHandle(u32 raw_handle);
+ 
++/// Precompile (no game memory to read descriptors from): this thread's TextureTypeForHandle answers from `types` (texture
++/// id = handle & 0xFFFFF -> type, Color2D when absent) instead of the TIC. Null turns it off.
++void SetThreadTextureTypes(const std::unordered_map<u32, Shader::TextureType>* types);
++
+ /// uint_outputs: bit i set = fragment color output i is an unsigned integer (the
+ /// render target is a UINT format), as suyu's pipeline cache tells its compiler.
+ std::vector<TranslatedShader> TranslateProgramStages(const GpuReader& read,
+diff --git a/src/suyu_cmd/explicit_update.h b/src/suyu_cmd/explicit_update.h
+index 0d564edae..e52962ac2 100644
+--- a/src/suyu_cmd/explicit_update.h
++++ b/src/suyu_cmd/explicit_update.h
+@@ -41,7 +41,8 @@ inline bool ConfigureExplicitUpdate(Core::System& system, ExplicitUpdateProvider
+                                     const std::string& base_path,
+                                     const std::string& update_path,
+                                     const std::string& dump_directory = {},
+-                                    const std::vector<std::string>& dlc_paths = {}) {
++                                    const std::vector<std::string>& dlc_paths = {},
++                                    FileSys::VirtualFile* romfs_out = nullptr) {
+     using FileSys::ContentRecordType;
+     using FileSys::TitleType;
+     const auto fail = [](const char* message) {
+@@ -205,6 +206,7 @@ inline bool ConfigureExplicitUpdate(Core::System& system, ExplicitUpdateProvider
+     LOG_INFO(Frontend, "CLI paired content verified title_id={:016X} update_id={:016X} "
+                       "version={} display={} is64=1 romfs_bytes={}", title_id, update_id,
+              selected.version, selected.version_string, effective_romfs->GetSize());
++    if (romfs_out) *romfs_out = effective_romfs; // the game's RomFS, base + update (precompile reads its shaders)
+     if (!dump_directory.empty()) {
+         try {
+             DumpVerifiedGameData(effective_exefs, effective_romfs, dump_directory);
+diff --git a/src/suyu_cmd/native_gpu/native_surface.h b/src/suyu_cmd/native_gpu/native_surface.h
+index 2927b1075..1e58ae6cd 100644
+--- a/src/suyu_cmd/native_gpu/native_surface.h
++++ b/src/suyu_cmd/native_gpu/native_surface.h
+@@ -41,7 +41,8 @@ public:
+ std::unique_ptr<NativeSurface> MakeAndroidSurface(void* native_window);
+ void SetAndroidWindow(void* native_window);
+ #else
+-std::unique_ptr<NativeSurface> MakeSdlSurface();
++/// hidden: a window that is never shown (precompile: a surface to choose the device and make the swapchain with).
++std::unique_ptr<NativeSurface> MakeSdlSurface(bool hidden = false);
+ #endif
+ 
+ } // namespace KartRecomp
+diff --git a/src/suyu_cmd/native_gpu/native_surface_sdl.cpp b/src/suyu_cmd/native_gpu/native_surface_sdl.cpp
+index 28c0c72f4..64d8c57a4 100644
+--- a/src/suyu_cmd/native_gpu/native_surface_sdl.cpp
++++ b/src/suyu_cmd/native_gpu/native_surface_sdl.cpp
+@@ -12,6 +12,7 @@ namespace {
+ 
+ class SdlSurface final : public NativeSurface {
+ public:
++    explicit SdlSurface(bool hidden_) : hidden{hidden_} {}
+     ~SdlSurface() override {
+         SDL_RemoveEventWatch(&SdlSurface::Watch, this);
+         if (window) SDL_DestroyWindow(window);
+@@ -21,7 +22,8 @@ public:
+         const bool exclusive = Core::NvnHost::Exclusive();
+         window = SDL_CreateWindow(exclusive ? "Mario Kart 8 Deluxe - KartRecomp" : "KartRecomp - native GPU (shadow)",
+                                   exclusive ? 1280 : 960, exclusive ? 720 : 540,
+-                                  SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | (exclusive && fullscreen ? SDL_WINDOW_FULLSCREEN : 0));
++                                  SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | (exclusive && fullscreen ? SDL_WINDOW_FULLSCREEN : 0) |
++                                      (hidden ? SDL_WINDOW_HIDDEN : 0));
+         if (!window) {
+             LOG_ERROR(Frontend, "nvn-host vulkan: {}", SDL_GetError());
+             return false;
+@@ -63,12 +65,13 @@ private:
+         return true;
+     }
+     SDL_Window* window = nullptr;
++    bool hidden = false;
+ };
+ 
+ } // namespace
+ 
+-std::unique_ptr<NativeSurface> MakeSdlSurface() {
+-    return std::make_unique<SdlSurface>();
++std::unique_ptr<NativeSurface> MakeSdlSurface(bool hidden) {
++    return std::make_unique<SdlSurface>(hidden);
+ }
+ 
+ } // namespace KartRecomp
+diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
+index 3e06e04ea..6b228cf71 100644
+--- a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
++++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
+@@ -23,6 +23,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <bit>
+ #include <chrono>
+ #include <cmath>
+ #include <condition_variable>
+@@ -31,6 +32,7 @@
+ #include <cstring>
+ #include <filesystem>
+ #include <fstream>
++#include <sstream>
+ #include <string_view>
+ #include <deque>
+ #ifdef _MSC_VER
+@@ -46,6 +48,7 @@
+ 
+ #include <tuple>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include <fmt/format.h>
+@@ -517,6 +520,94 @@ u64 HashBytes(const u8* data, size_t size) {
+     return Common::CityHash64(reinterpret_cast<const char*>(data), size);
+ }
+ 
++/// SHA-1 as 40 hex digits. KARTRECOMP_RECORD_PIPELINES names stage code by it for offline tools; the engine links no SHA-1.
++std::string Sha1Hex(const u8* data, size_t size) {
++    std::vector<u8> msg(data, data + size);
++    msg.push_back(0x80);
++    while (msg.size() % 64 != 56) msg.push_back(0);
++    const u64 bits = u64{size} * 8;
++    for (int i = 7; i >= 0; --i) msg.push_back(static_cast<u8>(bits >> (i * 8)));
++    u32 h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
++    for (size_t at = 0; at < msg.size(); at += 64) {
++        u32 w[80];
++        for (int i = 0; i < 16; ++i) {
++            const u8* p = &msg[at + 4 * i];
++            w[i] = u32{p[0]} << 24 | u32{p[1]} << 16 | u32{p[2]} << 8 | u32{p[3]};
++        }
++        for (int i = 16; i < 80; ++i) w[i] = std::rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
++        u32 a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
++        for (int i = 0; i < 80; ++i) {
++            const u32 f = i < 20 ? (b & c) | (~b & d) : i < 40 ? b ^ c ^ d : i < 60 ? (b & c) | (b & d) | (c & d) : b ^ c ^ d;
++            const u32 k = i < 20 ? 0x5A827999u : i < 40 ? 0x6ED9EBA1u : i < 60 ? 0x8F1BBCDCu : 0xCA62C1D6u;
++            const u32 t = std::rotl(a, 5) + f + e + k + w[i];
++            e = d;
++            d = c;
++            c = std::rotl(b, 30);
++            b = a;
++            a = t;
++        }
++        h[0] += a, h[1] += b, h[2] += c, h[3] += d, h[4] += e;
++    }
++    return fmt::format("{:08x}{:08x}{:08x}{:08x}{:08x}", h[0], h[1], h[2], h[3], h[4]);
++}
++
++/// KARTRECOMP_RECORD_PIPELINES=<file>: one line per distinct pipeline created, to build the shipped precompile list offline
++/// (format at RecordPipeline). Empty when unset, or when the SHA-1 fails its known answer.
++const std::string& RecordPipelinesPath() {
++    static const std::string path = [] {
++        const char* v = std::getenv("KARTRECOMP_RECORD_PIPELINES");
++        if (!v || !*v) return std::string{};
++        const u8 abc[] = {'a', 'b', 'c'};
++        if (Sha1Hex(abc, sizeof(abc)) != "a9993e364706816aba3e25717850c26c9cd0d89d") {
++            LOG_ERROR(Frontend, "nvn-host vulkan: SHA-1 self-check failed, KARTRECOMP_RECORD_PIPELINES ignored");
++            return std::string{};
++        }
++        return std::string{v};
++    }();
++    return path;
++}
++
++/// Yaz0 (Nintendo LZ77) stream at `at` of `in`: its decompressed bytes, empty when it is not one or is cut short.
++std::vector<u8> Yaz0Decode(const std::vector<u8>& in, size_t at = 0) {
++    if (in.size() < at + 16 || std::memcmp(in.data() + at, "Yaz0", 4) != 0) return {};
++    const u8* h = in.data() + at + 4;
++    const size_t size = size_t{h[0]} << 24 | size_t{h[1]} << 16 | size_t{h[2]} << 8 | h[3];
++    std::vector<u8> out;
++    out.reserve(size);
++    size_t i = at + 16;
++    while (out.size() < size) {
++        if (i >= in.size()) return {};
++        const u8 code = in[i++];
++        for (int bit = 7; bit >= 0 && out.size() < size; --bit) {
++            if (code >> bit & 1) {
++                if (i >= in.size()) return {};
++                out.push_back(in[i++]);
++                continue;
++            }
++            if (i + 2 > in.size()) return {};
++            const u8 b1 = in[i++], b2 = in[i++];
++            const size_t dist = (size_t{b1 & 0xFu} << 8 | b2) + 1;
++            size_t n = b1 >> 4;
++            if (n == 0) {
++                if (i >= in.size()) return {};
++                n = size_t{in[i++]} + 0x12;
++            } else {
++                n += 2;
++            }
++            if (dist > out.size()) return {};
++            for (; n && out.size() < size; --n) out.push_back(out[out.size() - dist]);
++        }
++    }
++    return out;
++}
++
++/// Known answer for Yaz0Decode: two literals, then a 4-byte copy from 2 back (overlapping).
++bool Yaz0SelfCheck() {
++    const std::vector<u8> in{'Y', 'a', 'z', '0', 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 'a', 'b', 0x20, 0x01};
++    const std::vector<u8> want{'a', 'b', 'a', 'b', 'a', 'b'};
++    return Yaz0Decode(in) == want;
++}
++
+ /// A guest texture decoded on the CPU (read + unswizzled), ready for upload.
+ /// Produced off the render thread for a frame's new textures.
+ struct DecodedTexture {
+@@ -549,6 +640,8 @@ struct ProgramEntry {
+         u64 constants = 0; ///< hardware cbuf 1: the compiler's literal constants
+         bool far_plane = false; ///< vertex stage with Position.z = Position.w (sky domes): drawn with depth range [1, 1]
+         VkShaderModule module_xfb = VK_NULL_HANDLE; ///< kart-recomp: vertex stage with its position captured (object motion)
++        u32 code_size = 0;     ///< recorder only: size at +4 of the prefix, 0 when unknown
++        std::string code_sha1; ///< recorder only: of [data + 0x30, data + 0x30 + code_size) as translated
+     };
+     std::vector<Stage> stages;
+     std::vector<DescriptorRef> descriptors;
+@@ -562,6 +655,9 @@ struct ProgramEntry {
+     std::vector<std::pair<int, u32>> texture_queries; ///< (NVN stage, slot) asked
+     u64 code_hash = 0; ///< of the stages' code: shader memory is reused across courses
+     VkPipelineLayout motion_layout = VK_NULL_HANDLE; ///< kart-recomp: set 0 = set_layout, set 1 = object-motion resources
++    u32 uint_outputs = 0; ///< as translated
++    /// Recorder only: the translator's cbuf questions, (NVN stage, index, offset, value, TextureTypeForHandle(value)).
++    std::vector<std::array<u32, 5>> record_answers;
+ };
+ 
+ /// Vertex buffers up to this size are captured at submit (dynamic per-frame data).
+@@ -657,6 +753,355 @@ public:
+         return ok;
+     }
+ 
++    /// Install-time precompilation (PrecompilePipelines): translates every program of the list from the game files and creates
++    /// each listed pipeline, then the backend's own ones, through the pipeline cache, and saves it. Runs on the caller's thread
++    /// while the render thread idles (no frame is ever queued). Returns the process exit code.
++    int Precompile(const std::string& list_path, const RomfsRead& read_romfs) {
++        const auto start = std::chrono::steady_clock::now();
++        std::ifstream in(list_path, std::ios::binary);
++        std::string line;
++        if (!in || !std::getline(in, line) || !line.starts_with("# kartrecomp pipelines 1")) {
++            std::fprintf(stderr, "precompile: %s is not a pipeline list\n", list_path.c_str());
++            return 2;
++        }
++        if (!pipeline_cache || !Yaz0SelfCheck()) {
++            std::fprintf(stderr, "precompile: %s\n", pipeline_cache ? "Yaz0 self-check failed" : "no Vulkan pipeline cache");
++            return 1;
++        }
++        LOG_INFO(Frontend, "precompile: list {} ({})", list_path, line);
++        std::mutex out_mutex;
++        int last_step = -1;
++        // PROGRESS <permille> <text> on stdout, once per 2% of each phase (lo..hi permille).
++        const auto progress = [&](int lo, int hi, const char* what, size_t done, size_t total) {
++            const int step = total ? static_cast<int>(done * 50 / total) : 50;
++            std::scoped_lock lock{out_mutex};
++            if (step == last_step) return;
++            last_step = step;
++            std::printf("PROGRESS %d %s %zu/%zu\n", lo + (hi - lo) * step / 50, what, done, total);
++            std::fflush(stdout);
++        };
++        const u32 worker_count = std::clamp<u32>(std::thread::hardware_concurrency(), 1, 16);
++        const auto run_workers = [worker_count](size_t count, const auto& job) {
++            std::atomic<size_t> next{0};
++            std::vector<std::thread> workers;
++            for (u32 w = 0; w < std::min<size_t>(worker_count, count); ++w) {
++                workers.emplace_back([&] {
++                    for (size_t i; (i = next.fetch_add(1)) < count;) job(i);
++                });
++            }
++            for (auto& t : workers) t.join();
++        };
++
++        // The list (format at RecordPipeline; build-list.py adds each stage's game file and the offset of its 0x30-byte prefix).
++        struct StageRef {
++            u32 size = 0;
++            std::string sha1;
++            std::string path; ///< RomFS file, "file@0x<offset>[@0x<offset>...]" when the code sits in (nested) Yaz0 streams, "exefs:<nso>" in the executable
++            u64 offset = 0;   ///< of the prefix, in the (decompressed) file or stream
++        };
++        struct Program {
++            std::vector<StageRef> stages;
++            TextureTable textures{}; ///< the recorded cbuf 2 answers, as the handles the translation asked for
++            std::unordered_map<u32, Shader::TextureType> types; ///< recorded texture type by texture id
++            u32 uint_outputs = 0;
++            bool resolved = false; ///< every stage's code found in the game files
++            ProgramEntry entry;
++        };
++        struct Pipe {
++            Program* prog = nullptr;
++            bool motion = false, shadow_map = false;
++            VkPrimitiveTopology topology{};
++            std::vector<VkVertexInputAttributeDescription> attrs;
++            std::vector<VkVertexInputBindingDescription> binds;
++            DrawState st;
++        };
++        std::deque<Program> listed;
++        std::unordered_map<std::string, Program*> program_by_key;
++        std::vector<Pipe> pipes;
++        // CreatePipeline reads only whether a color target is bound (its format comes from color_formats) and the depth format.
++        Image color_image;
++        color_image.info = {VK_FORMAT_R8G8B8A8_UNORM, false};
++        std::map<int, Image> depth_images;
++        size_t bad_lines = 0, type_conflicts = 0;
++        while (std::getline(in, line)) {
++            if (!line.empty() && line.back() == '\r') line.pop_back();
++            if (line.empty() || line[0] == '#') continue;
++            std::istringstream ss(line);
++            const auto word = [&ss] {
++                std::string w;
++                if (!(ss >> w)) throw std::runtime_error("short line");
++                return w;
++            };
++            const auto tag = [&word](std::string_view t) {
++                if (word() != t) throw std::runtime_error("unexpected token");
++            };
++            const auto dec = [&ss] {
++                long long v = 0;
++                if (!(ss >> std::dec >> v)) throw std::runtime_error("bad number");
++                return v;
++            };
++            const auto hex = [&ss] {
++                u64 v = 0;
++                if (!(ss >> std::hex >> v)) throw std::runtime_error("bad number");
++                return v;
++            };
++            try {
++                Pipe pipe;
++                Program prog;
++                tag("P");
++                pipe.motion = dec() != 0;
++                tag("topo");
++                pipe.topology = static_cast<VkPrimitiveTopology>(dec());
++                tag("uint");
++                prog.uint_outputs = static_cast<u32>(hex());
++                tag("st");
++                prog.resolved = true;
++                for (long long n = dec(); n > 0; --n) {
++                    StageRef r;
++                    dec(); // Shader::Stage: the translator reads it from the code
++                    r.size = static_cast<u32>(hex());
++                    r.sha1 = word();
++                    r.path = word();
++                    // build-list.py escapes '%' as %25, then ' ' as %20: undone in reverse order.
++                    for (size_t at = 0; (at = r.path.find("%20", at)) != std::string::npos; ++at) r.path.replace(at, 3, " ");
++                    for (size_t at = 0; (at = r.path.find("%25", at)) != std::string::npos; ++at) r.path.replace(at, 3, "%");
++                    r.offset = hex();
++                    if (!r.size || r.sha1 == "-" || r.path == "-") prog.resolved = false;
++                    prog.stages.push_back(std::move(r));
++                }
++                tag("q");
++                for (long long n = dec(); n > 0; --n) {
++                    const long long stage = dec(), index = dec();
++                    const u32 offset = static_cast<u32>(hex()), value = static_cast<u32>(hex());
++                    const auto type = static_cast<Shader::TextureType>(dec());
++                    if (index == 2 && stage >= 0 && stage < 6 && offset >= kTextureHandleBase && TextureSlot(offset) < 32) {
++                        prog.textures[stage][TextureSlot(offset)] |= offset % 8 == 0 ? u64{value} : u64{value} << 32;
++                    }
++                    if (value) {
++                        const auto [it, added] = prog.types.emplace(value & 0xFFFFF, type);
++                        if (!added && it->second != type) ++type_conflicts;
++                    }
++                }
++                tag("va");
++                for (long long n = dec(); n > 0; --n) {
++                    VkVertexInputAttributeDescription a{};
++                    a.location = static_cast<u32>(dec());
++                    a.binding = static_cast<u32>(dec());
++                    a.format = static_cast<VkFormat>(dec());
++                    a.offset = static_cast<u32>(dec());
++                    pipe.attrs.push_back(a);
++                }
++                tag("vb");
++                for (long long n = dec(); n > 0; --n) {
++                    VkVertexInputBindingDescription b{};
++                    b.binding = static_cast<u32>(dec());
++                    b.stride = static_cast<u32>(dec());
++                    b.inputRate = static_cast<VkVertexInputRate>(dec());
++                    pipe.binds.push_back(b);
++                }
++                DrawState& st = pipe.st;
++                tag("ds");
++                st.depth_stencil = hex();
++                tag("df");
++                if (const int df = static_cast<int>(dec())) {
++                    Image& depth = depth_images[df];
++                    depth.info = {static_cast<VkFormat>(df), true};
++                    st.depth = &depth;
++                }
++                tag("ct");
++                st.color = 0;
++                st.channel_mask = 0;
++                const long long colors = dec();
++                if (colors > 8) throw std::runtime_error("too many color targets");
++                for (u32 i = 0; i < colors; ++i) {
++                    st.colors.push_back(dec() ? &color_image : nullptr);
++                    st.color_formats.push_back(static_cast<VkFormat>(dec()));
++                    st.channel_mask |= static_cast<u32>(hex() & 0xF) << (4 * i);
++                    if (dec()) st.color |= u64{1} << (8 + i);
++                    st.blend[i] = hex();
++                }
++                tag("pg");
++                st.polygon = static_cast<u32>(hex());
++                tag("po");
++                st.polygon_offset = static_cast<u32>(hex());
++                tag("dc");
++                st.depth_clamp = dec() != 0;
++                tag("sm");
++                pipe.shadow_map = dec() != 0;
++                // One program per stage code, translation answers and uint mask: the line from "uint" up to "va".
++                const size_t key_at = line.find(" uint "), key_end = line.find(" va ");
++                auto [it, added] = program_by_key.try_emplace(line.substr(key_at, key_end - key_at), nullptr);
++                if (added) it->second = &listed.emplace_back(std::move(prog));
++                pipe.prog = it->second;
++                pipes.push_back(std::move(pipe));
++            } catch (const std::exception&) {
++                ++bad_lines;
++            }
++        }
++
++        // The stages' code from the game files: each file read once (Yaz0-decoded, as are the streams inside it), each code kept
++        // under its SHA-1 when that is the recorded one.
++        using CodeRef = std::tuple<std::string, u64, u32, std::string>; // path, offset, size, SHA-1
++        std::map<std::string, std::set<CodeRef>> by_file;
++        for (const Program& p : listed) {
++            for (const StageRef& r : p.stages) {
++                if (p.resolved) by_file[r.path.substr(0, r.path.find('@'))].emplace(r.path, r.offset, r.size, r.sha1);
++            }
++        }
++        const std::vector<std::pair<std::string, std::set<CodeRef>>> files(by_file.begin(), by_file.end());
++        std::mutex code_mutex;
++        std::unordered_map<std::string, std::vector<u8>> codes;
++        std::atomic<size_t> files_done{0}, files_missing{0}, code_mismatches{0};
++        run_workers(files.size(), [&](size_t i) {
++            const auto& [file, refs] = files[i];
++            std::vector<u8> bytes = read_romfs(file);
++            if (bytes.empty()) {
++                // an exefs file logs its own line (ReadNsoSegments)
++                if (files_missing++ < 8 && !file.starts_with("exefs:")) LOG_WARNING(Frontend, "precompile: game file {} not found", file);
++            } else if (auto decoded = Yaz0Decode(bytes); !decoded.empty()) {
++                bytes = std::move(decoded);
++            }
++            // Yaz0 streams inside the file, nested ones too ("file@0x<offset>@0x<offset in that one>"), by "@..." chain.
++            std::map<std::string, std::vector<u8>> streams;
++            for (const auto& [path, offset, size, sha1] : refs) {
++                const std::vector<u8>* src = &bytes;
++                const size_t chain = path.find('@');
++                for (size_t at = chain; at != std::string::npos; at = path.find('@', at + 1)) {
++                    const std::string key = path.substr(chain, path.find('@', at + 1) - chain);
++                    auto it = streams.find(key);
++                    if (it == streams.end()) {
++                        it = streams.emplace(key, Yaz0Decode(*src, std::strtoull(path.c_str() + at + 1, nullptr, 16))).first;
++                    }
++                    src = &it->second;
++                }
++                const u64 begin = offset + 0x30;
++                if (begin > src->size() || size > src->size() - begin || Sha1Hex(src->data() + begin, size) != sha1) {
++                    if (!bytes.empty() && code_mismatches++ < 8) {
++                        LOG_WARNING(Frontend, "precompile: {} +{:#x}: not the recorded shader {}", path, offset, sha1);
++                    }
++                    continue;
++                }
++                std::scoped_lock lock{code_mutex};
++                codes.try_emplace(sha1, src->begin() + begin, src->begin() + begin + size);
++            }
++            progress(0, 100, "shaders", ++files_done, files.size());
++        });
++
++        // Programs, translated from that code laid out as in game: each stage at its own address, its 0x30-byte prefix holding
++        // the marker and the code size the game writes there (StageCodeSize), the code after it.
++        static constexpr u64 kStageBase = 0x10'0000'0000, kStageStride = 0x20'0000; // > 0x30 + the largest size StageCodeSize takes
++        std::vector<Program*> builds;
++        for (Program& p : listed) {
++            for (const StageRef& r : p.stages) p.resolved = p.resolved && codes.contains(r.sha1);
++            if (p.resolved) builds.push_back(&p);
++        }
++        last_step = -1;
++        std::atomic<size_t> programs_done{0}, programs_ok{0};
++        run_workers(builds.size(), [&](size_t i) {
++            Program& p = *builds[i];
++            std::vector<std::vector<u8>> memory;
++            std::vector<u64> datas;
++            for (const StageRef& r : p.stages) {
++                const std::vector<u8>& code = codes.at(r.sha1);
++                std::vector<u8>& m = memory.emplace_back(0x30 + code.size());
++                const u32 head[2] = {0x12345678, r.size};
++                std::memcpy(m.data(), head, sizeof(head));
++                std::memcpy(m.data() + 0x30, code.data(), code.size());
++                datas.push_back(kStageBase + (memory.size() - 1) * kStageStride);
++            }
++            const Core::NvnHost::GpuReader reader = [&memory](u64 gpu, void* out, size_t size) {
++                if (gpu < kStageBase) return false;
++                const u64 stage = (gpu - kStageBase) / kStageStride, at = (gpu - kStageBase) % kStageStride;
++                if (stage >= memory.size() || at > memory[stage].size() || size > memory[stage].size() - at) return false;
++                std::memcpy(out, memory[stage].data() + at, size);
++                return true;
++            };
++            Core::NvnHost::SetThreadTextureTypes(&p.types);
++            p.entry = BuildProgram(datas, p.textures, p.uint_outputs, &reader);
++            Core::NvnHost::SetThreadTextureTypes(nullptr);
++            if (p.entry.ok) {
++                ++programs_ok;
++            } else {
++                static std::atomic<int> logged{0};
++                if (logged++ < 8) LOG_WARNING(Frontend, "precompile: program {} not translated: {}", p.stages[0].sha1, p.entry.error);
++            }
++            progress(100, 300, "programs", ++programs_done, builds.size());
++        });
++
++        // Pipelines. Motion variants need the program's motion layout, made here: GetMotionPipeline is not thread-safe.
++        for (Pipe& pipe : pipes) {
++            if (pipe.motion && pipe.prog->entry.ok) EnsureMotionLayout(pipe.prog->entry);
++        }
++        last_step = -1;
++        std::atomic<size_t> pipes_done{0}, created{0}, failed{0}, skipped{0};
++        run_workers(pipes.size(), [&](size_t i) {
++            const Pipe& pipe = pipes[i];
++            const ProgramEntry& prog = pipe.prog->entry;
++            const auto motion_module = [](const ProgramEntry::Stage& s) { return s.stage == Shader::Stage::Fragment || s.module_xfb; };
++            const bool motion_ready =
++                !pipe.motion || (prog.motion_layout && std::all_of(prog.stages.begin(), prog.stages.end(), motion_module));
++            if (!pipe.prog->resolved) {
++                ++skipped; // its code is not in these game files
++            } else if (!prog.ok) {
++                ++failed;
++            } else if (!motion_ready || pipe.shadow_map != IsShadowMapPass(pipe.st)) {
++                ++skipped; // not one this device and configuration draw with
++            } else if (const VkPipeline made = CreatePipeline(prog, pipe.st, pipe.topology, pipe.attrs, pipe.binds, pipe.motion)) {
++                vk.vkDestroyPipeline(device, made, nullptr); // the cache keeps it
++                ++created;
++            } else {
++                ++failed;
++            }
++            progress(300, 970, "pipelines", ++pipes_done, pipes.size());
++        });
++
++        // The backend's own pipelines, for each format they are made for in game: the swapchain's with HDR off and on, and the
++        // FSR 1 upscale point's, which renders into the tonemap's RGB10A2 image (the passes' tonemap_format).
++        std::string internal_failed;
++        const auto internal = [&internal_failed](const char* name, bool made) {
++            if (!made) internal_failed += fmt::format(" {}", name);
++        };
++        internal("motion-vectors", InitMv());
++        internal("sharpen", InitSharpen());
++        internal("frame-generation", InitFrameGen());
++        internal("fsr1-upscale", InitFsr(VK_FORMAT_A2B10G10R10_UNORM_PACK32) != nullptr);
++        const VkFormat current_swap_format = swap_format;
++        for (const VkFormat f : {sdr_swap_format, hdr_swap_format}) {
++            if (f == VK_FORMAT_UNDEFINED) continue;
++            DestroyPresentPipelines(); // made for one swapchain format
++            swap_format = f;
++            const bool hdr = f == hdr_swap_format;
++            internal(hdr ? "overlay-hdr" : "overlay", InitOverlayPipeline());
++            internal(hdr ? "fsr1-present-hdr" : "fsr1-present", InitFsr(f) != nullptr);
++            if (hdr) internal("hdr", InitHdrPipeline());
++        }
++        DestroyPresentPipelines();
++        swap_format = current_swap_format;
++
++        progress(970, 1000, "saving", 0, 1);
++        SavePipelineCache();
++        std::error_code ec;
++        const auto cache_bytes = std::filesystem::file_size(PipelineCachePath(), ec);
++        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
++        const std::string details = fmt::format(
++            "precompile details: {} lines ({} unreadable), {} programs listed, {} game files ({} missing), {} codes not matching, {} texture "
++            "type conflicts, internal pipelines failed:{}, cache {} bytes at {}",
++            pipes.size() + bad_lines, bad_lines, listed.size(), files.size(), files_missing.load(), code_mismatches.load(),
++            type_conflicts, internal_failed.empty() ? " none" : internal_failed, ec ? 0 : cache_bytes,
++            Common::FS::PathToUTF8String(PipelineCachePath()));
++        const std::string summary = fmt::format("precompile: {} programs, {} pipelines ({} failed, {} skipped), {:.1f} s",
++                                                programs_ok.load(), created.load(), failed.load(), skipped.load(), seconds);
++        LOG_INFO(Frontend, "{}", details);
++        LOG_INFO(Frontend, "{}", summary);
++        std::printf("PROGRESS 1000 done\n%s\n%s\n", details.c_str(), summary.c_str());
++        std::fflush(stdout);
++        if (!pipes.empty() && created == 0) {
++            std::fprintf(stderr, "precompile: no pipeline could be made: are these the game files (version) the list is for?\n");
++            return 4;
++        }
++        return 0;
++    }
++
+     ~VulkanShadowBackend() override {
+         if (native_surface) native_surface->on_resize = nullptr;
+         {
+@@ -1591,6 +2036,8 @@ private:
+             }
+         }
+         const bool want_hdr = hdr_supported && overlay && overlay->Settings().hdr;
++        sdr_swap_format = chosen.format;
++        hdr_swap_format = hdr_supported ? hdr_choice.format : VK_FORMAT_UNDEFINED;
+         if (want_hdr) chosen = hdr_choice;
+         if (overlay) overlay->SetHdrAvailable(hdr_supported);
+         hdr_active = want_hdr;
+@@ -2373,6 +2820,11 @@ private:
+     /// of the shader's control section. Matches the emulated GPU's cbuf 1 binds
+     /// for every one of 508 shaders checked (the constants follow the code,
+     /// 256-byte aligned); the data address itself is only right when that is 0.
++    /// Shader memory: the game's GPU memory, or `memory` when given (precompile: the game files laid out as in game).
++    static bool ReadShaderMemory(const Core::NvnHost::GpuReader* memory, u64 gpu, void* out, size_t size) {
++        return memory ? (*memory)(gpu, out, size) : Core::NvnHost::ReadGpuMemory(gpu, out, size);
++    }
++
+     static u64 ConstantsAddress(u64 data) {
+         u32 offset = 0;
+         if (const u64 control = Core::NvnHost::ShaderControlAddress(data)) {
+@@ -2381,6 +2833,17 @@ private:
+         return data + offset;
+     }
+ 
++    /// A graphics stage's code size: the game writes it at +4 of the 0x30-byte prefix, after the 0x12345678 marker (it equals
++    /// the BNSH code-size field in the game files). 0 when the prefix is not there or the size is implausible.
++    static u32 StageCodeSize(u64 data, const Core::NvnHost::GpuReader* memory = nullptr) {
++        u32 prefix[2]{};
++        if (!ReadShaderMemory(memory, data, prefix, sizeof(prefix)) || prefix[0] != 0x12345678 || prefix[1] == 0 ||
++            prefix[1] >= (1u << 20)) {
++            return 0;
++        }
++        return prefix[1];
++    }
++
+     using TextureTable = std::array<std::array<u64, 32>, 6>;
+ 
+     static std::vector<u64> ProgramKey(const std::vector<u64>& stages, const DrawState& st) {
+@@ -2488,12 +2951,12 @@ private:
+     }
+ 
+     /// Hash of the first 1 KB of each stage's code (enough to tell programs apart).
+-    static u64 CodeHash(const std::vector<u64>& datas) {
++    static u64 CodeHash(const std::vector<u64>& datas, const Core::NvnHost::GpuReader* memory = nullptr) {
+         u64 h = 0;
+         std::array<u8, 0x400> code{};
+         for (const u64 data : datas) {
+             code.fill(0);
+-            Core::NvnHost::ReadGpuMemory(data, code.data(), code.size());
++            ReadShaderMemory(memory, data, code.data(), code.size());
+             h = h * 0x9E3779B97F4A7C15ULL ^ HashBytes(code.data(), code.size());
+         }
+         return h;
+@@ -2824,13 +3287,56 @@ private:
+         }
+     }
+ 
++    /// Recorder: names a stage's code by its SHA-1 and writes it, cut at its size, once to <file>.code/<sha1>.bin.
++    static void RecordStageCode(ProgramEntry::Stage& s) {
++        std::vector<u8> code(s.code_size);
++        if (!s.code_size || !Core::NvnHost::ReadGpuMemory(s.data + 0x30, code.data(), code.size())) {
++            s.code_size = 0;
++            s.code_sha1 = "-";
++            return;
++        }
++        s.code_sha1 = Sha1Hex(code.data(), code.size());
++        static std::mutex m;
++        static std::unordered_set<std::string> written;
++        std::scoped_lock lock{m};
++        if (!written.insert(s.code_sha1).second) return;
++        const std::filesystem::path dir = RecordPipelinesPath() + ".code";
++        std::error_code ec;
++        std::filesystem::create_directories(dir, ec);
++        const std::filesystem::path file = dir / (s.code_sha1 + ".bin");
++        // Kept only when whole: a crash can leave one cut short.
++        if (std::filesystem::file_size(file, ec) == code.size() && !ec) return;
++        std::ofstream(file, std::ios::binary)
++            .write(reinterpret_cast<const char*>(code.data()), static_cast<std::streamsize>(code.size()));
++    }
++
+     /// Translates one NVN program and creates its Vulkan objects. Thread-safe:
+     /// touches no backend state besides the (thread-safe) device.
++    /// memory: where the code is read from instead of the game's GPU memory (precompile).
+     ProgramEntry BuildProgram(const std::vector<u64>& datas, const TextureTable& textures,
+-                              u32 uint_outputs = 0) const {
++                              u32 uint_outputs = 0, const Core::NvnHost::GpuReader* memory = nullptr) const {
+         ProgramEntry entry;
+-        const Core::NvnHost::GpuReader reader = [](u64 gpu, void* out, size_t size) {
+-            return Core::NvnHost::ReadGpuMemory(gpu, out, size);
++        // A stage's code ends at data + 0x30 + its size. Served past that, the translator could read the next shader in
++        // memory, so the SPIR-V depended on what follows the code; cut there, the game files translate as in game.
++        // (data, end) by data; end 0 = size unknown, read unbounded as before.
++        std::vector<std::pair<u64, u64>> code_ends;
++        for (const u64 data : datas) {
++            const u32 size = StageCodeSize(data, memory);
++            code_ends.emplace_back(data, size ? data + 0x30 + size : 0);
++        }
++        std::sort(code_ends.begin(), code_ends.end());
++        const Core::NvnHost::GpuReader reader = [&code_ends, memory](u64 gpu, void* out, size_t size) {
++            // The read belongs to the stage with the highest data at or below it.
++            const auto it = std::upper_bound(code_ends.begin(), code_ends.end(), std::pair<u64, u64>{gpu, ~u64{0}});
++            if (it != code_ends.begin() && std::prev(it)->second != 0 && gpu + size > std::prev(it)->second) {
++                static std::atomic<int> logged{0};
++                if (logged++ < 8) {
++                    LOG_INFO(Frontend, "nvn-host vulkan: shader {:#x} read at +{:#x} past its code end +{:#x}: refused",
++                             std::prev(it)->first, gpu - std::prev(it)->first, std::prev(it)->second - std::prev(it)->first);
++                }
++                return false;
++            }
++            return ReadShaderMemory(memory, gpu, out, size);
+         };
+         // Texture handles bound for this (first) draw shape the translation:
+         // cbuf 2 holds one 8-byte handle per NVN slot.
+@@ -2845,11 +3351,26 @@ private:
+             return static_cast<u32>(offset % 8 == 0 ? handle : handle >> 32);
+         };
+         // Hashed before translating: code that changes meanwhile then fails SpeculationHolds instead of passing it.
+-        entry.code_hash = CodeHash(datas);
+-        const auto translated = Core::NvnHost::TranslateProgramStages(reader, datas, cbuf, uint_outputs);
++        entry.code_hash = CodeHash(datas, memory);
++        const bool record = !RecordPipelinesPath().empty();
++        std::vector<std::array<u32, 5>> answers;
++        const Core::NvnHost::CbufQuery recorded = [&cbuf, &answers](int stage, u32 index, u32 offset) {
++            const u32 value = cbuf(stage, index, offset);
++            answers.push_back({static_cast<u32>(stage), index, offset, value, 0});
++            return value;
++        };
++        const auto translated = Core::NvnHost::TranslateProgramStages(reader, datas, record ? recorded : cbuf, uint_outputs);
+         std::sort(queries.begin(), queries.end());
+         queries.erase(std::unique(queries.begin(), queries.end()), queries.end());
+         entry.texture_queries = std::move(queries);
++        entry.uint_outputs = uint_outputs;
++        if (record) {
++            // Texture types now: the handles' descriptors can change before the pipeline is made.
++            for (auto& a : answers) a[4] = static_cast<u32>(Core::NvnHost::TextureTypeForHandle(a[3]));
++            std::sort(answers.begin(), answers.end());
++            answers.erase(std::unique(answers.begin(), answers.end()), answers.end());
++            entry.record_answers = std::move(answers);
++        }
+         for (const auto& t : translated) {
+             if (!t.ok) {
+                 entry.error = t.error;
+@@ -2874,6 +3395,12 @@ private:
+             entry.stages.push_back({t.stage, module, t.info, t.data, t.spirv, ConstantsAddress(t.data)});
+             entry.stages.back().far_plane = t.far_plane;
+             if (t.far_plane && KartRe::Enabled()) KartRe::Log("far-plane vertex shader {:x}", t.data);
++            if (record) {
++                for (const auto& [data, end] : code_ends) {
++                    if (data == t.data && end) entry.stages.back().code_size = static_cast<u32>(end - data - 0x30);
++                }
++                RecordStageCode(entry.stages.back());
++            }
+             // KARTRECOMP_OBJMV_DUMP=1: every capture variant (and its normal shader) into log/objmv_spv/, to check with spirv-val.
+             static const bool objmv_dump = [] { const char* v = std::getenv("KARTRECOMP_OBJMV_DUMP"); return v && *v == '1'; }();
+             if (objmv_dump && !t.spirv_xfb.empty()) {
+@@ -3226,7 +3753,21 @@ private:
+     VkPipeline GetMotionPipeline(ProgramEntry& prog, const DrawState& st, VkPrimitiveTopology topology,
+                                  const std::vector<VkVertexInputAttributeDescription>& attrs,
+                                  const std::vector<VkVertexInputBindingDescription>& binds) {
+-        if (!InitObjMv()) return VK_NULL_HANDLE;
++        if (!EnsureMotionLayout(prog)) return VK_NULL_HANDLE;
++        std::string key;
++        PipelineKeyInto(key, prog, st, topology, attrs, binds);
++        key.append("\x01objmv");
++        if (const auto it = pipelines.find(key); it != pipelines.end()) {
++            return it->second;
++        }
++        const VkPipeline pipeline = CreatePipeline(prog, st, topology, attrs, binds, true);
++        pipelines.emplace(std::move(key), pipeline);
++        return pipeline;
++    }
++
++    /// The program's motion layout (set 1 = object-motion resources), made on first use.
++    bool EnsureMotionLayout(ProgramEntry& prog) {
++        if (!InitObjMv()) return false;
+         if (!prog.motion_layout) {
+             const VkDescriptorSetLayout sets[2] = {prog.set_layout, objmv_dsl};
+             const VkPushConstantRange push{VK_SHADER_STAGE_ALL_GRAPHICS, 0, kPushSize + static_cast<u32>(sizeof(ObjMvPush))};
+@@ -3237,18 +3778,10 @@ private:
+             plci.pPushConstantRanges = &push;
+             if (vk.vkCreatePipelineLayout(device, &plci, nullptr, &prog.motion_layout) != VK_SUCCESS) {
+                 prog.motion_layout = VK_NULL_HANDLE;
+-                return VK_NULL_HANDLE;
++                return false;
+             }
+         }
+-        std::string key;
+-        PipelineKeyInto(key, prog, st, topology, attrs, binds);
+-        key.append("\x01objmv");
+-        if (const auto it = pipelines.find(key); it != pipelines.end()) {
+-            return it->second;
+-        }
+-        const VkPipeline pipeline = CreatePipeline(prog, st, topology, attrs, binds, true);
+-        pipelines.emplace(std::move(key), pipeline);
+-        return pipeline;
++        return true;
+     }
+ 
+     static bool IsShadowMapPass(const DrawState& st) {
+@@ -3311,12 +3844,62 @@ private:
+         put(&depth_format, sizeof(depth_format));
+     }
+ 
++    /// Recorder (KARTRECOMP_RECORD_PIPELINES): one line per distinct pipeline CreatePipeline is asked for, space-separated
++    /// tokens, decimal unless marked hex (hex without 0x):
++    ///   P <motion 0|1> topo <VkPrimitiveTopology> uint <uint_outputs hex> st <n> then n x <Shader::Stage> <code size hex> <sha1>
++    ///   q <n> then n x <NVN stage> <cbuf index> <offset hex> <value hex> <Shader::TextureType of value>
++    ///   va <n> then n x <location> <binding> <VkFormat> <offset>      vb <n> then n x <binding> <stride> <VkVertexInputRate>
++    ///   ds <depth_stencil & 0xF3 hex, 0 without depth> df <depth VkFormat, 0 without depth>
++    ///   ct <n> then n x <present 0|1> <VkFormat, 0 when absent> <write mask hex> <blend enable 0|1> <raw blend hex>
++    ///   pg <polygon & 7 hex> po <polygon_offset & 4 hex> dc <depth_clamp 0|1> sm <IsShadowMapPass 0|1>
++    /// A stage of unknown size reads "<stage> 0 -". The state is the draw's, also for motion (CreatePipeline then ignores
++    /// depth and colors). Each line is flushed: a crash keeps the lines before it.
++    static void RecordPipeline(const ProgramEntry& prog, const DrawState& st, VkPrimitiveTopology topology,
++                               const std::vector<VkVertexInputAttributeDescription>& attrs,
++                               const std::vector<VkVertexInputBindingDescription>& binds, bool motion) {
++        std::string line = fmt::format("P {} topo {} uint {:x} st {}", motion ? 1 : 0, static_cast<int>(topology),
++                                       prog.uint_outputs, prog.stages.size());
++        for (const auto& s : prog.stages) {
++            line += fmt::format(" {} {:x} {}", static_cast<int>(s.stage), s.code_size, s.code_sha1.empty() ? "-" : s.code_sha1);
++        }
++        line += fmt::format(" q {}", prog.record_answers.size());
++        for (const auto& a : prog.record_answers) line += fmt::format(" {} {} {:x} {:x} {}", a[0], a[1], a[2], a[3], a[4]);
++        line += fmt::format(" va {}", attrs.size());
++        for (const auto& a : attrs) line += fmt::format(" {} {} {} {}", a.location, a.binding, static_cast<int>(a.format), a.offset);
++        line += fmt::format(" vb {}", binds.size());
++        for (const auto& b : binds) line += fmt::format(" {} {} {}", b.binding, b.stride, static_cast<int>(b.inputRate));
++        line += fmt::format(" ds {:x} df {}", st.depth ? (st.depth_stencil & 0xF3) : u64{0},
++                            st.depth ? static_cast<int>(st.depth->info.format) : 0);
++        const size_t colors = std::min<size_t>(st.colors.size(), 8);
++        line += fmt::format(" ct {}", colors);
++        for (size_t i = 0; i < colors; ++i) {
++            line += fmt::format(" {} {} {:x} {} {:x}", st.colors[i] ? 1 : 0, st.colors[i] ? static_cast<int>(st.color_formats[i]) : 0,
++                                (st.channel_mask >> (4 * i)) & 0xF, ((st.color >> 8) >> i) & 1, st.blend[i]);
++        }
++        line += fmt::format(" pg {:x} po {:x} dc {} sm {}\n", st.polygon & 7, st.polygon_offset & 4, st.depth_clamp ? 1 : 0,
++                            IsShadowMapPass(st) ? 1 : 0);
++        static std::mutex m;
++        static std::unordered_set<std::string> seen;
++        static std::ofstream out;
++        std::scoped_lock lock{m};
++        if (!out.is_open()) {
++            // Runs append to the same file: what earlier runs wrote is not written again.
++            std::ifstream earlier(RecordPipelinesPath(), std::ios::binary);
++            for (std::string l; std::getline(earlier, l);) seen.insert(l + '\n');
++            out.open(RecordPipelinesPath(), std::ios::binary | std::ios::app);
++        }
++        if (!seen.insert(line).second) return;
++        out << line;
++        out.flush();
++    }
++
+     /// Thread-safe: reads only its arguments and the (thread-safe) device.
+     /// motion: the per-object motion variant (the vertex stage with its position captured, the object-motion fragment shader,
+     /// no attachments, no depth test or blending; same vertex input, culling and depth bias, so the same pixels and depths).
+     VkPipeline CreatePipeline(const ProgramEntry& prog, const DrawState& st, VkPrimitiveTopology topology,
+                               const std::vector<VkVertexInputAttributeDescription>& attrs,
+                               const std::vector<VkVertexInputBindingDescription>& binds, bool motion = false) const {
++        if (!RecordPipelinesPath().empty()) RecordPipeline(prog, st, topology, attrs, binds, motion);
+         const VkFormat depth_format = motion ? VK_FORMAT_UNDEFINED : st.depth ? st.depth->info.format : VK_FORMAT_UNDEFINED;
+         std::vector<VkPipelineShaderStageCreateInfo> stages;
+         for (const auto& s : prog.stages) {
+@@ -6014,7 +6597,7 @@ private:
+         cpci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main",
+                       nullptr};
+         cpci.layout = mv_layout;
+-        const VkResult r = vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &mv_pipe);
++        const VkResult r = vk.vkCreateComputePipelines(device, pipeline_cache, 1, &cpci, nullptr, &mv_pipe);
+         vk.vkDestroyShaderModule(device, mod, nullptr);
+         if (r != VK_SUCCESS) {
+             LOG_ERROR(Frontend, "motion vectors: cannot create the compute pipeline");
+@@ -6571,7 +7154,7 @@ private:
+         VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+         cpci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
+         cpci.layout = sharpen_layout;
+-        const VkResult r = vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &sharpen_pipe);
++        const VkResult r = vk.vkCreateComputePipelines(device, pipeline_cache, 1, &cpci, nullptr, &sharpen_pipe);
+         vk.vkDestroyShaderModule(device, mod, nullptr);
+         if (r != VK_SUCCESS) return false;
+         sharpen_failed = false;
+@@ -6817,7 +7400,7 @@ private:
+             gp.pColorBlendState = &cb;
+             gp.pDynamicState = &ds;
+             gp.layout = fsr_layout;
+-            return vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &out) == VK_SUCCESS;
++            return vk.vkCreateGraphicsPipelines(device, pipeline_cache, 1, &gp, nullptr, &out) == VK_SUCCESS;
+         };
+         if (!make(fsr_easu_mod, pipes.easu) || !make(fsr_rcas_mod, pipes.rcas)) {
+             pipes = {};
+@@ -7044,7 +7627,7 @@ private:
+         gp.pColorBlendState = &cb;
+         gp.pDynamicState = &ds;
+         gp.layout = ov_layout;
+-        const VkResult r = vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &ov_pipeline);
++        const VkResult r = vk.vkCreateGraphicsPipelines(device, pipeline_cache, 1, &gp, nullptr, &ov_pipeline);
+         vk.vkDestroyShaderModule(device, vs, nullptr);
+         vk.vkDestroyShaderModule(device, fs, nullptr);
+         if (r != VK_SUCCESS) return false;
+@@ -7139,7 +7722,7 @@ private:
+         gp.pColorBlendState = &cb;
+         gp.pDynamicState = &ds;
+         gp.layout = hdr_layout;
+-        const VkResult r = vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &hdr_pipeline);
++        const VkResult r = vk.vkCreateGraphicsPipelines(device, pipeline_cache, 1, &gp, nullptr, &hdr_pipeline);
+         vk.vkDestroyShaderModule(device, vs, nullptr);
+         vk.vkDestroyShaderModule(device, fs, nullptr);
+         if (r != VK_SUCCESS) return false;
+@@ -7308,7 +7891,7 @@ private:
+         VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+         cpci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
+         cpci.layout = fg_layout;
+-        const VkResult r = vk.vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpci, nullptr, &fg_pipe);
++        const VkResult r = vk.vkCreateComputePipelines(device, pipeline_cache, 1, &cpci, nullptr, &fg_pipe);
+         vk.vkDestroyShaderModule(device, mod, nullptr);
+         if (r != VK_SUCCESS) return false;
+         fg_failed = false;
+@@ -9115,6 +9698,7 @@ private:
+     Image ov_font;
+     bool ov_font_uploaded = false, ov_failed = false;
+     VkFormat swap_format = VK_FORMAT_UNDEFINED;
++    VkFormat sdr_swap_format = VK_FORMAT_UNDEFINED, hdr_swap_format = VK_FORMAT_UNDEFINED; ///< swap_format with HDR off / on
+     bool have_colorspace_ext = false;
+     std::map<VkImage, VkImageView> swap_views;
+     std::vector<VkSemaphore> rendered_sems, rendered2_sems; // per swapchain image (MakeRenderedSemaphores)
+@@ -9330,4 +9914,8 @@ std::unique_ptr<Core::NvnHost::Backend> CreateVulkanShadowBackend(bool fullscree
+     return backend;
+ }
+ 
++int PrecompilePipelines(Core::NvnHost::Backend& backend, const std::string& list_path, const RomfsRead& read_romfs) {
++    return static_cast<VulkanShadowBackend&>(backend).Precompile(list_path, read_romfs);
++}
++
+ } // namespace KartRecomp
+diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.h b/src/suyu_cmd/native_gpu/vk_shadow_backend.h
+index e2b1b749b..3eb7e7ec5 100644
+--- a/src/suyu_cmd/native_gpu/vk_shadow_backend.h
++++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.h
+@@ -8,7 +8,10 @@
+ // docs/NATIVE_GPU.md in kart-recomp.
+ #pragma once
+ 
++#include <functional>
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ #include "core/nvn_host/nvn_host.h"
+ #include "suyu_cmd/native_gpu/native_surface.h"
+@@ -21,4 +24,12 @@ namespace KartRecomp {
+ std::unique_ptr<Core::NvnHost::Backend> CreateVulkanShadowBackend(bool fullscreen = false,
+                                                                   std::unique_ptr<NativeSurface> surface = nullptr);
+ 
++/// A game file's bytes by RomFS path ("Shader/foo.bfsha"); empty when there is none. Called from several threads at once.
++using RomfsRead = std::function<std::vector<u8>(const std::string& path)>;
++
++/// Install-time precompilation (KARTRECOMP_PRECOMPILE=<list>): for a backend from CreateVulkanShadowBackend, with no game
++/// loaded, translates the list's programs from the game files and creates its pipelines and the backend's own through the
++/// pipeline cache, then saves vk_pipelines.bin. Prints PROGRESS lines and a summary on stdout; returns the exit code.
++int PrecompilePipelines(Core::NvnHost::Backend& backend, const std::string& list_path, const RomfsRead& read_romfs);
++
+ } // namespace KartRecomp
+diff --git a/src/suyu_cmd/suyu.cpp b/src/suyu_cmd/suyu.cpp
+index 3b4d82c0d..3437e4746 100644
+--- a/src/suyu_cmd/suyu.cpp
++++ b/src/suyu_cmd/suyu.cpp
+@@ -15,6 +15,7 @@
+ #include <cstdlib>
+ #include <exception>
+ #include <fstream>
++#include <mutex>
+ #include <filesystem>
+ #include <iostream>
+ #include <memory>
+@@ -1011,6 +1012,88 @@ void DumpRomfsAndExit(Core::System& system, const std::string& spec) {
+     std::_Exit(0);
+ }
+ 
++/// An NSO's segments text, ro, data, LZ4-decoded and concatenated (not at their memory offsets): the buffer build-list.py's
++/// "exefs:<name>" offsets index. Empty, with one log line, if the file is missing or malformed: its pipelines are then skipped.
++std::vector<u8> ReadNsoSegments(const std::filesystem::path& path) {
++    std::ifstream in(path, std::ios::binary);
++    const std::vector<u8> nso((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++    const auto u32_at = [&nso](size_t at) {
++        u32 v;
++        std::memcpy(&v, nso.data() + at, 4);
++        return v;
++    };
++    std::vector<u8> out;
++    bool ok = nso.size() >= 0x100 && std::memcmp(nso.data(), "NSO0", 4) == 0;
++    for (u32 k = 0; ok && k < 3; ++k) {
++        const u32 file_offset = u32_at(0x10 + 0x10 * k), size = u32_at(0x18 + 0x10 * k), packed = u32_at(0x60 + 4 * k);
++        const bool compressed = (u32_at(0xC) >> k & 1) != 0;
++        const u64 stored = compressed ? packed : size;
++        if (u64{file_offset} + stored > nso.size()) {
++            ok = false;
++            break;
++        }
++        const size_t at = out.size();
++        out.resize(at + size);
++        if (compressed) {
++            ok = Common::Compression::DecompressDataLZ4(out.data() + at, size, nso.data() + file_offset, packed) ==
++                 static_cast<int>(size);
++        } else {
++            std::memcpy(out.data() + at, nso.data() + file_offset, size);
++        }
++    }
++    if (!ok) {
++        LOG_WARNING(Frontend, "precompile: executable {} {}: the pipelines using its shaders are skipped",
++                    Common::FS::PathToUTF8String(path), nso.empty() ? "not found" : "is not a readable NSO");
++        return {};
++    }
++    return out;
++}
++
++/// KARTRECOMP_PRECOMPILE=<list>, at install time: the native backend, in a hidden window, creates the list's pipelines from the
++/// game files into its pipeline cache (KartRecomp::PrecompilePipelines), then the process exits; the game is never loaded.
++/// romfs: the game's RomFS (base + update), null without --content-base; KARTRECOMP_ROMFS_DIR (decrypted installs) wins.
++[[noreturn]] void PrecompileAndExit(const std::string& list, const FileSys::VirtualFile& romfs,
++                                    const FileSys::VirtualFilesystem& vfs) {
++    const auto exit_with = [](int code) {
++        std::fflush(nullptr);
++        Common::Log::Stop(); // flushes the log: _Exit skips it (no static destructors, as in DumpRomfsAndExit)
++        std::_Exit(code);
++    };
++    FileSys::VirtualDir root;
++    if (const char* dir = std::getenv("KARTRECOMP_ROMFS_DIR"); dir && *dir) {
++        std::error_code ec;
++        if (std::filesystem::is_directory(dir, ec)) root = vfs->OpenDirectory(dir, FileSys::OpenMode::Read); // opens missing ones too
++    } else if (romfs) {
++        root = FileSys::ExtractRomFS(romfs);
++    }
++    if (!root) {
++        std::fprintf(stderr, "precompile: no game RomFS (give --content-base and --content-update, or KARTRECOMP_ROMFS_DIR)\n");
++        exit_with(2);
++    }
++    auto backend = KartRecomp::CreateVulkanShadowBackend(false, KartRecomp::MakeSdlSurface(true));
++    if (!backend) {
++        LOG_WARNING(Frontend, "precompile: no Vulkan backend with a hidden window, trying a visible one");
++        backend = KartRecomp::CreateVulkanShadowBackend(false);
++    }
++    if (!backend) {
++        std::fprintf(stderr, "precompile: no usable Vulkan device (see the log)\n");
++        exit_with(3);
++    }
++    // "exefs:<name>": shaders embedded in the game's executable, from the NSOs the setup exported.
++    const char* exefs_env = std::getenv("KARTRECOMP_PRECOMPILE_EXEFS");
++    const std::filesystem::path exefs_dir = exefs_env && *exefs_env
++        ? std::filesystem::path(exefs_env)
++        : Common::FS::GetSuyuPath(Common::FS::SuyuPath::CacheDir) / "export" / "nso";
++    std::mutex read_mutex;
++    const int code = KartRecomp::PrecompilePipelines(*backend, list, [&](const std::string& path) {
++        if (path.starts_with("exefs:")) return ReadNsoSegments(exefs_dir / path.substr(6));
++        std::scoped_lock lock{read_mutex}; // the RomFS reads through the NSP's decryption layers: one reader at a time
++        const FileSys::VirtualFile file = root->GetFileRelative(path);
++        return file ? file->ReadAllBytes() : std::vector<u8>{};
++    });
++    exit_with(code);
++}
++
+ } // namespace
+ 
+ // kart-recomp: the launcher's controller mapping asks the engine (which has the controller library) about controllers, without
+@@ -1226,8 +1309,13 @@ int main(int argc, char** argv) {
+ #endif
+ #ifdef _WIN32
+     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+-        freopen("CONOUT$", "wb", stdout);
+-        freopen("CONOUT$", "wb", stderr);
++        // A stream the parent redirected to a file or a pipe stays there (an installer reads PROGRESS lines from it).
++        const auto redirected = [](DWORD which) {
++            const DWORD type = GetFileType(GetStdHandle(which));
++            return type == FILE_TYPE_DISK || type == FILE_TYPE_PIPE;
++        };
++        if (!redirected(STD_OUTPUT_HANDLE)) freopen("CONOUT$", "wb", stdout);
++        if (!redirected(STD_ERROR_HANDLE)) freopen("CONOUT$", "wb", stderr);
+     }
+ #endif
+ 
+@@ -2049,6 +2137,19 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    // kart-recomp: install-time pipeline precompilation (PrecompileAndExit). The list is checked before any window is made.
++    const char* precompile_env = std::getenv("KARTRECOMP_PRECOMPILE");
++    const std::string precompile_list = precompile_env ? precompile_env : "";
++    FileSys::VirtualFile precompile_romfs;
++    if (!precompile_list.empty()) {
++        std::ifstream list{precompile_list};
++        std::string head;
++        if (!std::getline(list, head) || !head.starts_with("# kartrecomp pipelines 1")) {
++            std::fprintf(stderr, "precompile: %s is missing or not a pipeline list\n", precompile_list.c_str());
++            return 2;
++        }
++    }
++
+     LOG_INFO(Frontend, "suyu-cmd: Initializing system...");
+     // The VFS and explicit provider outlive System, which retains their file references.
+     const auto explicit_vfs = std::make_shared<FileSys::RealVfsFilesystem>();
+@@ -2065,7 +2166,7 @@ int main(int argc, char** argv) {
+         system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
+         if (!SuyuCli::ConfigureExplicitUpdate(system, explicit_provider,
+                                               *explicit_content_base, *explicit_content_update,
+-                                              explicit_content_dump, explicit_content_dlc)) {
++                                              explicit_content_dump, explicit_content_dlc, &precompile_romfs)) {
+ #ifdef _WIN32
+             // kart-recomp (Windows builds): say why, as the launcher shows stderr when a test boot or a start stops (GitHub issue #8:
+             // before, a game file that needed a key missing from prod.keys ended the process with 0xc0000094; now it just fails to open).
+@@ -2150,6 +2251,13 @@ int main(int argc, char** argv) {
+         Kernel::NativeServices::SetOpenUrlHandler([](const std::string& url) { return SDL_OpenURL(url.c_str()); });
+     }
+     // kart-recomp: native GPU shadow window (KARTRECOMP_NATIVE_GPU=shadow).
++    if (!precompile_list.empty()) {
++        if (int count = 0; SDL_Window** windows = SDL_GetWindows(&count)) {
++            for (int i = 0; i < count; ++i) SDL_HideWindow(windows[i]); // the emulated renderer's: nothing is drawn
++            SDL_free(windows);
++        }
++        PrecompileAndExit(precompile_list, precompile_romfs, explicit_vfs);
++    }
+     if (Core::NvnHost::Enabled()) {
+         if (Core::NvnHost::Exclusive()) {
+             // The emulated renderer draws nothing: hide its (blank) window. Input and

@@ -111,6 +111,38 @@ private slots:
         QVERIFY(!r.ok);
         QVERIFY(!IsBuilt(f.layout, "v1"));
     }
+    void aPipelineListNextToTheHotListIsPreparedBeforeTheBuildFilesGo() {
+        NEEDS_SH();
+        Fixture f;
+        Write(f.dir.filePath("pipelines.txt"), "# kartrecomp pipelines 1 4.0.1\n");
+        // The precompile run records what it was given; the test boot behaves as before.
+        const QByteArray engine =
+              "#!/bin/sh\nif [ -n \"$KARTRECOMP_PRECOMPILE\" ]; then\n"
+              "  [ -d \"$(dirname \"$KARTRECOMP_PRECOMPILE_EXEFS\")\" ] && echo \"$KARTRECOMP_PRECOMPILE|$KARTRECOMP_NATIVE_GPU\" > \"$KARTRECOMP_PRECOMPILE.seen\"\n"
+              "  echo 'PROGRESS 500 pipelines 1/2'; exit \"${FAKE_PRECOMPILE_EXIT:-0}\"\nfi\n"
+              "log=\"$XDG_DATA_HOME/kartrecomp/log/suyu_log.txt\"; mkdir -p \"$(dirname \"$log\")\"\n"
+              "for i in 1 2 3 4; do echo \"PERF game_fps=60.0\" >> \"$log\"; done\n"
+              "printf '=== X ===\\n  static blocks executed : 2000000000\\n  static -> JIT          : 0 (0 lookup miss, 0 unimplemented opcode)\\n' > \"$SUYU_RECOMP_COVERAGE_PATH\"\nsleep 30\n";
+        Write(f.paths.engine, engine, true);
+        f.in.deleteBuildFiles = true;
+        QList<int> marks;
+        auto r = RunSetupPipeline(f.in, f.layout, f.paths, [&](int permille, const QString&) { marks << permille; }, nullptr, {0, 0});
+        QVERIFY2(r.ok, qPrintable(r.message));
+        QFile seen(f.dir.filePath("pipelines.txt.seen"));
+        QVERIFY2(seen.open(QIODevice::ReadOnly), "the engine was not run with the pipeline list while the export was still there");
+        QCOMPARE(seen.readAll().trimmed(), (f.dir.filePath("pipelines.txt") + "|native").toUtf8()); // the game's own renderer
+        QVERIFY(marks.contains(994));
+        QVERIFY(std::is_sorted(marks.begin(), marks.end()));
+        // A failed preparation (no Vulkan, say) still leaves a playable, stamped game.
+        Fixture g;
+        Write(g.dir.filePath("pipelines.txt"), "# kartrecomp pipelines 1 4.0.1\n");
+        Write(g.paths.engine, engine, true);
+        qputenv("FAKE_PRECOMPILE_EXIT", "3");
+        r = RunSetupPipeline(g.in, g.layout, g.paths, nullptr, nullptr, {0, 0});
+        qunsetenv("FAKE_PRECOMPILE_EXIT");
+        QVERIFY2(r.ok, qPrintable(r.message));
+        QVERIFY(IsBuilt(g.layout, "v1"));
+    }
     void aFailedVerificationNeverStampsTheModules() {
         NEEDS_SH();
         Fixture f;

@@ -11,6 +11,7 @@
 #include <QThread>
 
 #include "build_runner.h"
+#include "game_package.h"
 #include "nsp_info.h"
 #include "verify_build.h"
 
@@ -25,6 +26,34 @@ QString FileHash(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return {};
     return QString::fromLatin1(QCryptographicHash::hash(f.readAll(), QCryptographicHash::Sha256).toHex().left(16));
+}
+// Shader preparation (docs/PRECOMPILE.md): the engine creates the pipelines of a recorded list into the game's pipeline cache, so
+// they are not compiled in a race the first time they are drawn. It runs as the game does (same settings, same cache folder), with the
+// exporter's NSOs for the shaders inside the executable. Never fatal: the game still runs without it, compiling as it goes.
+void PreparePipelines(const QString& list, const DataLayout& layout, const BuilderPaths& paths,
+                      const std::function<void(int, const QString&)>& report, const std::atomic<bool>* cancel) {
+    const GamePackage game = GamePackage::Installed(layout, DataLayout::ConfigRoot(), paths.engine, paths.engineVersion);
+    QProcessEnvironment env = game.launchEnvironment();
+    env.insert(QStringLiteral("KARTRECOMP_PRECOMPILE"), list);
+    env.insert(QStringLiteral("KARTRECOMP_PRECOMPILE_EXEFS"), QDir(layout.exportDir()).filePath(QStringLiteral("nso")));
+    QProcess p;
+    p.setProcessChannelMode(QProcess::SeparateChannels);
+    BuildRunner::DieWithParent(p);
+    p.setProcessEnvironment(env);
+    p.setWorkingDirectory(game.workingDirectory());
+    p.start(paths.engine, game.launchArguments(false));
+    if (!p.waitForStarted()) return;
+    const auto readProgress = [&] {
+        while (p.canReadLine()) {
+            const auto parts = p.readLine().trimmed().split(' ');
+            if (parts.value(0) == "PROGRESS") report(990 + parts.value(1).toInt() * 9 / 1000, QString::fromUtf8(parts.mid(2).join(' ')));
+        }
+    };
+    while (!p.waitForFinished(200)) {
+        if (Cancelled(cancel)) { p.kill(); p.waitForFinished(); return; }
+        readProgress();
+    }
+    readProgress(); // what it wrote just before exiting
 }
 } // namespace
 
@@ -120,6 +149,14 @@ PipelineResult RunSetupPipeline(const SetupInputs& in, const DataLayout& layout,
     report(950, QCoreApplication::translate("Messages", "Testing the game"));
     const VerifyResult verdict = VerifyBuild(paths.engine, layout, 150, cancel);
     if (!verdict.ok) return {false, verdict.message};
+
+    // Before the build files go: the list's "exefs:" shaders are read from the exporter's NSOs.
+    const QString pipelineList = QFileInfo(HotListFor(paths.hotList, updateName)).dir().filePath(QStringLiteral("pipelines.txt"));
+    if (QFileInfo::exists(pipelineList) && !Cancelled(cancel)) {
+        report(990, QCoreApplication::translate("Messages", "Preparing the shaders"));
+        PreparePipelines(pipelineList, layout, paths, report, cancel);
+    }
+    if (Cancelled(cancel)) return {false, QStringLiteral("Cancelled.")};
 
     if (in.deleteBuildFiles) {
         // Space saving: the game runs from the module folder; the exporter's output and the compile work folder are only for the
