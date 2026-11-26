@@ -1638,7 +1638,7 @@ index 1a42742556..00842faedb 100644
          if (svc_mem_info.permission == Kernel::Svc::MemoryPermission::ReadExecute &&
              (svc_mem_info.state == Kernel::Svc::MemoryState::Code ||
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..e7a0111caf 100644
+index 67a55424e9..3fbfc861c0 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -17,9 +17,19 @@
@@ -1680,7 +1680,23 @@ index 67a55424e9..e7a0111caf 100644
  int RecompChainBudget() {
      return kChainBudgetOverride ? kChainBudgetOverride
                                  : g_recomp_chain_budget.load(std::memory_order_relaxed);
-@@ -775,6 +790,149 @@ bool IsRecompFastmemReady() {
+@@ -473,7 +488,14 @@ struct RecompCounters {
+ };
+ 
+ RecompCounters g_counters;
+-std::array<std::atomic<u64>, 4> g_current_pcs{};
++// One cache line each: every game thread writes its slot on every dispatch (millions a second), and four slots in one line made
++// the cores take the line from each other on each write (the block tally below had the same problem).
++struct alignas(64) CurrentPc {
++    std::atomic<u64> pc{0};
++    void store(u64 v, std::memory_order o) { pc.store(v, o); }
++    u64 load(std::memory_order o) const { return pc.load(o); }
++};
++std::array<CurrentPc, 4> g_current_pcs{};
+ std::atomic<int> g_live_instances{0};
+ std::mutex g_snapshot_lock;
+ std::map<std::pair<u64, std::size_t>, std::string> g_diagnostic_snapshots;
+@@ -775,6 +797,149 @@ bool IsRecompFastmemReady() {
      return g_fastmem_ready.load(std::memory_order_acquire);
  }
  
@@ -1830,7 +1846,7 @@ index 67a55424e9..e7a0111caf 100644
  namespace {
  
  const char* PinCauseName(RecompGuardGen::PinCause cause) {
-@@ -1002,6 +1160,7 @@ struct ArmRecomp::Impl {
+@@ -1002,6 +1167,7 @@ struct ArmRecomp::Impl {
          bridge.page_bits = view.page_bits;
          bridge.pointer_mask = view.pointer_mask;
          bridge.address_space_max = view.address_space_max;
@@ -1838,7 +1854,7 @@ index 67a55424e9..e7a0111caf 100644
          if (kSlowPathAbove != 0 && kSlowPathAbove < bridge.address_space_max &&
              TotalStaticBlocks() >= kSlowPathAfterBlocks) {
              bridge.address_space_max = kSlowPathAbove;
-@@ -1031,7 +1190,8 @@ struct ArmRecomp::Impl {
+@@ -1031,7 +1197,8 @@ struct ArmRecomp::Impl {
      void ActivateGuardGen(Kernel::KProcess& process, u64 key) {
          // Watch every page of each stable module's span: GG1 stores there go to
          // HostStore, and Core::Memory reports writes and raw pointers there.
@@ -1848,7 +1864,7 @@ index 67a55424e9..e7a0111caf 100644
          const auto watch = [&entries](u64 va, u64 size) {
              const u64 first = va >> Memory::YUZU_PAGEBITS;
              const u64 last = (va + size - 1) >> Memory::YUZU_PAGEBITS;
-@@ -1168,7 +1328,7 @@ struct ArmRecomp::Impl {
+@@ -1168,7 +1335,7 @@ struct ArmRecomp::Impl {
      u64 ModuleBaseFor(Kernel::KThread* thread, u64 pc) {
          if (!modules_read) {
              modules_read = true;
@@ -1857,7 +1873,7 @@ index 67a55424e9..e7a0111caf 100644
                  modules = FindModules(process);
                  g_counters.RecordModules(modules);
                  // Now that the loader has placed everything, tell each image
-@@ -1179,6 +1339,7 @@ struct ArmRecomp::Impl {
+@@ -1179,6 +1346,7 @@ struct ArmRecomp::Impl {
                      for (const auto& [module_base, name] : modules) {
                          setter(index++, name.c_str(), module_base);
                      }
@@ -1865,7 +1881,7 @@ index 67a55424e9..e7a0111caf 100644
                  }
              }
          }
-@@ -1585,7 +1746,7 @@ struct ArmRecomp::Impl {
+@@ -1585,7 +1753,7 @@ struct ArmRecomp::Impl {
      }
  
      void SampleDiagnostics(Kernel::KThread* thread) {
@@ -1874,7 +1890,7 @@ index 67a55424e9..e7a0111caf 100644
          auto* process = thread->GetOwnerProcess();
          if (!process) return;
          auto& memory = process->GetMemory();
-@@ -1626,7 +1787,7 @@ struct ArmRecomp::Impl {
+@@ -1626,7 +1794,7 @@ struct ArmRecomp::Impl {
      ExclusiveMonitor* exclusive_monitor{};
      // Last guest thread run on this core, so a reservation is voided on a real
      // context switch and left alone on an ordinary return to the host.
@@ -1883,7 +1899,7 @@ index 67a55424e9..e7a0111caf 100644
      std::size_t core_index{};
      bool uses_wall_clock{};
  #ifndef SUYU_NO_JIT
-@@ -1636,6 +1797,24 @@ struct ArmRecomp::Impl {
+@@ -1636,6 +1804,24 @@ struct ArmRecomp::Impl {
      bool fallback_unavailable{false};
  };
  
@@ -1908,7 +1924,7 @@ index 67a55424e9..e7a0111caf 100644
  ArmRecomp::ArmRecomp(System& system, bool uses_wall_clock, RecompLookupFn lookup,
                       Kernel::KProcess* process, ExclusiveMonitor* exclusive_monitor,
                       std::size_t core_index)
-@@ -1789,6 +1968,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
+@@ -1789,6 +1975,10 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
  #endif
  }
  
@@ -1919,7 +1935,7 @@ index 67a55424e9..e7a0111caf 100644
  HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // A context switch voids any outstanding reservation. A thread preempted
      // between its LDXR and STXR would otherwise have the STXR succeed against a
-@@ -1798,8 +1981,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1798,8 +1988,10 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // Only on an actual switch: this backend returns to the host constantly
      // (chain budget, SVCs), so clearing on every entry would void reservations
      // the same thread is still in the middle of.
@@ -1932,7 +1948,7 @@ index 67a55424e9..e7a0111caf 100644
          if (impl->exclusive_monitor) {
              impl->exclusive_monitor->ClearExclusive(impl->core_index);
          }
-@@ -1870,7 +2055,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1870,7 +2062,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
      // their per-entry check. Module bases are set by now (above, or by the
      // explicit prepare callback), and no block of this process has run yet.
      if (RecompGuardGen::Watching()) {
@@ -1941,7 +1957,7 @@ index 67a55424e9..e7a0111caf 100644
              const u64 key = process->GetProcessId() | (u64{1} << 63);
              if (!RecompGuardGen::IsActive(key)) {
                  impl->ActivateGuardGen(*process, key);
-@@ -1904,18 +2089,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1904,18 +2096,22 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          impl->in_fallback = false;
      }
      if (impl->in_fallback) {
@@ -1969,7 +1985,7 @@ index 67a55424e9..e7a0111caf 100644
          }
          impl->SampleDiagnostics(thread);
          if (impl->core_index < g_current_pcs.size()) {
-@@ -1929,6 +2118,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1929,6 +2125,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          // resumed, so clear it before continuing.
          if (impl->ctx.pending_svc != kNoPendingSvc) {
              impl->ctx.pending_svc = kNoPendingSvc;
@@ -1977,7 +1993,34 @@ index 67a55424e9..e7a0111caf 100644
          }
  
          // A recompiled image is keyed by each block's offset within its own
-@@ -1968,13 +2158,81 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -1948,6 +2145,26 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+         // computed it; without the predecessors there is no way to tell a bad
+         // GOT read from a bad emitted branch.
+         impl->trail[impl->trail_pos++ & (Impl::kTrail - 1)] = impl->ctx.pc;
++        // KARTRECOMP_DISPATCH_STATS=1: per-thread dispatcher entries per second, how many a host hook answered, and the share
++        // whose last block's return address was this pc (a host hook's return to its caller).
++        static const bool dstats = std::getenv("KARTRECOMP_DISPATCH_STATS") != nullptr;
++        thread_local u64 ds_n = 0, ds_hook = 0, ds_main = 0, ds_t0 = 0;
++        if (dstats) {
++            ++ds_n;
++            const u64 mb = KartHookTrace::MainBase();
++            if (impl->ctx.pc - mb < 0x1000000ULL) ++ds_main;
++            if ((ds_n & 0xFFFF) == 0) {
++                const u64 now = static_cast<u64>(std::chrono::steady_clock::now().time_since_epoch().count());
++                if (ds_t0 == 0) ds_t0 = now;
++                else if (now - ds_t0 >= 10'000'000'000ULL) {
++                    const double secs = static_cast<double>(now - ds_t0) / 1e9;
++                    LOG_INFO(Core_ARM, "dispatch stats thread {:#x}: {:.0f}/s, hook-handled {:.0f}/s, into main {:.0f}/s", impl->ctx.tpidrro_el0,
++                             static_cast<double>(ds_n) / secs, static_cast<double>(ds_hook) / secs, static_cast<double>(ds_main) / secs);
++                    ds_n = ds_hook = ds_main = 0;
++                    ds_t0 = now;
++                }
++            }
++        }
+ 
+         if (impl->ctx.pc == kUnresolvedImportTrap) {
+             // Landed here via a BLR through a GOT/JUMP_SLOT slot patched by
+@@ -1968,13 +2185,82 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              continue;
          }
  
@@ -2004,6 +2047,7 @@ index 67a55424e9..e7a0111caf 100644
 +            RecompHooks::HookContext hook_ctx{impl->ctx.x, impl->ctx.pc, impl->system,
 +                                              impl->ctx.vreg, &impl->ctx.n};
 +            if (RecompHooks::Dispatch(hook_ctx)) {
++                if (dstats) ++ds_hook;
 +                fp_check = true;
 +                continue;
 +            }
@@ -2060,7 +2104,7 @@ index 67a55424e9..e7a0111caf 100644
          if (first_run) {
              LOG_INFO(Core_ARM, "First static lookup: pc={:#x}, covered={}", impl->ctx.pc,
                       block != nullptr);
-@@ -2246,9 +2504,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2246,9 +2532,21 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               "recomp: no JIT fallback available at PC {:#x}; thread cannot "
                               "continue",
                               impl->ctx.pc);
@@ -2083,7 +2127,7 @@ index 67a55424e9..e7a0111caf 100644
          }
  
          // Dump periodically: teardown is not guaranteed to run (the emulated
-@@ -2258,6 +2528,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2258,6 +2556,9 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          t_blocks.slot->n.store(seen, std::memory_order_relaxed);
          if ((seen & 0x3FFFFULL) == 0x3FFFFULL) {
              WriteRecompCoverageFile(FormatRecompCoverage());
@@ -2093,7 +2137,37 @@ index 67a55424e9..e7a0111caf 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2306,7 +2579,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2271,7 +2572,29 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+         if (first_run) {
+             LOG_INFO(Core_ARM, "Calling first signed static block at pc={:#x}", impl->ctx.pc);
+         }
++        [[maybe_unused]] const u64 ds_entry_pc = impl->ctx.pc;
+         block(&impl->ctx);
++        if (dstats) {
++            thread_local std::array<u64, 8> ds_kind{};
++            thread_local std::unordered_map<u64, u64> ds_top;
++            const u64 mb = KartHookTrace::MainBase();
++            const bool in_main = ds_entry_pc - mb < 0x1000000ULL, out_main = impl->ctx.pc - mb < 0x1000000ULL;
++            int k = impl->ctx.pending_svc != kNoPendingSvc ? 4 : impl->ctx.chain_budget <= 0 ? 5 : impl->ctx.halted ? 6
++                    : (in_main ? 0 : 2) + (out_main ? 0 : 1);
++            ++ds_kind[static_cast<size_t>(k)];
++            if ((ds_n & 31) == 0 && k < 4) ++ds_top[(out_main ? impl->ctx.pc - mb : impl->ctx.pc) | (static_cast<u64>(k) << 60)];
++            if ((ds_n & 0xFFFF) == 0 && !ds_top.empty() && ds_kind[7]++ % 64 == 63) { // about once a second on the game thread
++                std::vector<std::pair<u64, u64>> v(ds_top.begin(), ds_top.end());
++                std::sort(v.begin(), v.end(), [](auto& x, auto& y) { return x.second > y.second; });
++                std::string top;
++                for (size_t i = 0; i < v.size() && i < 16; ++i)
++                    top += fmt::format(" {}:{:#x}x{}", v[i].first >> 60, v[i].first & ((1ULL << 60) - 1), v[i].second);
++                LOG_INFO(Core_ARM, "dispatch exits main>main {} main>other {} other>main {} other>other {} svc {} budget {} halt {} | top{}",
++                         ds_kind[0], ds_kind[1], ds_kind[2], ds_kind[3], ds_kind[4], ds_kind[5], ds_kind[6], top);
++                ds_kind = {};
++                ds_top.clear();
++            }
++        }
+         if (early_dispatch < 64) {
+             LOG_INFO(Core_ARM, "Early static return #{}: pc={:#x}, svc={}, halted={}",
+                      early_dispatch, impl->ctx.pc, impl->ctx.pending_svc, impl->ctx.halted);
+@@ -2306,7 +2629,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              impl->ctx.pending_svc = kNoPendingSvc;
              // Forward the guest instruction-cache operation to each CPU interface.
              for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -2102,7 +2176,7 @@ index 67a55424e9..e7a0111caf 100644
              }
              impl->ctx.pc += 4;
              impl->ctx.halted = 0;
-@@ -2350,7 +2623,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2350,7 +2673,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               unsupported_opcode, impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -2112,7 +2186,7 @@ index 67a55424e9..e7a0111caf 100644
          }
  
          if (impl->ctx.pending_svc != kNoPendingSvc) {
-@@ -2404,7 +2678,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+@@ -2404,7 +2728,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
          const u64 address = impl->ctx.pending_svc;
          impl->ctx.pending_svc = kNoPendingSvc;
          for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -2121,7 +2195,7 @@ index 67a55424e9..e7a0111caf 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2811,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2861,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -4311,10 +4385,10 @@ index 0000000000..3599a5e91f
 +CTGP_SITE(0x87b1c, 0x88a74, Call, 0, 0x37, 0x0, "page_id", "0x8fcfc (after 'str w8, [x19,")
 diff --git a/src/core/arm/recomp/host_hooks.cpp b/src/core/arm/recomp/host_hooks.cpp
 new file mode 100644
-index 0000000000..fce2ab81bb
+index 0000000000..d108db09c7
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.cpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,252 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include <array>
 +#include "core/arm/recomp/host_hooks.h"
@@ -4486,6 +4560,11 @@ index 0000000000..fce2ab81bb
 +    return g_active.load(std::memory_order_acquire);
 +}
 +
++bool MayHook(u64 pc) {
++    if (!g_active.load(std::memory_order_acquire)) return false;
++    return (pc >= kTrapBase && pc < kTrapBase + kTrapSlots * 4) || FilterMayContain(pc);
++}
++
 +bool Dispatch(HookContext& ctx) {
 +    const u64 pc = ctx.pc;
 +    if (pc >= kTrapBase && pc < kTrapBase + kTrapSlots * 4) {
@@ -4564,10 +4643,10 @@ index 0000000000..fce2ab81bb
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/host_hooks.h b/src/core/arm/recomp/host_hooks.h
 new file mode 100644
-index 0000000000..0e0ebdf50a
+index 0000000000..3640ab88f2
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,63 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: host hooks for the static recompiler's dispatcher.
 +//
@@ -4605,6 +4684,9 @@ index 0000000000..0e0ebdf50a
 +
 +/// Adds a hook; several may share an address and run in install order.
 +void Install(u64 pc, HookFn fn);
++/// May Dispatch have something for pc (a hook, a return watch, a return trap)? False positives only. Code that enters a block
++/// without passing the dispatcher (XM1 cross-module calls) asks this first.
++bool MayHook(u64 pc);
 +/// Removes every hook at pc.
 +void Remove(u64 pc);
 +void Clear();
@@ -19081,7 +19163,7 @@ index 0000000000..ff89224f17
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..b6218c4fa1 100644
+index 699980238b..011a2c950a 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -329,6 +329,18 @@ inline bool g_emit_fpx = false;
@@ -19176,7 +19258,7 @@ index 699980238b..b6218c4fa1 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -369,6 +429,101 @@ inline std::string ChainTo(u64 t) {
+@@ -369,6 +429,102 @@ inline std::string ChainTo(u64 t) {
      return b;
  }
  
@@ -19228,6 +19310,7 @@ index 699980238b..b6218c4fa1 100644
 +    snprintf(b, sizeof b,
 +             "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; c->pc=_target; { uint64_t _rel=_target-g_module_base; "
 +             "BlockFn _f=(_rel<0x1000000ULL && g_main_hookmap[_rel>>2])?(BlockFn)0:recomp_lookup(_rel); "
++             "if (!_f && recomp_extern_fn) _f=recomp_extern_fn(_target); "
 +             "if (!_f || c->halted || c->pending_svc != ~UINT64_C(0) || --c->chain_budget <= 0) return; "
 +             "if (c->fm_reserved < %uu) { c->fm_reserved++; _f(c); c->fm_reserved--; "
 +             "if (c->pc != g_module_base+0x%llxULL || c->halted || c->pending_svc != ~UINT64_C(0) || "
@@ -19278,7 +19361,7 @@ index 699980238b..b6218c4fa1 100644
  // The same for a computed target. A chain of blocks otherwise ends at the first
  // BR, BLR or RET, and every one of those is a round trip out to the host
  // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
-@@ -476,6 +631,7 @@ inline std::string FpxArgs(const char* op) {
+@@ -476,6 +632,7 @@ inline std::string FpxArgs(const char* op) {
      return "_a,_b";
  }
  inline std::string EmitFPNativeValue(bool dbl, const char* op) {
@@ -19286,7 +19369,7 @@ index 699980238b..b6218c4fa1 100644
      if (!g_emit_fpx) return {};
      const std::string call = std::string("recomp_fpx_") + op + (dbl ? "64(" : "32(") + FpxArgs(op);
      if (g_emit_fpx_shadow) {
-@@ -485,7 +641,15 @@ inline std::string EmitFPNativeValue(bool dbl, const char* op) {
+@@ -485,7 +642,15 @@ inline std::string EmitFPNativeValue(bool dbl, const char* op) {
      return "do{if(RECOMP_FPX_OPEN(c)&&RECOMP_LIKELY(" + call +
             ",&_v))){RECOMP_FPX_PROBE(1);break;}RECOMP_FPX_PROBE(2);";
  }
@@ -19302,7 +19385,7 @@ index 699980238b..b6218c4fa1 100644
      if (!g_emit_fpx) return {};
      if (g_emit_fpx_shadow) {
          static const char* const kinds[] = {"add", "sub", "mul", "div", "fma", "recps", "rsqrts", "sqrt"};
-@@ -502,7 +666,23 @@ inline std::string EmitFPNativeSuffix(bool dbl, const char* op) {
+@@ -502,7 +667,23 @@ inline std::string EmitFPNativeSuffix(bool dbl, const char* op) {
      return "}while(0);";
  }
  
@@ -19326,7 +19409,7 @@ index 699980238b..b6218c4fa1 100644
      return EmitFPNativeValue(dbl, subtract ? "sub" : "add") +
          "{ const unsigned _f=" + std::string(dbl?"52":"23") +
          ";const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1,_exp="+
-@@ -545,6 +725,7 @@ inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
+@@ -545,6 +726,7 @@ inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
  // IEEE bit patterns. A multiply supplies a same-sign zero addend so its zero
  // result has the product sign in every rounding mode.
  inline std::string EmitFPDivideValue(bool dbl) {
@@ -19334,7 +19417,7 @@ index 699980238b..b6218c4fa1 100644
      return EmitFPNativeValue(dbl, "div") +
          "{ const unsigned _f="+std::string(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+R"C(;
  const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1;
-@@ -658,6 +839,7 @@ else {
+@@ -658,6 +840,7 @@ else {
  // `mul` marks a multiply (FMUL/FNMUL), whose addend is the sign-matched zero
  // the caller supplies: the fast path then needs no fused multiply-add.
  inline std::string EmitFPMulAddValue(bool dbl, bool mul = false) {
@@ -19342,7 +19425,7 @@ index 699980238b..b6218c4fa1 100644
      std::string s=EmitFPNativeValue(dbl, mul ? "mul" : "fma")+
          "{ const unsigned _f="+std::string(dbl?"52":"23")+
          ",_bias="+(dbl?"1023":"127")+",_count="+(dbl?"67":"9")+
-@@ -736,6 +918,7 @@ else {
+@@ -736,6 +919,7 @@ else {
  // access trap delivery and FEAT_AFP remain unsupported. The line breaks match
  // what put() emits, so the scalar text is unchanged by sharing it.
  inline std::string EmitFPStepValue(bool dbl, bool half) {
@@ -19350,7 +19433,7 @@ index 699980238b..b6218c4fa1 100644
      std::string s = std::string("const unsigned _f=")+(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+
              ",_count="+(dbl?"67":"9")+";const int _base="+
              std::to_string((dbl?-2148:-298)-(half?1:0))+";"
-@@ -946,8 +1129,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -946,8 +1130,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -19360,7 +19443,7 @@ index 699980238b..b6218c4fa1 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1188,16 +1370,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,16 +1371,33 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
@@ -19374,7 +19457,21 @@ index 699980238b..b6218c4fa1 100644
          return false;
      }
      if ((i & 0xFFFFFC1F) == 0xD65F0000) { put("c->pc=c->x[30]; return; /* RET */"); return false; }
-     if ((i & 0xFFFFFC1F) == 0xD61F0000) { u32 rn = (i >> 5) & 31; put("c->pc=c->x[" + std::to_string(rn) + "]; return; /* BR */"); return false; }
+-    if ((i & 0xFFFFFC1F) == 0xD61F0000) { u32 rn = (i >> 5) & 31; put("c->pc=c->x[" + std::to_string(rn) + "]; return; /* BR */"); return false; }
++    if ((i & 0xFFFFFC1F) == 0xD61F0000) {
++        u32 rn = (i >> 5) & 31;
++        if (g_native_calls && g_chain_blocks && g_chain_mod) {
++            // XM1: a BR into another module (the import stubs' `br x16`) is entered here through the host's index (null for a
++            // hooked or unknown target, or one in this module), so the call into the SDK and its RET stay native instead of two
++            // trips through the host dispatcher. Depth is counted like a native call.
++            put("{ c->pc=c->x[" + std::to_string(rn) + "]; BlockFn _f=(recomp_extern_fn && c->pc - g_xm_lo > g_xm_hi - g_xm_lo) ? recomp_extern_fn(c->pc) : (BlockFn)0; "
++                "if (_f && !c->halted && c->pending_svc == ~UINT64_C(0) && --c->chain_budget > 0 && c->fm_reserved < " +
++                std::to_string(kNativeCallDepth) + "u) { c->fm_reserved++; _f(c); c->fm_reserved--; } return; } /* BR */");
++            return false;
++        }
++        put("c->pc=c->x[" + std::to_string(rn) + "]; return; /* BR */");
++        return false;
++    }
      if ((i & 0xFFFFFC1F) == 0xD63F0000) {
          u32 rn = (i >> 5) & 31;
 +        if (g_native_calls && g_chain_blocks && g_chain_mod) {
@@ -19384,7 +19481,7 @@ index 699980238b..b6218c4fa1 100644
          snprintf(buf, sizeof buf,
                   "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; "
                   "c->pc=_target; return; } /* BLR */",
-@@ -1209,16 +1395,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1209,16 +1409,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          const s64 off = ((s32)((i >> 5) << 13) >> 13);
          const u64 tt = pc + off * 4;
          const u32 cond = i & 15;
@@ -19404,7 +19501,7 @@ index 699980238b..b6218c4fa1 100644
      if ((i & 0xFFE0001F) == 0xD4000001) { u32 imm = (i >> 5) & 0xFFFF; snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; c->pending_svc=%uULL; recomp_svc(c,%u); return;", (unsigned long long)next, imm, imm); put(buf); return false; }
      if ((i & 0xFFE0001F) == 0xD4200000) {
          const u32 imm = (i >> 5) & 0xFFFF;
-@@ -2174,7 +2355,9 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -2174,7 +2369,9 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              const unsigned lanes=scalar||scalar_pair?1:(q?16:8)/(dbl?8:4);
              const bool sub=scalar?(i&0x1000)!=0:vector&&(i&0x800000)!=0;
              const std::string ct=dbl?"uint64_t":"uint32_t",count=dbl?"2":"4";
@@ -19415,7 +19512,7 @@ index 699980238b..b6218c4fa1 100644
                  "memcpy(_n,c->vreg["+std::to_string(rn)+"],16);memcpy(_m,c->vreg["+std::to_string(rm)+"],16);");
              for(unsigned e=0;e<lanes;++e) {
                  const std::string src=vector_pair&&e>=lanes/2?"_m":"_n";
-@@ -2184,7 +2367,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -2184,7 +2381,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                      (scalar_pair||vector_pair?src:"_m")+"["+std::to_string(b)+"],_v=0;"+
                      EmitFPAddSubValue(dbl,sub)+"_r["+std::to_string(e)+"]=("+ct+")_v;}");
              }
@@ -19424,7 +19521,7 @@ index 699980238b..b6218c4fa1 100644
              return true;
          }
      }
-@@ -4282,7 +4465,12 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4282,7 +4479,12 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              const int bytes = scl_idx ? fsz : (Q ? 16 : 8);
              const int lanes = bytes / fsz;
              if (!(dbl && L)) {   // L must be zero for the 64-bit form
@@ -19438,7 +19535,7 @@ index 699980238b..b6218c4fa1 100644
                                  "],_r[" + std::to_string(lanes) + "],_m; ";
                  s += "memcpy(_a,c->vreg[" + std::to_string(rn) + "]," + std::to_string(bytes) + "); ";
                  s += "memcpy(&_m,(const uint8_t*)c->vreg[" + std::to_string(rm) + "]+" +
-@@ -4299,7 +4487,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4299,7 +4501,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  s+="_r[_i]=("+std::string(ct)+")_v;}}";
                  s += "c->vreg[" + std::to_string(rd) + "][0]=0; c->vreg[" + std::to_string(rd) +
                       "][1]=0; ";
@@ -19447,7 +19544,7 @@ index 699980238b..b6218c4fa1 100644
                  put(s);
                  return true;
              }
-@@ -4708,7 +4896,8 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4708,7 +4910,8 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              // opcode 11001: FMLA (a=0) / FMLS (a=1), both U=0.
              if (opc5 == 0x19 && !U) {
                  const std::string ty=dbl?"uint64_t":"uint32_t";
@@ -19457,7 +19554,7 @@ index 699980238b..b6218c4fa1 100644
                      "memcpy(_n,c->vreg["+std::to_string(rn)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_m,c->vreg["+std::to_string(rm)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_d,c->vreg["+std::to_string(rd)+"],"+std::to_string(vbytes)+");"
-@@ -4717,7 +4906,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4717,7 +4920,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  put(EmitFPMulAddValue(dbl));
                  put("_d[_j]=("+ty+")_v;}memcpy(c->vreg["+std::to_string(rd)+"],_d,"+std::to_string(vbytes)+");");
                  if(!Q)put("c->vreg["+std::to_string(rd)+"][1]=0;");
@@ -19466,7 +19563,7 @@ index 699980238b..b6218c4fa1 100644
                  return true;
              }
              // opcode 11011 with U=1 and a=0 is FMUL. The U=0 encoding at the
-@@ -4725,7 +4914,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4725,7 +4928,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              // it is deliberately left alone rather than aliased to FMUL.
              if (opc5 == 0x1B && U && !a) {
                  const std::string ty=dbl?"uint64_t":"uint32_t";
@@ -19475,7 +19572,7 @@ index 699980238b..b6218c4fa1 100644
                      "memcpy(_n,c->vreg["+std::to_string(rn)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_m,c->vreg["+std::to_string(rm)+"],"+std::to_string(vbytes)+");"
                      "for(unsigned _j=0;_j<"+std::to_string(fne)+";++_j){uint64_t _a=_n[_j],_b=_m[_j],_z=(_a^_b)&"+
-@@ -4733,20 +4922,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4733,20 +4936,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  put(EmitFPMulAddValue(dbl,true));
                  put("_d[_j]=("+ty+")_v;}memcpy(c->vreg["+std::to_string(rd)+"],_d,"+std::to_string(vbytes)+");");
                  if(!Q)put("c->vreg["+std::to_string(rd)+"][1]=0;");
@@ -19499,7 +19596,7 @@ index 699980238b..b6218c4fa1 100644
                  return true;
              }
          }
-@@ -5100,7 +5289,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5100,7 +5303,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -19510,7 +19607,7 @@ index 699980238b..b6218c4fa1 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5183,7 +5374,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5183,7 +5388,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                   u);
          rcu += line;
          for (size_t i = lo; i < hi; ++i) {
@@ -19519,7 +19616,7 @@ index 699980238b..b6218c4fa1 100644
              snprintf(line, sizeof line, "  {0x%llxULL, 0x%llxULL, %s},\n",
                       (unsigned long long)blocks[i].vaddr,
                       (unsigned long long)(blocks[i].vaddr + (u64)(blocks[i].count - 1) * 4),
-@@ -5219,6 +5410,80 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5219,6 +5424,80 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          }
      } chain_scope;
  
@@ -19600,7 +19697,7 @@ index 699980238b..b6218c4fa1 100644
      size_t cur_unit = 0;
      for (const auto& b : blocks) {
          const size_t unit = block_index / kBlocksPerUnit;
-@@ -5228,10 +5493,88 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5228,10 +5507,88 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              cur_unit = unit;
          }
          ++block_index;
@@ -19690,7 +19787,7 @@ index 699980238b..b6218c4fa1 100644
          const u32 first = (u32)((b.vaddr - base) / 4);
          rcu += "    static const uint32_t _expected[]={";
          if (EmitGuardGen()) {
-@@ -5257,12 +5600,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5257,12 +5614,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -19728,7 +19825,7 @@ index 699980238b..b6218c4fa1 100644
              char addr[32];
              rcu += "    { uint64_t _entry=c->pc-g_module_base; if(_entry!=0x";
              snprintf(addr, sizeof addr, "%llx", (unsigned long long)b.vaddr);
-@@ -5299,6 +5666,15 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5299,6 +5680,15 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              bool unhandled = false;
              open = Translate(insn, insn_pc, body, &unhandled);
              rcu += body;
@@ -19744,7 +19841,7 @@ index 699980238b..b6218c4fa1 100644
              ++stats.emitted;
              if (unhandled) {
                  ++stats.unhandled;
-@@ -5321,12 +5697,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5321,12 +5711,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -19768,7 +19865,7 @@ index 699980238b..b6218c4fa1 100644
          flush_unit(unit, false);
      }
      emit_seg(cur_unit);
-@@ -5566,7 +5949,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5566,7 +5963,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -19777,7 +19874,7 @@ index 699980238b..b6218c4fa1 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5746,6 +6129,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5746,6 +6143,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
  
      std::ostringstream ex;
      ex << "/* auto-generated by suyu static recompiler - DO NOT EDIT */\n"
@@ -19785,7 +19882,7 @@ index 699980238b..b6218c4fa1 100644
            "#include \"recomp_runtime.h\"\n\n"
            "/* The one symbol suyu resolves out of a recompiled image. Named\n"
            "   distinctly from the internal recomp_lookup so the export is\n"
-@@ -5758,7 +6142,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5758,7 +6156,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -19795,7 +19892,7 @@ index 699980238b..b6218c4fa1 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5799,13 +6184,66 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5799,13 +6198,66 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                "  return &g_recomp_gg_word;\n"
                "}\n";
      }
@@ -19863,7 +19960,7 @@ index 699980238b..b6218c4fa1 100644
                "RECOMP_API unsigned recomp_image_fastmem_v1(uint32_t page_bits, uint32_t stride_log2,\n"
                "                                            uint64_t ptr_mask, uint32_t off_table,\n"
                "                                            uint32_t off_limit){\n"
-@@ -5838,12 +6276,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +6290,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -19891,7 +19988,7 @@ index 699980238b..b6218c4fa1 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +6316,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +6330,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -19901,7 +19998,7 @@ index 699980238b..b6218c4fa1 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6368,6 +6820,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
+@@ -6368,6 +6834,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
  )RT";
  }
  
@@ -19972,7 +20069,7 @@ index 699980238b..b6218c4fa1 100644
  // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
  // Kept under MSVC's 16380-byte limit per string literal.
  inline const char* FpxAbiH() {
-@@ -6495,7 +7011,7 @@ static RECOMP_INLINE int recomp_fpx_div32(uint64_t a, uint64_t b, uint64_t* v) {
+@@ -6495,7 +7025,7 @@ static RECOMP_INLINE int recomp_fpx_div32(uint64_t a, uint64_t b, uint64_t* v) {
      (void)a; (void)b; (void)v; return 0;
  }
  static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, uint64_t* v) {
@@ -19981,7 +20078,7 @@ index 699980238b..b6218c4fa1 100644
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(recomp_fpx_f(a), recomp_fpx_f(b), recomp_fpx_f(z)));
  #elif RECOMP_FPX_HOST == 2
      const double s = (double)recomp_fpx_f(a) * (double)recomp_fpx_f(b) + (double)recomp_fpx_f(z);
-@@ -6511,7 +7027,7 @@ static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, ui
+@@ -6511,7 +7041,7 @@ static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, ui
  /* FRECPS: 2 - a*b; FRSQRTS: (3 - a*b)/2, each rounded once. inf*0 gives NaN
     here, which is never kept; the exact body returns 2.0 or 1.5. */
  static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v) {
@@ -19990,7 +20087,7 @@ index 699980238b..b6218c4fa1 100644
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(-recomp_fpx_f(a), recomp_fpx_f(b), 2.0f));
  #elif RECOMP_FPX_HOST == 2
      const double s = 2.0 - (double)recomp_fpx_f(a) * (double)recomp_fpx_f(b);
-@@ -6525,7 +7041,7 @@ static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v)
+@@ -6525,7 +7055,7 @@ static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v)
      (void)a; (void)b; (void)v; return 0;
  }
  static RECOMP_INLINE int recomp_fpx_rsqrts32(uint64_t a, uint64_t b, uint64_t* v) {
@@ -19999,7 +20096,7 @@ index 699980238b..b6218c4fa1 100644
      /* Halving a normal result is exact, and a normal result is all that is kept. */
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(-recomp_fpx_f(a), recomp_fpx_f(b), 3.0f) * 0.5f);
  #elif RECOMP_FPX_HOST == 2
-@@ -6558,6 +7074,7 @@ static RECOMP_INLINE int recomp_fpx_sqrt32(uint64_t a, uint64_t* v) {
+@@ -6558,6 +7088,7 @@ static RECOMP_INLINE int recomp_fpx_sqrt32(uint64_t a, uint64_t* v) {
  )RT";
  }
  
@@ -20007,7 +20104,7 @@ index 699980238b..b6218c4fa1 100644
  inline const char* FpxH64() {
      return R"RT(
  static RECOMP_INLINE int recomp_fpx_add64(uint64_t a, uint64_t b, uint64_t* v) {
-@@ -6888,10 +7405,28 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,11 +7419,33 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -20034,9 +20131,14 @@ index 699980238b..b6218c4fa1 100644
 +#define RECOMP_TAIL
 +#endif
  typedef void (*BlockFn)(GuestContext*);
++/* XM1: the host's entry for an address in another module (its slice runner), or null (hooked, unknown, this module, or an older
++   host that never set it). Set at load through recomp_image_extern_v1. */
++extern BlockFn (*recomp_extern_fn)(uint64_t);
++extern uint64_t g_xm_lo, g_xm_hi;
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
-@@ -6960,11 +7495,19 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+    guest thread runs. */
+@@ -6960,11 +7513,19 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
          text.replace(text.find(abi5_line), abi5_line.size(),
                       std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
      }
@@ -20057,7 +20159,7 @@ index 699980238b..b6218c4fa1 100644
                              (fpx == 2 ? "/* FPX1 shadow instrumentation build (never timed). */\n"
                                          "void recomp_fpx_shadow(unsigned kind, int gate, int kept, uint64_t fast,\n"
                                          "    uint64_t exact, uint64_t fpsr_before, uint64_t fpsr_after,\n"
-@@ -6978,6 +7521,106 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6978,6 +7539,106 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
      return text;
  }
  
@@ -20164,7 +20266,7 @@ index 699980238b..b6218c4fa1 100644
  // One cached text per variant: the first caller must not fix the variant for
  // the whole process.
  inline int FpxVariant() {
-@@ -7241,7 +7884,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+@@ -7241,7 +7902,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
      // than being a single literal. Adjacent-literal concatenation would not
      // help: the limit applies to the result as well. The memory helpers are a
      // piece of their own because ABI 6 reuses their exact text as its slow path.
@@ -20174,7 +20276,7 @@ index 699980238b..b6218c4fa1 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -7580,6 +8224,16 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +8242,25 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif
@@ -20188,10 +20290,19 @@ index 699980238b..b6218c4fa1 100644
 +#endif
 +uint8_t* recomp_main_hooks_v1(int (*fn)(GuestContext*, uint64_t)) { recomp_block_hook_fn = fn; return g_main_hookmap; }
 +#endif
++
++BlockFn (*recomp_extern_fn)(uint64_t) = 0;
++uint64_t g_xm_lo = 0, g_xm_hi = 0; /* this image's own block range (absolute): a BR inside it stays on the old path */
++#if defined(_WIN32)
++__declspec(dllexport)
++#else
++__attribute__((visibility("default")))
++#endif
++void recomp_image_extern_v1(BlockFn (*fn)(uint64_t), uint64_t lo, uint64_t hi) { g_xm_lo = lo; g_xm_hi = hi; recomp_extern_fn = fn; }
  
  uint64_t recomp_umulh(uint64_t a,uint64_t b){
    /* Portable 64x64->high64: split into 32-bit halves. Avoids depending on
-@@ -7895,6 +8549,10 @@ inline const char* RuntimeC() {
+@@ -7895,6 +8576,10 @@ inline const char* RuntimeC() {
          return (EmitGuardGen() ? guard_gen_shadow : g_emit_fastmem ? fastmem_shadow : abi5_shadow)
              .c_str();
      }

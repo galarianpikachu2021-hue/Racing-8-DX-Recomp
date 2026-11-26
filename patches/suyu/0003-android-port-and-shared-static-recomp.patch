@@ -341,15 +341,16 @@ index 0000000000..9cb62faa28
 +#endif
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..d1e88e9c79
+index 0000000000..01dd7d7bc5
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,500 @@
+@@ -0,0 +1,554 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
 +// their SUYU_RECOMP_* definitions) by src/kartrecomp_static_recomp.cmake. Moved verbatim from suyu.cpp.
 +#include "core/arm/recomp/kart_hook_trace.h"
++#include "core/arm/recomp/host_hooks.h"
 +#include "common/kart_tune_sites.h"
 +#include "frontend_common/kart_static_recomp.h"
 +#include "frontend_common/huge_code.h"
@@ -439,6 +440,14 @@ index 0000000000..d1e88e9c79
 +    unsigned image_abi{};
 +    unsigned (*guard_v2)(unsigned){};
 +    std::string name; // informational, for recomp_gaps.json
++    // The module's block index (absolute addresses), filled once its base is set: the combined lookup reads it directly instead
++    // of asking each module in turn (a miss in a module's own lookup ends in a binary search over its segments, and calls from
++    // the game into the SDK, about 2.4 million a second, missed three modules first).
++    int (*index)(u64*, u64*, Core::RecompBlockFn**){};
++    u64 idx_lo{}, idx_hi{};
++    Core::RecompBlockFn* idx{};
++    void (*extern_v1)(Core::RecompBlockFn (*)(u64), u64, u64){}; ///< XM1: hands the module the cross-module entry below
++    bool xm_skip{}; ///< KARTRECOMP_XM_TARGETS leaves this module out
 +};
 +
 +#ifdef _WIN32
@@ -572,6 +581,8 @@ index 0000000000..d1e88e9c79
 +#endif
 +        auto guard = reinterpret_cast<unsigned (*)(unsigned)>(FindSym(h, "recomp_image_guard_v2"));
 +        modules.push_back({lookup, set_base, run_slice, abi, guard, name == "image" ? "main" : name});
++        modules.back().index = reinterpret_cast<int (*)(u64*, u64*, Core::RecompBlockFn**)>(FindSym(h, "recomp_image_index"));
++        modules.back().extern_v1 = reinterpret_cast<void (*)(Core::RecompBlockFn (*)(u64), u64, u64)>(FindSym(h, "recomp_image_extern_v1"));
 +        LOG_INFO(Frontend, "Recompiled module [{}] loaded from {}", modules.size() - 1, file.string());
 +    }
 +    if (modules.empty()) {
@@ -731,6 +742,15 @@ index 0000000000..d1e88e9c79
 +    if (!s_recomp_modules.empty()) {
 +        // Combined lookup: try each module's lookup until one returns non-null.
 +        Core::SetRecompLookup([](u64 pc) -> Core::RecompBlockFn {
++            static const bool slow = std::getenv("KARTRECOMP_SLOW_LOOKUP") != nullptr;
++            if (!slow) {
++                for (const auto& m : s_recomp_modules) {
++                    if (m.idx && pc >= m.idx_lo && pc <= m.idx_hi && ((pc - m.idx_lo) & 3) == 0) {
++                        if (auto fn = m.idx[(pc - m.idx_lo) >> 2]) return m.run_slice ? m.run_slice : fn;
++                        break; // inside this module's index but not a block start: the per-module lookups decide
++                    }
++                }
++            }
 +            for (const auto& m : s_recomp_modules) {
 +                if (auto fn = m.lookup(pc)) return m.run_slice ? m.run_slice : fn;
 +            }
@@ -760,6 +780,40 @@ index 0000000000..d1e88e9c79
 +        Core::SetRecompBaseSetter([](size_t index, const char*, u64 base) {
 +            if (index < s_recomp_modules.size() && s_recomp_modules[index].set_base) {
 +                s_recomp_modules[index].set_base(base);
++                auto& m = s_recomp_modules[index];
++                if (m.index && !m.index(&m.idx_lo, &m.idx_hi, &m.idx)) m.idx = nullptr;
++                // XM1: generated code that branches into another module (the game calling the SDK through its import stubs,
++                // the SDK calling back) asks `enter` for the target's slice runner and calls it directly; null sends it to the
++                // dispatcher as before. Hooked addresses (graphics calls, return watches) and the debugging tools that watch
++                // every dispatch keep the dispatcher. KARTRECOMP_NO_XM=1 turns it off (images built before XM1 never ask).
++                static const bool xm = !std::getenv("KARTRECOMP_NO_XM") && !Core::KartHookTrace::CoverageEnabled() &&
++                                       !Core::KartHookTrace::StringWatchEnabled();
++                static constexpr Core::RecompBlockFn (*enter)(u64) = [](u64 pc) -> Core::RecompBlockFn {
++                    if (Core::RecompHooks::MayHook(pc)) return nullptr;
++                    for (const auto& mod : s_recomp_modules) {
++                        if (mod.idx && pc >= mod.idx_lo && pc <= mod.idx_hi && ((pc - mod.idx_lo) & 3) == 0) {
++                            if (mod.xm_skip) return nullptr;
++                            // The block itself, not the module's slice runner: a slice keeps going while the pc stays in its
++                            // module, so a callee returning into a caller of the same module would run the caller's code one
++                            // native level deeper each time (a loop calling through rtld's stubs overflowed the stack). The
++                            // block returns at the callee's RET, and the caller's native frame continues.
++                            return mod.idx[(pc - mod.idx_lo) >> 2];
++                        }
++                    }
++                    return nullptr;
++                };
++                // Only targets in these modules are entered directly (KARTRECOMP_XM_TARGETS=main,sdk,... to choose). Default: the
++                // SDK, which is where the game's calls go (all of the measured gain). Targets in rtld or subsdk0 broke a Grand Prix
++                // near the award ceremony (a garbage object pointer in an SDK release function, frame ~97,000); sdk+main passed.
++                static const std::string xm_targets = [] {
++                    const char* v = std::getenv("KARTRECOMP_XM_TARGETS");
++                    return std::string{","} + (v ? v : "sdk") + ",";
++                }();
++                if (xm_targets.find("," + m.name + ",") == std::string::npos) m.xm_skip = true;
++                if (xm && m.idx && m.extern_v1) {
++                    m.extern_v1(enter, m.idx_lo, m.idx_hi);
++                    LOG_INFO(Frontend, "cross-module native calls (XM1) on for {} ({:#x}-{:#x})", m.name, m.idx_lo, m.idx_hi);
++                }
 +                // Misses in this module are gaps a re-export can close.
 +                Core::RecompGaps::NoteImage(base, s_recomp_modules[index].name);
 +            }

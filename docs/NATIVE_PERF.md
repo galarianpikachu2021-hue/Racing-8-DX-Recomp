@@ -185,3 +185,37 @@ thread asleep 29% of the time, 88% of that in `SyncArbiter::AddressWait` (the ga
 of those sleeps); 11% of the sleeps have no engine thread running. 3 cores instead of 4: +12% frame time; 6 cores: no change. On the
 Deck, dispatch (`recomp_lookup` 7.2%, `RunThread` 6.7%, `recomp_image_run_slice` 4.3%) is about 20% of the game thread, against
 about 13% here. Next: a wall profile from the Deck (`KARTRECOMP_PROFILE=60,40,wall`) and a run in Game Mode.
+
+## Cross-module native calls (XM1, 2026-11-25)
+
+Deck wall profile (log 5): the game thread is the limit, running 81% of the time; of that 66% game code, 19% dispatch, 11% NVN hooks,
+4% sync. `KARTRECOMP_DISPATCH_STATS=1` (engine, per thread, logged every 10 s plus an exit breakdown about once a second) showed
+why dispatch is so high: the main thread enters the host dispatcher about 4.3 million times a second here (~27,000 a frame), and
+**none** of those are main -> main. All are calls from `main` into the SDK (import stubs `br x16`, BLR through tables) and the
+returns from it; NVN hooks are only ~16% of them.
+
+XM1 (generator + engine; old modules and old engines keep working, they just never ask):
+- Each image gets `recomp_image_extern_v1(fn, lo, hi)`; `recomp_extern_fn(pc)` is the host's entry for an address in another module
+  (its block function, from the module's block index), or null for a hooked address (`RecompHooks::MayHook`: hooks, return
+  watches, return traps), an unknown one, or one inside the caller's own image (`g_xm_lo/hi`).
+- BLR (native calls): a miss in the module's own index asks `recomp_extern_fn`; the existing native-call continuation then runs.
+- BR (new): a branch into another module is entered directly at one counted native level (`fm_reserved`), so the import stub's
+  call and the callee's RET stay native.
+- The block function, never the target module's slice runner: a slice keeps running while the pc stays in its module, so a callee
+  returning into a caller of the same module ran the caller's code a level deeper each time (first try: stack overflow at boot in a
+  subsdk0 -> rtld -> subsdk0 loop).
+- `KARTRECOMP_NO_XM=1` turns it off; it is off while `KARTRECOMP_BLOCK_COVERAGE` / `KARTRECOMP_STRING_WATCH` watch the dispatcher.
+- Engine side also: the combined lookup reads each module's block index directly (a miss in a module's own lookup ended in a binary
+  search; SDK targets missed three modules first), and the per-core "current pc" slots are one cache line each.
+
+Result here (`deckbench.sh`, 4 cores, a module built like Setup builds it, `gamebuild.sh xm2 --regions ...`): main thread dispatcher
+entries 4.3 M/s -> 2.2 M/s; frame time 5.27 / 5.43 ms with XM1 vs 6.02 / 5.79 ms without (same module), installed module 5.90.
+Note: `gamebuild.sh` without `--regions` builds a module ~25% slower than Setup's; pass `--regions data/mk8d-4.0.1/hot_blocks.txt`.
+
+XM1 targets (Grand Prix soaks, `gptas.py`, 4.0.1, module `xm2`): all modules as targets crashed twice at frame ~97,000 (near the award
+ceremony; an SDK release function at sdk+0x4cd94 got a garbage object pointer, 0x4b52...074b). Without XM1: full pass. Targets sdk only:
+pass; sdk+main: pass; main+rtld+subsdk0: crash. So entering rtld or subsdk0 directly is wrong somewhere (not found yet). Default:
+`KARTRECOMP_XM_TARGETS=sdk` (all of the measured gain: 5.22 / 5.38 ms vs 5.81 / 6.09 without). Final soak with the default:
+109,944 / 109,944 frames, 0 draw-check lines, fully static. beta5e AppImage, engine stamp 347ec6af43-abi6 (Setup rebuilds the game).
+The Mario Kart Stadium frame comparison is not deterministic with a module built by `gamebuild.sh` (two runs without XM1 differ in
+every frame; races diverge), so pictures were checked by eye only.

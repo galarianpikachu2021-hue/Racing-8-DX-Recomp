@@ -12,6 +12,9 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
   Setup needed for this one.
 - **Less work on the render thread** (the limit on a Steam Deck in busy scenes): textures that never change are re-checked less
   often (8.5 -> 2 MB read per frame), and draws that keep the same shader skip its lookup. Renderer time per frame -12% here.
+- **Direct calls into the system library** (the game's main thread is the limit on a Steam Deck): the game calls Nintendo's SDK about
+  27,000 times a frame, and each call used to pass through the engine's dispatcher twice. Those calls now go there and back directly
+  (half the dispatcher trips; uncapped race on four desktop cores about 9% faster). **Needs Setup once more** (the game is rebuilt).
 - **Object motion vectors only for what moves:** Sydney Sprint holds 60 fps again.
 - **Split-screen: the render scale works there too** (below 100%).
 
