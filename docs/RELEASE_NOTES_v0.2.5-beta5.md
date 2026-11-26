@@ -14,7 +14,7 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
   often (8.5 -> 2 MB read per frame), and draws that keep the same shader skip its lookup. Renderer time per frame -12% here.
 - **Direct calls into the system library** (the game's main thread is the limit on a Steam Deck): the game calls Nintendo's SDK about
   27,000 times a frame, and each call used to pass through the engine's dispatcher twice. Those calls now go there and back directly
-  (half the dispatcher trips; uncapped race on four desktop cores about 9% faster). **Needs Setup once more** (the game is rebuilt).
+  (half the dispatcher trips; uncapped race on four desktop cores about 9% faster).
 - **Object motion vectors only for what moves:** Sydney Sprint holds 60 fps again.
 - **Split-screen: the render scale works there too** (below 100%).
 
@@ -46,3 +46,10 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
 - No DLSS / NVIDIA test here: #42 and #43 need a report from an NVIDIA PC.
 - CTGP DX on Windows: L / R on the cup screen shows no new cups (#28).
 - At 33% render scale, fine texture detail on moving characters is grainy.
+
+## Downloads
+- `Racing_8_DX_Recomp-x86_64.AppImage` (Linux, x86-64-v3 CPU, Vulkan 1.3 GPU) and its `.sha256`. Engine `347ec6af43-abi6`: run Setup
+  again after updating (the game refuses modules built for an older engine and tells you so).
+- `KARTRECOMP_NO_XM=1` in `launch.env` switches the direct calls off if you suspect them.
+
+*windows was not on beta 4 and will probably be a bit on beta 5 cause the rework is taking longer than i expected*

@@ -819,3 +819,10 @@ Everything in the plan above is done on Linux except removing the emulated kerne
 
 Left: the Windows session tests the runtime kernel (COOPERATE.md), then `KARTRECOMP_RUNTIME_KERNEL_ONLY` becomes the default
 everywhere and the emulated kernel files (the ~25k lines listed in docs/NATIVE_KERNEL.md) are deleted from the fork.
+
+## Docket: rebuild hot game logic natively (user request, 2026-11-25)
+
+Lower the game's own CPU cost by replacing its hottest functions, one at a time, with hand-written host code (the way decompilation
+projects grow), each checked against the recompiled original (same outputs on recorded inputs, TAS races identical frame for frame).
+Order: after moving the engine's own work (NVN hooks, dispatch) off the Deck's main thread. First step will be a per-function profile
+of `main` on the Deck to pick candidates (math/collision/animation loops that run every frame).
