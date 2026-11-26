@@ -10,6 +10,8 @@ If you report a bug, tag it with "BETA Issue" and say it's beta 5. After updatin
 - **Less CPU work per drawn object** (measured with Steam Deck logs): the game's threads no longer wait for each other while they record
   graphics commands, and each command takes a third of the memory. Uncapped race on four desktop cores: 7.5 -> about 6.2 ms a frame. No new
   Setup needed for this one.
+- **Less work on the render thread** (the limit on a Steam Deck in busy scenes): textures that never change are re-checked less
+  often (8.5 -> 2 MB read per frame), and draws that keep the same shader skip its lookup. Renderer time per frame -12% here.
 - **Object motion vectors only for what moves:** Sydney Sprint holds 60 fps again.
 - **Split-screen: the render scale works there too** (below 100%).
 

@@ -16477,10 +16477,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..ba12cfa385
+index 0000000000..3e06e04ea4
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9290 @@
+@@ -0,0 +1,9333 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -16991,6 +16991,7 @@ index 0000000000..ba12cfa385
 +    u32 guest_size = 0;
 +    u64 content_hash = 0;
 +    u64 checked_frame = ~0ULL;
++    u32 unchanged = 0; ///< checks in a row that found the same bytes (the check interval backs off, up to 4x)
 +    u64 last_used = 0; ///< frame number; long-unused textures are evicted
 +    u64 bytes = 0;     ///< device memory held
 +};
@@ -18892,7 +18893,21 @@ index 0000000000..ba12cfa385
 +    ProgramEntry* GetProgram(const std::vector<u64>& stages, const DrawState& st) {
 +        // Integer-output variants get their own entry (key = stages + marker + mask).
 +        const u32 uint_mask = UintOutputMask(st);
-+        const std::vector<u64> keyed = ProgramKey(stages, st);
++        // Consecutive draws mostly use the same program: skip the key and the map search then. The pointer is dropped
++        // whenever an entry is erased and at each frame's start (KARTRECOMP_PROGRAM_MEMO=0: off).
++        static const bool memo = [] {
++            const char* v = std::getenv("KARTRECOMP_PROGRAM_MEMO");
++            return !(v && v[0] == '0');
++        }();
++        if (memo && last_program && last_program_mask == uint_mask && last_program_stages == stages) {
++            return last_program;
++        }
++        std::vector<u64>& keyed = program_key_scratch;
++        keyed.assign(stages.begin(), stages.end());
++        if (uint_mask) {
++            keyed.push_back(~0ULL);
++            keyed.push_back(uint_mask);
++        }
 +        const std::vector<u64>& datas = keyed;
 +        if (const auto it = programs.find(datas); it != programs.end()) {
 +            if (it->second.speculative) {
@@ -18904,6 +18919,11 @@ index 0000000000..ba12cfa385
 +                    ++speculation_misses;
 +                    if (!it->second.ok) ++program_failures;
 +                }
++            }
++            if (memo && !it->second.speculative) {
++                last_program = &it->second;
++                last_program_mask = uint_mask;
++                last_program_stages = stages;
 +            }
 +            return &it->second;
 +        }
@@ -19030,6 +19050,7 @@ index 0000000000..ba12cfa385
 +                    }
 +                }
 +                retired_programs.push_back(std::move(it->second));
++                last_program = nullptr;
 +                programs.erase(it);
 +                ++programs_replaced;
 +            }
@@ -19069,6 +19090,7 @@ index 0000000000..ba12cfa385
 +                        it->second.speculative = false;
 +                    } else {
 +                        DestroyProgram(it->second);
++                        last_program = nullptr;
 +                        programs.erase(it);
 +                        ++speculation_misses;
 +                    }
@@ -20836,16 +20858,29 @@ index 0000000000..ba12cfa385
 +        }
 +        Profile::Scope ps_tex{prof, Profile::TexCheck};
 +        // CPU-updated textures are re-hashed: small ones every frame, larger ones
-+        // every 8th frame (staggered by key), which keeps the cost bounded.
-+        const bool check_now = it->second.guest_size <= (16u << 10) || ((frames + (key >> 7)) & 7) == 0;
++        // every 8th frame (staggered by key), which keeps the cost bounded. A texture
++        // whose bytes stayed the same over 4 checks is checked half as often, after 8
++        // a quarter (small: every 4th frame, large: every 32nd); one that changes
++        // goes back to the full rate. KARTRECOMP_TEXCHECK_BACKOFF=0: no back-off.
++        static const bool backoff = [] {
++            const char* v = std::getenv("KARTRECOMP_TEXCHECK_BACKOFF");
++            return !(v && v[0] == '0');
++        }();
++        const u32 check_base = it->second.guest_size <= (16u << 10) ? 1u : 8u;
++        const u32 check_every = check_base << (backoff ? std::min<u32>(it->second.unchanged / 4, 2) : 0);
++        const bool check_now = ((frames + (key >> 7)) & (check_every - 1)) == 0;
 +        // Up to 4 MB: video frames (640x360 RGBA8, written by the video decoder) are
 +        // the large case. Lightmaps and other big static textures are never rechecked.
 +        if (it->second.ok && it->second.guest_size <= (4u << 20) && it->second.checked_frame != frames &&
 +            check_now) {
 +            it->second.checked_frame = frames;
-+            std::vector<u8> now(it->second.guest_size);
++            auto& now = tex_check_scratch; // kept between checks: no allocation and zero-fill per texture
++            now.resize(it->second.guest_size);
 +            Core::NvnHost::ReadGpuMemory(it->second.gpu_address, now.data(), now.size());
-+            if (HashBytes(now.data(), now.size()) != it->second.content_hash) {
++            tex_check_bytes += now.size();
++            if (HashBytes(now.data(), now.size()) == it->second.content_hash) {
++                ++it->second.unchanged;
++            } else {
 +                SampledTexture fresh = UploadTexture(tic);
 +                if (fresh.ok) {
 +                    RetireTexture(it->second);
@@ -24345,6 +24380,7 @@ index 0000000000..ba12cfa385
 +    }
 +
 +    void Render(const Frame& frame) {
++        last_program = nullptr;
 +        {
 +            // Wayland never reports the swapchain out of date on resize (the
 +            // compositor just stretches it): follow the window size ourselves.
@@ -25070,9 +25106,11 @@ index 0000000000..ba12cfa385
 +                     ms(Profile::DrawTotal), ms(Profile::IndexScan), ms(Profile::PreDescriptors),
 +                     ms(Profile::Submit));
 +            LOG_INFO(Frontend, "nvn-host vulkan: per frame: upload reuse {:.0f}, descriptor set reuse {:.0f}, "
-+                     "game waited on renderer {:.2f} ms, commands {:.0f}",
++                     "game waited on renderer {:.2f} ms, commands {:.0f}, texture check {:.1f} MB, refreshed {:.1f}",
 +                     upload_cache_hits / 300.0, descriptor_cache_hits / 300.0, throttle_ns.exchange(0) / 300.0 / 1e6,
-+                     commands_seen / 300.0);
++                     commands_seen / 300.0, tex_check_bytes / 300.0 / 1e6, textures_refreshed / 300.0);
++            tex_check_bytes = 0;
++            textures_refreshed = 0;
 +            if (fg_on) {
 +                LOG_INFO(Frontend, "frame generation: {} frames tried; skipped: no 3D this frame {}, no previous {}, no clean copy {}, no "
 +                         "motion {}, history reset {}, not upscaled {}, window size {}x{} vs 3D {}x{} ({}), previous size {}",
@@ -25741,6 +25779,9 @@ index 0000000000..ba12cfa385
 +    bool dummies_cleared = false;
 +    std::map<std::vector<u64>, ProgramEntry> programs;
 +    std::unordered_map<u64, SampledTexture> sampled;
++    ProgramEntry* last_program = nullptr; ///< GetProgram's last answer (see there)
++    u32 last_program_mask = 0;
++    std::vector<u64> last_program_stages, program_key_scratch;
 +    std::vector<SampledTexture> retired, retired_prev;
 +    std::unordered_map<std::string, VkPipeline> pipelines;
 +    bool rendering = false;
@@ -25752,6 +25793,8 @@ index 0000000000..ba12cfa385
 +    u64 skip_no_target = 0, skip_descriptors = 0, skip_no_program = 0, skip_discard = 0;
 +    u64 textures_native = 0, textures_dummy = 0, ring_overflows = 0, unmapped_reads = 0;
 +    u64 textures_refreshed = 0;
++    u64 tex_check_bytes = 0;             ///< guest bytes re-read for the texture check (log: per frame)
++    std::vector<u8> tex_check_scratch;
 +    u64 textures_uploaded = 0, textures_created = 0, textures_unsupported = 0, texture_view_mismatch = 0;
 +};
 +
