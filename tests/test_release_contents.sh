@@ -20,5 +20,9 @@ fi
 bad=$(find "$root" -type f \( -iname '*.nsp' -o -iname '*.xci' -o -iname '*.nca' -o -iname '*.nso' -o -iname '*.npdm' -o -iname 'prod.keys*' -o -iname 'title.keys*' -o -name 'recomp_*.c' -o -name 'recompiled_*' -o -name 'module.json' \) -o \( -name '*.o' -not -path '*/toolchain/*' \) | head -3)
 [ -z "$bad" ] || { echo "FAIL: game-derived files in the release: $bad"; exit 1; }
 [ -f "$root/usr/bin/ENGINE_VERSION" ] || { echo "FAIL: no ENGINE_VERSION"; exit 1; }
+# The engine checks module.json against the stamp compiled into it (KARTRECOMP_ENGINE_VERSION); the launcher writes the file's stamp.
+# A mismatch makes every build "built for another version" (beta5e shipped that way once).
+v="$(cat "$root/usr/bin/ENGINE_VERSION")"
+grep -aqF -- "$v" "$root/usr/bin/mk8d-engine" || { echo "FAIL: ENGINE_VERSION $v is not the stamp compiled into mk8d-engine"; exit 1; }
 packaging/glibc-floor.sh "$root" "${KARTRECOMP_MAX_GLIBC:-}" || { echo "FAIL: glibc floor too high"; exit 1; }
 echo PASS
