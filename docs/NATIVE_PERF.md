@@ -176,3 +176,12 @@ Deck, second log (beta5c engine, same 1080p + FSR 3 settings, a 3840x2160 window
 draw counts 400-600: 53.2 -> 54.6, 600-800: 49.5 -> 53.3, 800-900: 45.5 -> 52.5, 1000-1200: 40.9 -> 45.4 (5-second samples, 3-9 each). Fit:
 12.5 ms + 11.1 us/draw -> 14.5 ms + 6.7 us/draw (the fixed part rests on 25 samples). The profile in that upload was the first session's (same
 mapping addresses and AppImage mount name): `KARTRECOMP_PROFILE=180,40` writes nothing when the game closes before 220 s, and the old file stays.
+
+Deck, third log (beta5d, 1280x800 window, 3D 1080p + FSR 3, KDE desktop mode): the render thread's record time fell 13-25% at the same
+draw counts (1,000+ draws: 16.0 -> 13.5 ms), but fps at matching draw counts did not move (300-600: 57.7, 600-800: 54.8, 800-1000:
+51.1, 1000+: 45.2). The render thread was not the limit. CPU profile (60-100 s): game thread 78% busy, render thread 50-68%, the
+game's workers 0x65/0x66 20-30% each. A local wall profile (`deckbench.sh`, engine-t2, `KARTRECOMP_PROFILE=65,20,wall`) shows the game
+thread asleep 29% of the time, 88% of that in `SyncArbiter::AddressWait` (the game waiting on its own worker 0x66, which runs 52%
+of those sleeps); 11% of the sleeps have no engine thread running. 3 cores instead of 4: +12% frame time; 6 cores: no change. On the
+Deck, dispatch (`recomp_lookup` 7.2%, `RunThread` 6.7%, `recomp_image_run_slice` 4.3%) is about 20% of the game thread, against
+about 13% here. Next: a wall profile from the Deck (`KARTRECOMP_PROFILE=60,40,wall`) and a run in Game Mode.

@@ -21,6 +21,8 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') | $(nproc) threads"
   echo "RAM: $(awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {printf "%.1f GB total, %.1f GB free", t/1048576, a/1048576}' /proc/meminfo)"
   echo "CPU governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+  echo "CPU driver: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || echo unknown), energy preference $(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null || echo n/a), max $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo ?) kHz"
+  echo "CPU pairs (SMT): $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list 2>/dev/null | sort -u | tr '\n' ' ')"
   command -v powerprofilesctl >/dev/null && echo "Power profile: $(powerprofilesctl get 2>/dev/null)"
   command -v lspci >/dev/null && lspci 2>/dev/null | grep -Ei 'vga|3d|display' | sed 's/^/GPU: /'
   command -v nvidia-smi >/dev/null && echo "NVIDIA driver: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null)"
