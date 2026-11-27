@@ -304,3 +304,33 @@ Zip SHA-256 `41f442a09ad7ce3b7552f17d3b8e4cd3b9c4a24d10156068239cc732a843eea5` (
 **Runtime kernel on Windows:** the `Failed to split placeholder` at `TakeApplicationPool` is fixed by 4511a32: `HostMemory::Map` (Windows) now unmaps what is already mapped in the range first, like `mmap(MAP_FIXED)`. The cause was that the runtime kernel maps the game's memory again in the same host arena where the emulated loader (hybrid mode, no `KARTRECOMP_RUNTIME_KERNEL_ONLY`) already mapped the modules; on Windows a mapped view cannot be split like a free placeholder. With `KARTRECOMP_NATIVE_KERNEL=1;KARTRECOMP_NATIVE_SERVICES=1` the engine now gets as far as `native kernel: the game's main thread started on the runtime's kernel (entry 0x80c3d000)` and runs the first recompiled blocks (`Early static dispatch`), but I saw no frames in 60 s, so it does not reach the title yet and stays off by default on Windows. Log lines of interest: `recomp: unresolved GOT/PLT symbol '__EX_end' / '__EX_start' for module base=0x80c3d000` (rtld module). Next step on my side: find where the game thread stops (stack of the hung engine).
 
 Default (emulated kernel) on this zip: Setup passes the test boot, 1P race 88% of frames on time.
+
+---
+
+## Windows session note (2026-11-27): the native engine runs on Windows and is now its default (windows-port 77b2ab5)
+
+Built `main` 1bb936d (beta 6) on Windows. Compile fix: `native_game_fns.cpp` used `__attribute__((target("fma")))` (MSVC has none;
+now `KR_TARGET_FMA`). Launcher ctest 15/15 after a Windows fix in `tests/test_storage.cpp` (drive letter, CRLF). Setup end to end
+passes with fast code and direct memory on (PC has 128 GB).
+
+**The runtime kernel boots on Windows.** My earlier "does not boot" was a bad test: I set `KARTRECOMP_NATIVE_SERVICES=1`, but the
+switch takes `all` or a list, so no service was native. With the Linux set (`KERNEL=1, SERVICES=all, THREADS=1, SYNC=1, HID=1,
+IPC=all-safe, FS=1, QUEUE=1`) plus 4511a32 (HostMemory::Map overlap), the game reaches the race and plays. 77b2ab5 makes all eight
+default on for Windows as on Linux (`=0` turns each off); the emulated path is still there.
+
+Measured (i9-12900K, RTX A4500, 1440p, 4.0.1, TAS race, per-second `PERF game_fps` from 70 s; "emulated" = all eight `=0`):
+
+| case | native fps avg (min) | emulated fps avg (min) | CPU native / emulated (% of one core) |
+|---|---|---|---|
+| 1P, 16 threads | 60.0 (59.0), 60.0 (59.5) | 59.8 (57.0), 60.0 (59.5) | 222-229 / 228-230 |
+| 1P, 4 cores no SMT (started with affinity 0x55) | 59.9 (56.4), 60.0 (59.5) | 60.0 (59.5), 60.0 (59.5) | 125-134 / 128-140 |
+| 1P, 4 cores 8 threads (0xFF) | 60.0 (59.9), 60.0 (59.9) | 60.0 (59.0), 60.0 (59.5) | 121-139 / 125-135 |
+| 4P (no split60), 4 cores | 60.0 (59.5) | 60.0 (59.5) | 151 / 176 |
+| final zip, 1P, 16 threads | 60.0 (60.0) | - | 145 |
+
+To simulate small PCs the engine now keeps a launch affinity (`cpu_topology.h`: the hybrid P-core restriction ANDs with the
+process mask instead of replacing it). Working set is ~5-6 GB with direct memory (was 3.8 GB in v0.2.4).
+
+Not tested on Windows yet: `KARTRECOMP_RUNTIME_KERNEL_ONLY=ON` (removing the emulated kernel), Wireless Play rooms, 3.0.4, mods and
+CTGP on the native path, a full Grand Prix to the award ceremony, AMD/Intel GPUs. The numbers do not separate the two paths on this
+CPU; a slower 4-core PC (the users in #14/#35) is where it would show.
