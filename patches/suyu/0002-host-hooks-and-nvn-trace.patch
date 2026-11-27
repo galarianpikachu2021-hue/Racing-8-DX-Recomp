@@ -1443,7 +1443,7 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..1cafa378a4 100644
+index 408daa6839..bad5a72bd3 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -12,6 +12,29 @@ add_library(core STATIC
@@ -1551,7 +1551,7 @@ index 408daa6839..1cafa378a4 100644
 +
 +# kart-recomp: the emulated system-service modules nothing uses with native services (only the start list referred to them) are
 +# left out of the Linux engine build (docs/NATIVE_ENGINE.md). Other platforms keep them unless asked.
-+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
++if ((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR WIN32) # Windows too since 2026-11-27
 +    set(KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT ON)
 +else()
 +    set(KARTRECOMP_DROP_UNUSED_SERVICES_DEFAULT OFF)
@@ -1579,7 +1579,7 @@ index 408daa6839..1cafa378a4 100644
 +
 +# kart-recomp: on Linux the game runs on the runtime kernel (docs/NATIVE_KERNEL.md, stages 5-6); the emulated kernel's system-call
 +# handlers are only reached through its own cores and are left out (KARTRECOMP_NATIVE_KERNEL=0 is gone with them).
-+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
++if ((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID) OR WIN32) # Windows too since 2026-11-27: no emulated kernel
 +    set(KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT ON)
 +else()
 +    set(KARTRECOMP_RUNTIME_KERNEL_ONLY_DEFAULT OFF)
@@ -11380,18 +11380,20 @@ index 0000000000..4458fe3833
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_mii.cpp b/src/core/hle/kernel/native_mii.cpp
 new file mode 100644
-index 0000000000..4a85402ceb
+index 0000000000..1f114ba9f8
 --- /dev/null
 +++ b/src/core/hle/kernel/native_mii.cpp
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,171 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: the Mii database service ("mii:e", "mii:u") answered by the runtime. The database itself (the console's Mii data
 +// file, random and default Miis, conversions) is suyu's Mii library (MiiManager); this replaces only the service around it.
++#include <cstring>
 +#include <memory>
 +#include <span>
 +#include <vector>
 +
 +#include "core/hle/kernel/native_services_list.h"
++#include "core/hle/service/am/frontend/applet_mii_edit_types.h"
 +#include "core/hle/service/mii/mii_manager.h"
 +#include "core/hle/service/mii/mii_result.h"
 +#include "core/hle/service/mii/types/char_info.h"
@@ -11495,11 +11497,61 @@ index 0000000000..4a85402ceb
 +
 +} // namespace
 +
-+std::shared_ptr<Service> MakeMiiService(const char* name, bool is_system) {
++/// One Mii library for the services and the Mii editor applet (the database file is shared state).
++std::shared_ptr<MiiManager> SharedMiiManager() {
 +    static auto manager = std::make_shared<MiiManager>();
++    return manager;
++}
++
++std::shared_ptr<Service> MakeMiiService(const char* name, bool is_system) {
++    auto manager = SharedMiiManager();
 +    auto s = std::make_shared<Service>(name);
-+    s->On(0, [is_system](Context& c) { c.PushInterface(Database(manager, is_system)); }); // GetDatabaseService
++    s->On(0, [manager, is_system](Context& c) { c.PushInterface(Database(manager, is_system)); }); // GetDatabaseService
 +    return s;
++}
++
++std::vector<std::uint8_t> MiiEditApplet(const std::vector<std::uint8_t>& input) {
++    using namespace ::Service::AM::Frontend;
++    MiiEditAppletInputCommon common{};
++    if (input.size() >= sizeof(common)) std::memcpy(&common, input.data(), sizeof(common));
++    const auto plain = [](MiiEditResult result, s32 index) {
++        const MiiEditAppletOutput out{.result{result}, .index{index}};
++        std::vector<u8> data(sizeof(out));
++        std::memcpy(data.data(), &out, sizeof(out));
++        return data;
++    };
++    const auto with_char_info = [](MiiEditResult result, const CharInfo& info) {
++        const MiiEditAppletOutputForCharInfoEditing out{.result{result}, .char_info{.mii_info{info}}};
++        std::vector<u8> data(sizeof(out));
++        std::memcpy(data.data(), &out, sizeof(out));
++        return data;
++    };
++    auto manager = SharedMiiManager();
++    DatabaseSessionMetadata metadata{};
++    manager->Initialize(metadata);
++    switch (common.applet_mode) {
++    case MiiEditAppletMode::AppendMii: { // "Create a Mii": a random one is added to the database, as the emulated applet did
++        StoreData store{};
++        store.BuildRandom(Age::All, Gender::All, Race::All);
++        store.SetNickname({u'P', u'l', u'a', u'y', u'e', u'r'});
++        store.SetChecksum();
++        if (manager->AddOrReplace(metadata, store).IsError()) return plain(MiiEditResult::Cancel, 0);
++        const s32 index = manager->FindIndex(store.GetCreateId(), false);
++        return index < 0 ? plain(MiiEditResult::Cancel, 0) : plain(MiiEditResult::Success, index);
++    }
++    case MiiEditAppletMode::CreateMii: {
++        CharInfo info{};
++        manager->BuildRandom(info, Age::All, Gender::All, Race::All);
++        return with_char_info(MiiEditResult::Success, info);
++    }
++    case MiiEditAppletMode::EditMii: {
++        MiiEditAppletInputV4 v4{};
++        if (input.size() >= sizeof(common) + sizeof(v4)) std::memcpy(&v4, input.data() + sizeof(common), sizeof(v4));
++        return with_char_info(MiiEditResult::Success, v4.char_info.mii_info);
++    }
++    default: // show the editor, add or update an image: nothing to show, nothing changed
++        return plain(MiiEditResult::Success, 0);
++    }
 +}
 +
 +} // namespace Kernel::NativeServices
@@ -12158,10 +12210,10 @@ index 0000000000..a43679a38f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.cpp b/src/core/hle/kernel/native_services_list.cpp
 new file mode 100644
-index 0000000000..f68a3bb3d5
+index 0000000000..607565adf3
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.cpp
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,434 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/hle/kernel/native_services_list.h"
 +
@@ -12486,6 +12538,7 @@ index 0000000000..f68a3bb3d5
 +#endif
 +    h.controller_applet = [&system](const AppletHooks::ControllerArgs& a) { return ControllerApplet(system, a); };
 +    h.web_applet = [&system](const AppletHooks::WebRequest& r) { return WebApplet(system, r); };
++    h.mii_edit = [](const std::vector<u8>& in) { return MiiEditApplet(in); };
 +    static KartRuntime::Services::Applets& applets = *new KartRuntime::Services::Applets{runtime, std::move(h)}; // kept to process exit
 +    g_applets = &applets;
 +    return applets.Root("appletOE");
@@ -12597,17 +12650,19 @@ index 0000000000..f68a3bb3d5
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services_list.h b/src/core/hle/kernel/native_services_list.h
 new file mode 100644
-index 0000000000..af731a5e5f
+index 0000000000..3fd17fe869
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services_list.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,65 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: which services the runtime answers, and how each is made (docs/NATIVE_ENGINE.md, "native services").
 +#pragma once
 +
++#include <cstdint>
 +#include <functional>
 +#include <memory>
 +#include <string>
++#include <vector>
 +
 +namespace KartRuntime {
 +class NativeKernel;
@@ -12633,6 +12688,8 @@ index 0000000000..af731a5e5f
 +
 +/// The Mii database service around suyu's Mii library (native_mii.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeMiiService(const char* name, bool is_system);
++/// The Mii editor applet's answer (no editor screen): its input storage in, its output storage out (native_mii.cpp).
++std::vector<std::uint8_t> MiiEditApplet(const std::vector<std::uint8_t>& input);
 +
 +/// The controller service around hid_core's resource manager (native_hid_service.cpp).
 +std::shared_ptr<KartRuntime::Service> MakeHidService(KernelCore& kernel);
@@ -14019,7 +14076,7 @@ index 5ebaa33e00..766be10299 100644
  }
  
 diff --git a/src/core/hle/service/hle_ipc.cpp b/src/core/hle/service/hle_ipc.cpp
-index db80205a42..d7431d98ae 100644
+index db80205a42..f1ff237187 100644
 --- a/src/core/hle/service/hle_ipc.cpp
 +++ b/src/core/hle/service/hle_ipc.cpp
 @@ -30,7 +30,7 @@
@@ -14038,10 +14095,18 @@ index db80205a42..d7431d98ae 100644
 +#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
 +    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
 +    return;
-+#endif
++#else
      auto* session = Kernel::KSession::Create(kernel);
      session->Initialize(kernel, nullptr, 0);
      Kernel::KSession::Register(kernel, session);
+@@ -521,6 +525,7 @@ void HLERequestContext::AddMoveInterface(SessionRequestHandlerPtr s) {
+     server.RegisterSession(&session->GetServerSession(), next_manager);
+ 
+     AddMoveObject(&session->GetClientSession());
++#endif
+ }
+ 
+ std::string HLERequestContext::Description() const {
 diff --git a/src/core/hle/service/hle_ipc.h b/src/core/hle/service/hle_ipc.h
 index 08e78c9b0c..9059761f32 100644
 --- a/src/core/hle/service/hle_ipc.h
@@ -14747,7 +14812,7 @@ index d201247466..74eb776a52 100644
  
      // Mark as started.
 diff --git a/src/core/hle/service/server_manager.cpp b/src/core/hle/service/server_manager.cpp
-index 00937db8ab..799b13c235 100644
+index 00937db8ab..bfb9cd5e6c 100644
 --- a/src/core/hle/service/server_manager.cpp
 +++ b/src/core/hle/service/server_manager.cpp
 @@ -18,6 +18,7 @@
@@ -14772,33 +14837,55 @@ index 00937db8ab..799b13c235 100644
                                        u32 max_sessions) {
 +#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
 +    R_THROW(ResultUnknown); // no emulated IPC in this build
-+#endif
++#else
      // Create a new port.
      auto* port = Kernel::KPort::Create(m_system.Kernel());
      port->Initialize(m_system.Kernel(), max_sessions, false, 0);
-@@ -332,6 +337,10 @@ Result ServerManager::LoopProcessImpl() {
+@@ -220,6 +225,7 @@ Result ServerManager::ManageNamedPort(const std::string& service_name,
+ 
+     // We succeeded.
+     R_SUCCEED();
++#endif
+ }
+ 
+ Result ServerManager::ManageDeferral(Kernel::KEvent** out_event) {
+@@ -332,6 +338,10 @@ Result ServerManager::LoopProcessImpl() {
  }
  
  Result ServerManager::OnPortEvent(Port* server) {
 +#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
 +    UNREACHABLE_MSG("emulated IPC port on the runtime-kernel-only build");
 +    R_THROW(ResultUnknown);
-+#endif
++#else
      // Accept a new server session.
      auto* server_port = static_cast<Kernel::KServerPort*>(server->GetNativeHandle());
      Kernel::KServerSession* server_session = server_port->AcceptSession(m_system.Kernel());
-@@ -354,6 +363,10 @@ Result ServerManager::OnPortEvent(Port* server) {
+@@ -349,11 +359,16 @@ Result ServerManager::OnPortEvent(Port* server) {
+ 
+     // We succeeded.
+     R_SUCCEED();
++#endif
+ }
+ 
  Result ServerManager::OnSessionEvent(Session* session) {
      Result res = ResultSuccess;
  
 +#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
 +    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
 +    R_THROW(ResultUnknown);
-+#endif
++#else
      // Try to receive a message.
      auto* server_session = static_cast<Kernel::KServerSession*>(session->GetNativeHandle());
      res = server_session->ReceiveRequestHLE(m_system.Kernel(), &session->GetContext(), session->GetManager());
-@@ -393,7 +406,11 @@ Result ServerManager::CompleteSyncRequest(Session* session) {
+@@ -368,6 +383,7 @@ Result ServerManager::OnSessionEvent(Session* session) {
+ 
+     // Complete the sync request with deferral handling.
+     R_RETURN(this->CompleteSyncRequest(session));
++#endif
+ }
+ 
+ Result ServerManager::CompleteSyncRequest(Session* session) {
+@@ -393,7 +409,11 @@ Result ServerManager::CompleteSyncRequest(Session* session) {
      }
  
      // Send the reply.
@@ -14810,7 +14897,7 @@ index 00937db8ab..799b13c235 100644
  
      // If the session has been closed, we're done.
      if (res == Kernel::ResultSessionClosed || service_res == IPC::ResultSessionClosed) {
-@@ -432,6 +449,7 @@ Result ServerManager::OnDeferralEvent() {
+@@ -432,6 +452,7 @@ Result ServerManager::OnDeferralEvent() {
  }
  
  void ServerManager::DestroySession(Session* session) {
@@ -15246,7 +15333,7 @@ index 900e9a5d25..361495c3b1 100644
                  it = registered_services.find(name);
              }
 diff --git a/src/core/hle/service/sm/sm_controller.cpp b/src/core/hle/service/sm/sm_controller.cpp
-index cb1c068dbb..bef96c4f37 100644
+index cb1c068dbb..32e18d6074 100644
 --- a/src/core/hle/service/sm/sm_controller.cpp
 +++ b/src/core/hle/service/sm/sm_controller.cpp
 @@ -40,6 +40,10 @@ void Controller::CloneCurrentObject(HLERequestContext& ctx) {
@@ -15256,10 +15343,18 @@ index cb1c068dbb..bef96c4f37 100644
 +#ifdef KARTRECOMP_RUNTIME_KERNEL_ONLY
 +    UNREACHABLE_MSG("emulated IPC session on the runtime-kernel-only build");
 +    return;
-+#endif
++#else
      // Create the session.
      Kernel::KSession* session = Kernel::KSession::Create(kernel);
      ASSERT(session != nullptr);
+@@ -61,6 +65,7 @@ void Controller::CloneCurrentObject(HLERequestContext& ctx) {
+     IPC::ResponseBuilder rb{ctx, 2, 0, 1, IPC::ResponseBuilder::Flags::AlwaysMoveHandles};
+     rb.Push(ResultSuccess);
+     rb.PushMoveObjects(ctx, session->GetClientSession());
++#endif
+ }
+ 
+ void Controller::CloneCurrentObjectEx(HLERequestContext& ctx) {
 diff --git a/src/core/hle/service/sockets/bsd.cpp b/src/core/hle/service/sockets/bsd.cpp
 index 6e5de1ade6..36b7aceaef 100644
 --- a/src/core/hle/service/sockets/bsd.cpp
@@ -24170,10 +24265,10 @@ index 0000000000..bc29741ca2
 +} // namespace KartRuntime::Services
 diff --git a/src/kart_runtime/services/applet.h b/src/kart_runtime/services/applet.h
 new file mode 100644
-index 0000000000..bb6e117de8
+index 0000000000..a1bec0ae4a
 --- /dev/null
 +++ b/src/kart_runtime/services/applet.h
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,504 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp runtime: the applet manager as an application sees it ("appletOE": IApplicationProxy and its interfaces)
 +// (docs/NATIVE_ENGINE.md, "native services").
@@ -24229,6 +24324,9 @@ index 0000000000..bb6e117de8
 +        std::string document_path, url;
 +    };
 +    std::function<std::pair<uint32_t, std::string>(const WebRequest&)> web_applet;
++    /// The Mii editor applet (id 0x12): its input storage (0x100 bytes) in, its output storage out. With no editor screen on the PC the
++    /// engine answers like the emulated one did: "add a Mii" adds a random Mii to the database, "create" and "edit" hand one back.
++    std::function<std::vector<uint8_t>(const std::vector<uint8_t>&)> mii_edit;
 +};
 +
 +class Applets {
@@ -24551,6 +24649,13 @@ index 0000000000..bb6e117de8
 +            std::vector<uint8_t> data(sizeof(info));
 +            std::memcpy(data.data(), &info, sizeof(info));
 +            la.out.push_back(std::make_shared<Storage>(std::move(data)));
++            la.out_data->Signal();
++        }
++        constexpr uint32_t MiiEdit = 0x12;
++        if (la.id == MiiEdit && hooks.mii_edit) {
++            // Without an answer the game gets "no data" (2128-0002) and stops: a new save shows "Select a Mii" with only
++            // "Create a Mii" to pick when the Mii database is empty.
++            la.out.push_back(std::make_shared<Storage>(hooks.mii_edit(la.in.empty() ? std::vector<uint8_t>{} : la.in[0]->data)));
 +            la.out_data->Signal();
 +        }
 +        if (la.id == 0x13 || la.id == 0x14 || la.id == 0x17 || la.id == 0x18 || la.id == 0x19 || la.id == 0x35) RunWeb(la);
