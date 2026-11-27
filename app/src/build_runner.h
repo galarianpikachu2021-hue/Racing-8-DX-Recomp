@@ -21,6 +21,7 @@ struct CompileJob {
     /// compiler. The marker stores it, so a later build compiles a piece again only when one of those changed. Empty = not
     /// checked (the marker's existence is enough).
     QByteArray key = {};
+    QString root = {}; ///< clang runs in this folder, given the source relative to it (Build sets it); empty = the source as given
 };
 
 struct BuildPlan {
