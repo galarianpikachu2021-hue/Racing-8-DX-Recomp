@@ -930,10 +930,10 @@ index 0000000000..23cdd12a71
 +} // namespace SuyuCmd::Profiles
 diff --git a/src/suyu_cmd/cpu_topology.h b/src/suyu_cmd/cpu_topology.h
 new file mode 100644
-index 0000000000..b9ff87f8ff
+index 0000000000..7529a565d0
 --- /dev/null
 +++ b/src/suyu_cmd/cpu_topology.h
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,157 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: keeps the emulator off the efficiency cores of hybrid CPUs.
 +//
@@ -1072,6 +1072,14 @@ index 0000000000..b9ff87f8ff
 +    }
 +    if (mask == 0) {
 +        return;
++    }
++    // kart-recomp: stay inside an affinity the process was started with (Task Manager, "start /affinity", a test of a smaller PC):
++    // never widen it to every performance core.
++    if (DWORD_PTR process_mask = 0, system_mask = 0;
++        GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) && (mask & process_mask) != 0) {
++        mask &= process_mask;
++        logical = 0;
++        for (KAFFINITY bits = mask; bits; bits &= bits - 1) ++logical;
 +    }
 +    if (SetProcessAffinityMask(GetCurrentProcess(), mask)) {
 +        std::fprintf(stderr, "hybrid CPU: restricted to the performance cores (%zu logical CPUs, mask %#llx)\n", logical,

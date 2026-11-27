@@ -5134,7 +5134,7 @@ index 0000000000..5530fbab86
 +} // namespace Core::KartHookTrace
 diff --git a/src/core/arm/recomp/native_fs.cpp b/src/core/arm/recomp/native_fs.cpp
 new file mode 100644
-index 0000000000..13a4bf15f1
+index 0000000000..9ddfd7e422
 --- /dev/null
 +++ b/src/core/arm/recomp/native_fs.cpp
 @@ -0,0 +1,262 @@
@@ -5257,9 +5257,9 @@ index 0000000000..13a4bf15f1
 +
 +bool Enabled() {
 +    static const bool on = [] {
-+        // On by default on Linux (KARTRECOMP_NATIVE_FS=0 turns it off); elsewhere only when asked for.
++        // On by default on Linux and Windows (KARTRECOMP_NATIVE_FS=0 turns it off); elsewhere (Android) only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_FS");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -5435,10 +5435,10 @@ index 0000000000..276599a0bb
 +} // namespace Core::NativeFs
 diff --git a/src/core/arm/recomp/native_game_fns.cpp b/src/core/arm/recomp/native_game_fns.cpp
 new file mode 100644
-index 0000000000..df1d7b5b61
+index 0000000000..e528b9c3c7
 --- /dev/null
 +++ b/src/core/arm/recomp/native_game_fns.cpp
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,574 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: game functions rewritten as host code (see native_game_fns.h).
 +
@@ -5464,6 +5464,13 @@ index 0000000000..df1d7b5b61
 +#include "core/arm/recomp/host_hooks.h"
 +#include "core/core.h"
 +#include "core/memory.h"
++
++// MSVC has no target attribute; its FMA intrinsics compile without one (as with GCC, the CPU must have FMA when they run).
++#if defined(_MSC_VER) && !defined(__clang__)
++#define KR_TARGET_FMA
++#else
++#define KR_TARGET_FMA __attribute__((target("fma")))
++#endif
 +
 +namespace Core::NativeGameFns {
 +namespace {
@@ -5527,7 +5534,7 @@ index 0000000000..df1d7b5b61
 +        return r;
 +    }
 +    /// c + a * b with one rounding (ARM FMLA).
-+    __attribute__((target("fma"))) float Fma(float a, float b, float c) {
++    KR_TARGET_FMA float Fma(float a, float b, float c) {
 +        const float r = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c)));
 +        Check(r);
 +        if (r == 0.0f && static_cast<double>(a) * static_cast<double>(b) + static_cast<double>(c) != 0.0) bad = true;
@@ -5714,7 +5721,7 @@ index 0000000000..df1d7b5b61
 +    float scale;
 +};
 +
-+__attribute__((target("fma"))) BoneOut MoveByBone(Fp& f, Guest& g, u64 matrix, const V4& src) {
++KR_TARGET_FMA BoneOut MoveByBone(Fp& f, Guest& g, u64 matrix, const V4& src) {
 +    BoneOut out{};
 +    float m[16];
 +    if ((matrix & 0xFFF) + 64 <= 0x1000) {
@@ -6039,7 +6046,7 @@ index 0000000000..8f09955ad0
 +} // namespace Core::NativeGameFns
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
-index 0000000000..dbce9ea040
+index 0000000000..bee1fc3b80
 --- /dev/null
 +++ b/src/core/arm/recomp/native_hid.cpp
 @@ -0,0 +1,271 @@
@@ -6194,9 +6201,9 @@ index 0000000000..dbce9ea040
 +
 +bool Enabled() {
 +    static const bool on = [] {
-+        // On by default on Linux (KARTRECOMP_NATIVE_HID=0 turns it off); elsewhere only when asked for.
++        // On by default on Linux and Windows (KARTRECOMP_NATIVE_HID=0 turns it off); elsewhere (Android) only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_HID");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -10382,7 +10389,7 @@ index 0000000000..ac7edb8a03
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_game.cpp b/src/core/hle/kernel/native_game.cpp
 new file mode 100644
-index 0000000000..e79d99a588
+index 0000000000..c76fed1983
 --- /dev/null
 +++ b/src/core/hle/kernel/native_game.cpp
 @@ -0,0 +1,440 @@
@@ -10606,12 +10613,12 @@ index 0000000000..e79d99a588
 +
 +bool Enabled() {
 +    static const bool on = [] {
-+        // Default on Linux since 2026-11-18 (KARTRECOMP_NATIVE_KERNEL=0: the emulated kernel); opt-in elsewhere.
++        // Default on Linux since 2026-11-18 and on Windows since 2026-11-27 (KARTRECOMP_NATIVE_KERNEL=0: the emulated kernel); opt-in elsewhere.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_KERNEL");
 +#if defined(KARTRECOMP_RUNTIME_KERNEL_ONLY)
 +        (void)v;
 +        return true; // the emulated kernel's system calls are not in this build
-+#elif defined(__linux__)
++#elif defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -11628,7 +11635,7 @@ index 0000000000..a903b68ecc
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_services.cpp b/src/core/hle/kernel/native_services.cpp
 new file mode 100644
-index 0000000000..12f7e29d1b
+index 0000000000..b5deb05fed
 --- /dev/null
 +++ b/src/core/hle/kernel/native_services.cpp
 @@ -0,0 +1,444 @@
@@ -11680,12 +11687,12 @@ index 0000000000..12f7e29d1b
 +    return Result{r};
 +}
 +
-+/// The services asked for: KARTRECOMP_NATIVE_SERVICES = "0" (none), "all" (default on Linux) or a comma list of names.
++/// The services asked for: KARTRECOMP_NATIVE_SERVICES = "0" (none), "all" (default on Linux and Windows) or a comma list of names.
 +bool Wanted(const std::string& name) {
 +    static const std::set<std::string> list = [] {
 +        std::set<std::string> out;
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_SERVICES");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        if (!v) v = "all";
 +#endif
 +        if (!v || std::strcmp(v, "0") == 0) return out;
@@ -11780,7 +11787,7 @@ index 0000000000..12f7e29d1b
 +bool Enabled() {
 +    static const bool on = [] {
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_SERVICES");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && std::strcmp(v, "0") == 0);
 +#else
 +        return v && std::strcmp(v, "0") != 0;
@@ -12657,7 +12664,7 @@ index 0000000000..af731a5e5f
 +} // namespace Kernel::NativeServices
 diff --git a/src/core/hle/kernel/native_sync.cpp b/src/core/hle/kernel/native_sync.cpp
 new file mode 100644
-index 0000000000..c4a2542d3f
+index 0000000000..5009c92e1d
 --- /dev/null
 +++ b/src/core/hle/kernel/native_sync.cpp
 @@ -0,0 +1,170 @@
@@ -12764,7 +12771,7 @@ index 0000000000..c4a2542d3f
 +    static const bool on = [] {
 +        if (!NativeThreads::Enabled()) return false; // a blocked fiber's host thread would stop a whole emulated core
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_SYNC");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -12881,7 +12888,7 @@ index 0000000000..cbf23ef782
 +} // namespace Kernel::NativeSync
 diff --git a/src/core/hle/kernel/native_threads.cpp b/src/core/hle/kernel/native_threads.cpp
 new file mode 100644
-index 0000000000..3e9f0834bf
+index 0000000000..01ca8e1f25
 --- /dev/null
 +++ b/src/core/hle/kernel/native_threads.cpp
 @@ -0,0 +1,277 @@
@@ -13036,9 +13043,9 @@ index 0000000000..3e9f0834bf
 +
 +bool Enabled() {
 +    static const bool on = [] {
-+        // On by default on Linux (KARTRECOMP_NATIVE_THREADS=0 turns it off); elsewhere only when asked for.
++        // On by default on Linux and Windows (KARTRECOMP_NATIVE_THREADS=0 turns it off); elsewhere (Android) only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_THREADS");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return !(v && *v == '0');
 +#else
 +        return v && *v == '1';
@@ -14102,7 +14109,7 @@ index 1dec5ab984..e8ee5a0089 100644
          // mount point should be "mii:"
 diff --git a/src/core/hle/service/native_ipc.cpp b/src/core/hle/service/native_ipc.cpp
 new file mode 100644
-index 0000000000..6ef545c2f7
+index 0000000000..e884dad965
 --- /dev/null
 +++ b/src/core/hle/service/native_ipc.cpp
 @@ -0,0 +1,135 @@
@@ -14151,9 +14158,9 @@ index 0000000000..6ef545c2f7
 +const std::set<std::string>& Wanted() {
 +    static const std::set<std::string> wanted = [] {
 +        std::set<std::string> out;
-+        // On by default on Linux for every safe service (KARTRECOMP_NATIVE_IPC=0 turns it off); elsewhere only when asked for.
++        // On by default on Linux and Windows for every safe service (KARTRECOMP_NATIVE_IPC=0 turns it off); elsewhere only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_IPC");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        if (!v) v = "all-safe";
 +#endif
 +        if (!v || std::strcmp(v, "0") == 0) return out;
@@ -17534,7 +17541,7 @@ index a7dc92a2e3..6a761feb42 100644
                      "Attempted to read input state, but applet resource is not initialized!");
 diff --git a/src/core/nvn_host/nvn_host.cpp b/src/core/nvn_host/nvn_host.cpp
 new file mode 100644
-index 0000000000..15957109ff
+index 0000000000..895005aaf8
 --- /dev/null
 +++ b/src/core/nvn_host/nvn_host.cpp
 @@ -0,0 +1,1532 @@
@@ -18795,9 +18802,9 @@ index 0000000000..15957109ff
 +
 +bool NativeQueue() {
 +    static const bool on = [] {
-+        // On by default on Linux (KARTRECOMP_NATIVE_QUEUE=0 turns it off); elsewhere only when asked for.
++        // On by default on Linux and Windows (KARTRECOMP_NATIVE_QUEUE=0 turns it off); elsewhere (Android) only when asked for.
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_QUEUE");
-+#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32) // Windows too since 2026-11-27 (tested there)
 +        return Exclusive() && !(v && *v == '0');
 +#else
 +        return Exclusive() && v && *v == '1';

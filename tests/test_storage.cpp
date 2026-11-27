@@ -119,13 +119,20 @@ private slots:
     }
     void repoint() {
         QTemporaryDir d;
-        const auto from = DataLayout::FromRoots("/a/kartrecomp", "/c/kartrecomp"), to = DataLayout::FromRoots("/b/data/kartrecomp", "/b/cache/kartrecomp");
+#ifdef Q_OS_WIN
+        const QString r = QStringLiteral("C:"); // without a drive letter a path is not absolute on Windows
+#else
+        const QString r;
+#endif
+        const auto from = DataLayout::FromRoots(r + "/a/kartrecomp", r + "/c/kartrecomp"),
+                   to = DataLayout::FromRoots(r + "/b/data/kartrecomp", r + "/b/cache/kartrecomp");
         const QString ini = d.filePath("sdl2-config.ini");
-        Write(ini, "[Data%20Storage]\nnand_directory\\default=false\nnand_directory=/a/kartrecomp/nand\nload_directory=/a/kartrecomp2/mods\nsave_directory=\n");
+        Write(ini, ("[Data%20Storage]\nnand_directory\\default=false\nnand_directory=" + r + "/a/kartrecomp/nand\nload_directory=" + r +
+                    "/a/kartrecomp2/mods\nsave_directory=\n").toUtf8());
         QVERIFY(Storage::Repoint(ini, from, to));
-        const QByteArray text = Read(ini);
-        QVERIFY(text.contains("nand_directory=/b/data/kartrecomp/nand\n"));
-        QVERIFY(text.contains("load_directory=/a/kartrecomp2/mods\n")); // another folder whose name only starts the same
+        const QByteArray text = Read(ini).replace("\r\n", "\n"); // IniFile writes in text mode: CRLF on Windows
+        QVERIFY(text.contains(("nand_directory=" + r + "/b/data/kartrecomp/nand\n").toUtf8()));
+        QVERIFY(text.contains(("load_directory=" + r + "/a/kartrecomp2/mods\n").toUtf8())); // a folder whose name only starts the same
         QVERIFY(Storage::Repoint(d.filePath("none.ini"), from, to));
     }
 };
