@@ -219,3 +219,41 @@ pass; sdk+main: pass; main+rtld+subsdk0: crash. So entering rtld or subsdk0 dire
 109,944 / 109,944 frames, 0 draw-check lines, fully static. beta5e AppImage, engine stamp 347ec6af43-abi6 (Setup rebuilds the game).
 The Mario Kart Stadium frame comparison is not deterministic with a module built by `gamebuild.sh` (two runs without XM1 differ in
 every frame; races diverge), so pictures were checked by eye only.
+
+## Beta 6 (2026-11-27): engine work off the game's main thread, first native game function
+
+Measured with `local/exp/deckbench.sh` (4 cores, uncapped) and `local/exp/mainus.sh` (main thread CPU us per frame from a 20 s
+profile; frame time alone is too noisy for changes of 1-3%).
+
+1. **Inline hooks (XM1 hooked targets, engine only).** A call from generated code into a hooked address (the game's NVN calls, about
+   4,300 a frame) used to return to the dispatcher, run the hook there and come back. `enter` now returns a trampoline that runs the
+   hooks on the caller's native frame (`recomp_call_hooks` in arm_recomp.cpp) and then the block if no hook took the call. Main
+   thread dispatcher entries 2.2 M/s -> 0.5-1.0 M/s; hook-handled dispatcher trips 870 k/s -> ~2 k/s; frame 5.34 -> ~5.0 ms.
+   `KARTRECOMP_XM_HOOKS=0` goes back to the dispatcher. Return traps (addresses >= 0xFFFFFFFE00000000) always use the dispatcher.
+2. **Parallel submit copies (engine only).** `VulkanShadowBackend::Submit` queues its snapshot copies (uniform, vertex, copy sources)
+   and runs them at the end over the submitting thread plus two `NativeSnapCopy` helpers (`SnapshotCopyPool`, jobs split into
+   pieces of >= 64 KB; under 256 KB or 4 jobs it copies alone). On the Deck the submitting game thread (which the main thread waits
+   for) spent ~1.2 ms a frame copying. Here: submit 0.59-0.61 -> 0.47-0.51 ms/frame. `KARTRECOMP_SNAP_THREADS=0..3` (default 2).
+3. **FRSQRTE from a table (generator; Setup rebuilds the game).** `recomp_fp_estimate` searched 9 steps per lane; the same search is
+   now precomputed into a 1 KB table in the generated runtime. Checked identical for all 2^32 inputs x 3 FPCR modes x both
+   estimates (`local/exp/esttest/t`). Helper share of the main thread 1.1% -> 0.38%.
+4. **Native C library on by default.** `KARTRECOMP_NATIVE_LIBC` (memcpy/memmove/memset/memcmp/strlen/strcmp of the sdk answered on
+   the host) had no gain while every hooked call cost a dispatcher round trip; with (1) it does: main thread 3436/3437 ->
+   3388/3344 us/frame, fps +3.5%. Large zero fills still release their pages (zero punch inside the enabled memset). `=0` off.
+5. **Native game functions (`core/arm/recomp/native_game_fns.cpp`, `common/kart_native_fns.h`).** First one: the model bounding
+   sphere from bones (4.0.1 main+0xa7536c, 3.0.4 main+0xa70934, found by instruction pattern; the only difference between the
+   two is one constant's address, decoded at run time). It is the hottest single game function in a 12-racer race (2% of the
+   main thread) and grows with the number of racers. Exactness rules: answers only with round-to-nearest, no traps, FPSR.IXC
+   already set, and every input and intermediate zero or within 2^-60..2^60 (so no flag other than inexact can arise and no
+   product underflows); FRSQRTE from the same table, FRSQRTS = fma(-a,b,3)*0.5, ARM FMAX/fcsel semantics; it writes the same
+   stack frame the game's code leaves (saved registers, merge temporaries, the 12 stack bytes the game copies along) and clears
+   v8..v12's upper halves like its epilogue. Otherwise the game's code runs (~7% of calls). The exporter keeps a hook check at
+   the function's start inside its hot region (`g_region_hookable`), so this needs the new game build.
+   `KARTRECOMP_NATIVE_FNS=verify` computes each answer, lets the game's code run and compares sphere bytes, flags and frame:
+   2.7 M calls compared, identical except the saved x30 slot in 3-6 calls per run, which holds the verify mode's own return-trap
+   address (two traps 4 bytes apart; real runs have no trap). The first lean version wrote frame bytes 0x48..0x4f, which the game
+   never writes; verify caught it. Gain: this function 73 -> ~51 us/frame including fallbacks (~0.6% of the main thread).
+
+CPU racers: the extra work of 11 computer racers (GP vs Time Trial, `local/exp/tttas.py`) is spread over hundreds of functions;
+the biggest is the one above at 38 us/frame extra, the top 40 together ~450 us/frame of ~1,800. Most of it is character skeleton
+and model work (the 0xa7xxxx animation library), not driving decisions. One function at a time gains well under 1% each.

@@ -762,6 +762,51 @@ index 0000000000..5d285fee33
 +    if (out.back() != '/' && out.back() != '\\') out += '/';
 +    return out + name;
 +}
+diff --git a/src/common/kart_native_fns.h b/src/common/kart_native_fns.h
+new file mode 100644
+index 0000000000..43a64e5d22
+--- /dev/null
++++ b/src/common/kart_native_fns.h
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: where the game functions that have host rewrites (core/arm/recomp/native_game_fns.cpp) start, found by their
++// instruction pattern. Shared by the exporter (which keeps a hook check at their start, also inside hot regions) and the engine
++// (which installs the rewrites), so both agree on any build.
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++namespace KartNativeFns {
++
++/// Offsets (in main's text) of the functions with a host rewrite; each pattern must match exactly once, else it is left out.
++inline std::vector<std::size_t> Find(const std::uint8_t* text, std::size_t size) {
++    std::vector<std::size_t> found;
++    // Bounding sphere from bones (4.0.1: main+0xa7536c): prologue, then ldr x8,[x0,#0x38]; cbz x8; ldrh/orr #8/strh at [x1,#8].
++    static constexpr std::uint32_t kSphereFromBones[] = {
++        0xd10303ff, 0xfd0023ec, 0x6d052beb, 0x6d0623e9, 0xa90767fa, 0xa9085ff8, 0xa90957f6, 0xa90a4ff4,
++        0xa90b7bfd, 0x9102c3fd, 0xf9401c08, 0,          0x79401028, 0x321d0108, 0x79001028,
++    };
++    std::size_t hit = 0, hits = 0;
++    for (std::size_t at = 0; at + sizeof(kSphereFromBones) <= size; at += 4) {
++        bool ok = true;
++        for (std::size_t k = 0; ok && k < std::size(kSphereFromBones); ++k) {
++            std::uint32_t w;
++            std::memcpy(&w, text + at + 4 * k, 4);
++            ok = kSphereFromBones[k] == 0 ? (w & 0xFF00001Fu) == 0xB4000008u : w == kSphereFromBones[k]; // 0: any "cbz x8"
++        }
++        if (ok) {
++            hit = at;
++            ++hits;
++        }
++    }
++    if (hits == 1) found.push_back(hit);
++    return found;
++}
++
++} // namespace KartNativeFns
 diff --git a/src/common/kart_overlay.h b/src/common/kart_overlay.h
 new file mode 100644
 index 0000000000..d4f7d1ed43
@@ -1398,10 +1443,10 @@ index af26bfff5b..6a098a7bbd 100644
  #else
      ASSERT(munmap(base, size) == 0);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 408daa6839..31ab4e3847 100644
+index 408daa6839..1cafa378a4 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
-@@ -12,6 +12,27 @@ add_library(core STATIC
+@@ -12,6 +12,29 @@ add_library(core STATIC
      arm/recomp/recomp_gap_session.cpp
      arm/recomp/recomp_gap_session.h
      arm/recomp/recomp_gaps.cpp
@@ -1417,6 +1462,8 @@ index 408daa6839..31ab4e3847 100644
 +    arm/recomp/native_fs.h
 +    arm/recomp/native_hid.cpp
 +    arm/recomp/native_hid.h
++    arm/recomp/native_game_fns.cpp
++    arm/recomp/native_game_fns.h
 +    arm/recomp/native_libc.cpp
 +    arm/recomp/native_libc.h
 +    arm/recomp/sdk_trace.cpp
@@ -1429,7 +1476,7 @@ index 408daa6839..31ab4e3847 100644
      arm/recomp/recomp_gaps.h
      arm/recomp/recomp_guard_gen.cpp
      arm/recomp/recomp_guard_gen.h
-@@ -136,6 +157,8 @@ add_library(core STATIC
+@@ -136,6 +159,8 @@ add_library(core STATIC
      file_sys/nca_metadata.h
      file_sys/partition_filesystem.cpp
      file_sys/partition_filesystem.h
@@ -1438,7 +1485,7 @@ index 408daa6839..31ab4e3847 100644
      file_sys/patch_manager.cpp
      file_sys/patch_manager.h
      file_sys/program_metadata.cpp
-@@ -339,6 +362,23 @@ add_library(core STATIC
+@@ -339,6 +364,23 @@ add_library(core STATIC
      hle/kernel/k_system_resource.cpp
      hle/kernel/k_system_resource.h
      hle/kernel/k_thread.cpp
@@ -1462,7 +1509,7 @@ index 408daa6839..31ab4e3847 100644
      hle/kernel/k_thread.h
      hle/kernel/k_thread_local_page.cpp
      hle/kernel/k_thread_local_page.h
-@@ -1051,6 +1091,8 @@ add_library(core STATIC
+@@ -1051,6 +1093,8 @@ add_library(core STATIC
      hle/service/ro/ro_nro_utils.h
      hle/service/ro/ro_results.h
      hle/service/ro/ro_types.h
@@ -1471,7 +1518,7 @@ index 408daa6839..31ab4e3847 100644
      hle/service/server_manager.cpp
      hle/service/server_manager.h
      hle/service/service.cpp
-@@ -1082,6 +1124,8 @@ add_library(core STATIC
+@@ -1082,6 +1126,8 @@ add_library(core STATIC
      hle/service/sm/sm_controller.cpp
      hle/service/sm/sm_controller.h
      hle/service/sockets/bsd.cpp
@@ -1480,7 +1527,7 @@ index 408daa6839..31ab4e3847 100644
      hle/service/sockets/bsd.h
      hle/service/sockets/nsd.cpp
      hle/service/sockets/nsd.h
-@@ -1187,6 +1231,7 @@ add_library(core STATIC
+@@ -1187,6 +1233,7 @@ add_library(core STATIC
      tools/renderdoc.cpp
      tools/renderdoc.h)
  
@@ -1488,7 +1535,7 @@ index 408daa6839..31ab4e3847 100644
  if (ENABLE_WIFI_SCAN)
      target_sources(core PRIVATE internal_network/wifi_scanner.cpp)
      if (PLATFORM_LINUX)
-@@ -1226,7 +1271,7 @@ else()
+@@ -1226,7 +1273,7 @@ else()
  endif()
  
  target_include_directories(core PRIVATE ${OPUS_INCLUDE_DIRS})
@@ -1497,7 +1544,7 @@ index 408daa6839..31ab4e3847 100644
  
  if (BOOST_NO_HEADERS)
      target_link_libraries(core PUBLIC Boost::container Boost::heap Boost::asio Boost::crc)
-@@ -1335,3 +1380,47 @@ endif()
+@@ -1335,3 +1382,47 @@ endif()
  # endif()
  
  create_target_directory_groups(core)
@@ -1638,7 +1685,7 @@ index 1a42742556..00842faedb 100644
          if (svc_mem_info.permission == Kernel::Svc::MemoryPermission::ReadExecute &&
              (svc_mem_info.state == Kernel::Svc::MemoryState::Code ||
 diff --git a/src/core/arm/recomp/arm_recomp.cpp b/src/core/arm/recomp/arm_recomp.cpp
-index 67a55424e9..3fbfc861c0 100644
+index 67a55424e9..673107a340 100644
 --- a/src/core/arm/recomp/arm_recomp.cpp
 +++ b/src/core/arm/recomp/arm_recomp.cpp
 @@ -17,9 +17,19 @@
@@ -2045,7 +2092,7 @@ index 67a55424e9..3fbfc861c0 100644
 +        // kart-recomp: host hooks (NVN tracing now, native subsystems later).
 +        if (RecompHooks::Active()) {
 +            RecompHooks::HookContext hook_ctx{impl->ctx.x, impl->ctx.pc, impl->system,
-+                                              impl->ctx.vreg, &impl->ctx.n};
++                                              impl->ctx.vreg, &impl->ctx.n, &impl->ctx.fpcr, &impl->ctx.fpsr};
 +            if (RecompHooks::Dispatch(hook_ctx)) {
 +                if (dstats) ++ds_hook;
 +                fp_check = true;
@@ -2137,7 +2184,7 @@ index 67a55424e9..3fbfc861c0 100644
              // Time-limited inside; teardown is not guaranteed, as above.
              RecompGaps::Flush(true, false);
          }
-@@ -2271,7 +2572,29 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2271,7 +2572,32 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
          if (first_run) {
              LOG_INFO(Core_ARM, "Calling first signed static block at pc={:#x}", impl->ctx.pc);
          }
@@ -2151,6 +2198,8 @@ index 67a55424e9..3fbfc861c0 100644
 +            int k = impl->ctx.pending_svc != kNoPendingSvc ? 4 : impl->ctx.chain_budget <= 0 ? 5 : impl->ctx.halted ? 6
 +                    : (in_main ? 0 : 2) + (out_main ? 0 : 1);
 +            ++ds_kind[static_cast<size_t>(k)];
++            thread_local std::array<u64, 4> ds_depth{}; // kind-1 exits by native depth: 0, 1-15, 16-47, 48+
++            if (k == 1) { const u32 d = impl->ctx.fm_reserved; ++ds_depth[d == 0 ? 0 : d < 16 ? 1 : d < 48 ? 2 : 3]; }
 +            if ((ds_n & 31) == 0 && k < 4) ++ds_top[(out_main ? impl->ctx.pc - mb : impl->ctx.pc) | (static_cast<u64>(k) << 60)];
 +            if ((ds_n & 0xFFFF) == 0 && !ds_top.empty() && ds_kind[7]++ % 64 == 63) { // about once a second on the game thread
 +                std::vector<std::pair<u64, u64>> v(ds_top.begin(), ds_top.end());
@@ -2158,16 +2207,17 @@ index 67a55424e9..3fbfc861c0 100644
 +                std::string top;
 +                for (size_t i = 0; i < v.size() && i < 16; ++i)
 +                    top += fmt::format(" {}:{:#x}x{}", v[i].first >> 60, v[i].first & ((1ULL << 60) - 1), v[i].second);
-+                LOG_INFO(Core_ARM, "dispatch exits main>main {} main>other {} other>main {} other>other {} svc {} budget {} halt {} | top{}",
-+                         ds_kind[0], ds_kind[1], ds_kind[2], ds_kind[3], ds_kind[4], ds_kind[5], ds_kind[6], top);
++                LOG_INFO(Core_ARM, "dispatch exits thread {:#x} depth {}/{}/{}/{} main>main {} main>other {} other>main {} other>other {} svc {} budget {} halt {} | top{}",
++                         impl->ctx.tpidrro_el0, ds_depth[0], ds_depth[1], ds_depth[2], ds_depth[3], ds_kind[0], ds_kind[1], ds_kind[2], ds_kind[3], ds_kind[4], ds_kind[5], ds_kind[6], top);
 +                ds_kind = {};
++                ds_depth = {};
 +                ds_top.clear();
 +            }
 +        }
          if (early_dispatch < 64) {
              LOG_INFO(Core_ARM, "Early static return #{}: pc={:#x}, svc={}, halted={}",
                       early_dispatch, impl->ctx.pc, impl->ctx.pending_svc, impl->ctx.halted);
-@@ -2306,7 +2629,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2306,7 +2632,7 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
              impl->ctx.pending_svc = kNoPendingSvc;
              // Forward the guest instruction-cache operation to each CPU interface.
              for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -2176,7 +2226,7 @@ index 67a55424e9..3fbfc861c0 100644
              }
              impl->ctx.pc += 4;
              impl->ctx.halted = 0;
-@@ -2350,7 +2673,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+@@ -2350,7 +2676,8 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
                               unsupported_opcode, impl->ctx.pc);
                  return HaltReason::PrefetchAbort;
              }
@@ -2186,7 +2236,7 @@ index 67a55424e9..3fbfc861c0 100644
          }
  
          if (impl->ctx.pending_svc != kNoPendingSvc) {
-@@ -2404,7 +2728,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+@@ -2404,7 +2731,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
          const u64 address = impl->ctx.pending_svc;
          impl->ctx.pending_svc = kNoPendingSvc;
          for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
@@ -2195,7 +2245,7 @@ index 67a55424e9..3fbfc861c0 100644
          }
          impl->ctx.pc += 4;
          impl->ctx.halted = 0;
-@@ -2537,3 +2861,33 @@ void ArmRecomp::RewindBreakpointInstruction() {
+@@ -2537,3 +2864,52 @@ void ArmRecomp::RewindBreakpointInstruction() {
  }
  
  } // namespace Core
@@ -2226,8 +2276,27 @@ index 67a55424e9..3fbfc861c0 100644
 +    if (!Core::RecompHooks::Active()) {
 +        return 0;
 +    }
-+    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg, &c->n};
++    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg, &c->n, &c->fpcr, &c->fpsr};
 +    return Core::RecompHooks::Dispatch(hook_ctx) ? 1 : 0;
++}
++
++// XM1 hooked targets (frontend_common/kart_static_recomp.cpp): generated code that calls a hooked address (the game's graphics
++// calls) runs the hooks here, on its own native frame, instead of returning to the dispatcher and coming back. Returns non-zero when
++// a hook handled the call (pc is then where it continues); zero: run the block as usual.
++extern "C" int recomp_call_hooks(void* raw);
++extern "C" int recomp_call_hooks(void* raw) {
++    auto* c = static_cast<Core::GuestContextView*>(raw);
++    Core::System* const hook_system = Core::t_hook_system ? Core::t_hook_system : Core::KartHookTrace::HookSystem();
++    if (!hook_system || !Core::RecompHooks::Active()) {
++        return 0;
++    }
++    Core::RecompHooks::HookContext hook_ctx{c->x, c->pc, *hook_system, c->vreg, &c->n, &c->fpcr, &c->fpsr};
++    const bool handled = Core::RecompHooks::Dispatch(hook_ctx);
++    // Host code ran: the dispatcher checks the FP mode after a hook, so do the same here.
++    if (Core::FpxActive() && !Core::RecompFpEnv::Conforms()) {
++        Core::RepairFpEnv("hook");
++    }
++    return handled ? 1 : 0;
 +}
 diff --git a/src/core/arm/recomp/arm_recomp.h b/src/core/arm/recomp/arm_recomp.h
 index a1671ea1e7..3a27d2427e 100644
@@ -4643,10 +4712,10 @@ index 0000000000..d108db09c7
 +} // namespace Core::RecompHooks
 diff --git a/src/core/arm/recomp/host_hooks.h b/src/core/arm/recomp/host_hooks.h
 new file mode 100644
-index 0000000000..3640ab88f2
+index 0000000000..6a2b9d6488
 --- /dev/null
 +++ b/src/core/arm/recomp/host_hooks.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,65 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +// kart-recomp: host hooks for the static recompiler's dispatcher.
 +//
@@ -4677,6 +4746,8 @@ index 0000000000..3640ab88f2
 +    Core::System& system;
 +    u64 (*v)[2]; ///< v0..v31, low half first (floating-point arguments live in v0..v7)
 +    u8* nzcv = nullptr; ///< condition flags N, Z, C, V (one byte each, 0/1); set for block hooks, which may replace a compare
++    u64* fpcr = nullptr; ///< FPCR / FPSR, where the caller has them (block hooks and XM1 calls; native game functions need them)
++    u64* fpsr = nullptr;
 +};
 +
 +/// True when the hook fully handled the call and set pc itself.
@@ -5362,6 +5433,610 @@ index 0000000000..276599a0bb
 +void NoteModuleImage(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
 +
 +} // namespace Core::NativeFs
+diff --git a/src/core/arm/recomp/native_game_fns.cpp b/src/core/arm/recomp/native_game_fns.cpp
+new file mode 100644
+index 0000000000..df1d7b5b61
+--- /dev/null
++++ b/src/core/arm/recomp/native_game_fns.cpp
+@@ -0,0 +1,567 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: game functions rewritten as host code (see native_game_fns.h).
++
++#include "core/arm/recomp/native_game_fns.h"
++
++#include <array>
++#include <atomic>
++#include <bit>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include <immintrin.h>
++
++#include <fmt/format.h>
++
++#include "common/logging/log.h"
++#include "common/kart_native_fns.h"
++#include "core/arm/recomp/host_hooks.h"
++#include "core/core.h"
++#include "core/memory.h"
++
++namespace Core::NativeGameFns {
++namespace {
++
++enum class Mode { Off, On, Verify };
++
++Mode GetMode() {
++    static const Mode mode = [] {
++        const char* v = std::getenv("KARTRECOMP_NATIVE_FNS");
++        if (!v || !*v) return Mode::On;
++        if (std::string{v} == "0") return Mode::Off;
++        if (std::string{v} == "verify") return Mode::Verify;
++        return Mode::On;
++    }();
++    return mode;
++}
++
++// ---------------------------------------------------------------------------------------------------------------------------
++// Floating point that gives the ARM answer: IEEE single precision with round-to-nearest is the same on both sides as long as no
++// NaN, infinity, denormal, underflow or overflow is involved, and no flag other than "inexact" would be raised. Every value is
++// checked to stay zero or within 2^-100..2^100; anything else marks the call "bad" and the game's own code answers it instead.
++// Intrinsics, so the compiler cannot fuse or reorder anything.
++
++struct Fp {
++    bool bad = false;
++
++    static u32 Bits(float f) { return std::bit_cast<u32>(f); }
++    // Every value stays zero or within 2^-60..2^60 (biased exponent 67..187): then no product of two such values can underflow,
++    // no sum or quotient can overflow, and nothing but "inexact" can be raised. NaN, infinities and denormals are outside too.
++    static constexpr u32 kLo = 67u << 23, kHi = 188u << 23;
++    void Check(float r) {
++        const u32 a = Bits(r) & 0x7FFFFFFF;
++        if (a != 0 && (a < kLo || a >= kHi)) bad = true;
++    }
++    /// The same for four lanes at once; `acc` collects the lanes that failed.
++    static __m128i RangeBad(__m128 v) {
++        const __m128i a = _mm_and_si128(_mm_castps_si128(v), _mm_set1_epi32(0x7FFFFFFF));
++        const __m128i zero = _mm_cmpeq_epi32(a, _mm_setzero_si128());
++        const __m128i out = _mm_or_si128(_mm_cmplt_epi32(a, _mm_set1_epi32(static_cast<int>(kLo))),
++                                         _mm_cmpgt_epi32(a, _mm_set1_epi32(static_cast<int>(kHi - 1))));
++        return _mm_andnot_si128(zero, out);
++    }
++    float In(float x) {
++        Check(x);
++        return x;
++    }
++    float Mul(float a, float b) {
++        const float r = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(a), _mm_set_ss(b)));
++        Check(r);
++        if (r == 0.0f && a != 0.0f && b != 0.0f) bad = true; // underflowed to zero
++        return r;
++    }
++    float Add(float a, float b) {
++        const float r = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(a), _mm_set_ss(b)));
++        Check(r);
++        return r;
++    }
++    float Sub(float a, float b) {
++        const float r = _mm_cvtss_f32(_mm_sub_ss(_mm_set_ss(a), _mm_set_ss(b)));
++        Check(r);
++        return r;
++    }
++    /// c + a * b with one rounding (ARM FMLA).
++    __attribute__((target("fma"))) float Fma(float a, float b, float c) {
++        const float r = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c)));
++        Check(r);
++        if (r == 0.0f && static_cast<double>(a) * static_cast<double>(b) + static_cast<double>(c) != 0.0) bad = true;
++        return r;
++    }
++    float Div(float a, float b) {
++        if (b == 0.0f) {
++            bad = true;
++            return 0.0f;
++        }
++        const float r = _mm_cvtss_f32(_mm_div_ss(_mm_set_ss(a), _mm_set_ss(b)));
++        Check(r);
++        if (r == 0.0f && a != 0.0f) bad = true;
++        return r;
++    }
++    float Sqrt(float a) {
++        if (!(a > 0.0f)) {
++            bad = true;
++            return 0.0f;
++        }
++        const float r = _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(a)));
++        Check(r);
++        return r;
++    }
++    /// FRSQRTE for a positive normal single (the only kind that gets here): the generator's estimate, from the same table.
++    float RsqrtEstimate(float x) {
++        const u32 b = Bits(x);
++        const u32 rawexp = (b >> 23) & 0xFF;
++        if ((b >> 31) || rawexp == 0 || rawexp == 0xFF) {
++            bad = true;
++            return 0.0f;
++        }
++        const int exponent = static_cast<int>(rawexp) - 127;
++        const u64 mant = (u64{1} << 23) | (b & 0x7FFFFF);
++        u64 a = mant >> (23 - ((exponent % 2 == 0) ? 7 : 8));
++        a = a < 256 ? 2 * a + 1 : 2 * (a | 1);
++        const u64 estimate = Table()[a];
++        const int neg = -exponent - 1;
++        const int out_exp = neg >= 0 ? neg / 2 : -((-neg + 1) / 2);
++        const float r = std::bit_cast<float>(static_cast<u32>(((out_exp + 127) << 23) | (estimate << 15)));
++        Check(r);
++        return r;
++    }
++    /// FRSQRTS: (3 - a*b) / 2, fused, one rounding (the halving is exact for these magnitudes).
++    float RsqrtStep(float a, float b) {
++        const float t = Fma(-a, b, 3.0f);
++        return Mul(t, 0.5f);
++    }
++    /// ARM FMAX for two non-NaN values.
++    static float Max(float a, float b) {
++        if (a > b) return a;
++        if (b > a) return b;
++        if (a == 0.0f && b == 0.0f) return (std::signbit(a) && std::signbit(b)) ? -0.0f : 0.0f;
++        return a;
++    }
++
++    static const std::array<u8, 1024>& Table() {
++        static const std::array<u8, 1024> table = [] {
++            std::array<u8, 1024> t{};
++            for (unsigned a = 257; a < 1024; ++a) {
++                unsigned lo = 512, hi = 1024;
++                while (lo + 1 < hi) {
++                    const unsigned mid = (lo + hi) / 2;
++                    if (static_cast<u64>(a) * mid * mid < (u64{1} << 28)) lo = mid; else hi = mid;
++                }
++                t[a] = static_cast<u8>(((lo + 1) / 2) & 255);
++            }
++            return t;
++        }();
++        return table;
++    }
++};
++
++// ---------------------------------------------------------------------------------------------------------------------------
++// Guest memory: reads through the page table (a read that is not mapped marks the call bad); writes only once everything is known.
++
++struct Guest {
++    Core::Memory::Memory& m;
++    bool bad = false;
++
++    template <typename T>
++    T Read(u64 addr) {
++        T v{};
++        if ((addr & 0xFFF) + sizeof(T) <= 0x1000) {
++            if (const u8* p = m.GetPointer(addr)) {
++                std::memcpy(&v, p, sizeof(T));
++                return v;
++            }
++            bad = true;
++            return v;
++        }
++        if (!m.IsValidVirtualAddressRange(addr, sizeof(T))) {
++            bad = true;
++            return v;
++        }
++        m.ReadBlock(addr, &v, sizeof(T));
++        return v;
++    }
++    void ReadBytes(u64 addr, void* out, size_t n) {
++        if ((addr & 0xFFF) + n <= 0x1000) {
++            if (const u8* p = m.GetPointer(addr)) {
++                std::memcpy(out, p, n);
++                return;
++            }
++            bad = true;
++            std::memset(out, 0, n);
++            return;
++        }
++        if (!m.IsValidVirtualAddressRange(addr, n)) {
++            bad = true;
++            std::memset(out, 0, n);
++            return;
++        }
++        m.ReadBlock(addr, out, n);
++    }
++    using V4 = std::array<float, 4>;
++    V4 ReadV4(u64 addr) {
++        V4 v{};
++        if ((addr & 0xFFF) + 16 <= 0x1000) {
++            if (const u8* p = m.GetPointer(addr)) {
++                std::memcpy(v.data(), p, 16);
++                return v;
++            }
++            bad = true;
++            return v;
++        }
++        ReadBytes(addr, v.data(), 16);
++        return v;
++    }
++};
++
++bool FpModeOrdinary(const RecompHooks::HookContext&, u64 fpcr, u64 fpsr) {
++    // Round to nearest, no trap enabled, and "inexact" already set (it is sticky: every answer here is inexact).
++    if ((fpcr & ((3u << 22) | 0x9F00u)) != 0) return false;
++    if ((fpsr & 0x10) == 0) return false;
++    return (_mm_getcsr() & 0x6000) == 0; // the host rounds to nearest too
++}
++
++// ---------------------------------------------------------------------------------------------------------------------------
++// main+0xa7536c (4.0.1): a model's bounding sphere from its bones. For sphere index i of the model (x0), the source sphere
++// spheres[2i+1] (centre, radius) is moved by each listed bone's matrix (x1's matrix array) and the results are merged into
++// spheres[2i] (Ritter style: a sphere inside the other is dropped, otherwise both are enclosed by the smallest sphere).
++// It runs for every character, kart part and item model that moves, so it grows with the number of racers.
++
++struct SphereResult {
++    std::array<u8, 32> a;         ///< spheres[2i] afterwards (centre xyzw, radius, then 12 bytes: unchanged or copied)
++    u16 flags = 0;                ///< x1 + 8 afterwards
++    std::array<u8, 0xC0> stack;   ///< the stack frame below sp afterwards: 0x40..0x47 and 0x50..0xbf always (0x48..0x4f is
++                                  ///< never written: d12 is stored alone), 0x20..0x33 when `temps`
++    bool temps = false;
++    bool writes_sphere = false;
++    bool Written(size_t i) const { return (i >= 0x40 && (i < 0x48 || i >= 0x50)) || (temps && i >= 0x20 && i < 0x34); }
++};
++
++/// The frame the game's function leaves below its caller's sp: callee-saved registers as they were at entry, plus the last
++/// temporaries of its merge loop.
++void SaveFrame(SphereResult& r, const u64* x, const u64 (*v)[2]) {
++    const auto put = [&r](size_t off, u64 value) {
++        std::memcpy(&r.stack[off], &value, 8);
++    };
++    put(0x40, v[12][0]);
++    put(0x50, v[11][0]);
++    put(0x58, v[10][0]);
++    put(0x60, v[9][0]);
++    put(0x68, v[8][0]);
++    put(0x70, x[26]);
++    put(0x78, x[25]);
++    put(0x80, x[24]);
++    put(0x88, x[23]);
++    put(0x90, x[22]);
++    put(0x98, x[21]);
++    put(0xA0, x[20]);
++    put(0xA8, x[19]);
++    put(0xB0, x[29]);
++    put(0xB8, x[30]);
++}
++
++using V4 = std::array<float, 4>;
++
++/// One bone: the source centre moved by the matrix (columns c0..c3), and the largest axis scale (0 for an empty axis; that case
++/// raises flags in the game's code, so it is left to it).
++struct BoneOut {
++    V4 centre;
++    float scale;
++};
++
++__attribute__((target("fma"))) BoneOut MoveByBone(Fp& f, Guest& g, u64 matrix, const V4& src) {
++    BoneOut out{};
++    float m[16];
++    if ((matrix & 0xFFF) + 64 <= 0x1000) {
++        const u8* p = g.m.GetPointer(matrix);
++        if (!p) {
++            g.bad = true;
++            return out;
++        }
++        std::memcpy(m, p, 64);
++    } else {
++        g.ReadBytes(matrix, m, 64);
++    }
++    const __m128 c0 = _mm_loadu_ps(m), c1 = _mm_loadu_ps(m + 4), c2 = _mm_loadu_ps(m + 8), c3 = _mm_loadu_ps(m + 12);
++    __m128i bad = _mm_or_si128(_mm_or_si128(Fp::RangeBad(c0), Fp::RangeBad(c1)), _mm_or_si128(Fp::RangeBad(c2), Fp::RangeBad(c3)));
++    // fmul by element, fmla, fmla, fadd: c3 + fma(c2, s2, fma(c1, s1, c0 * s0)).
++    __m128 t = _mm_mul_ps(c0, _mm_set1_ps(src[0]));
++    bad = _mm_or_si128(bad, Fp::RangeBad(t));
++    t = _mm_fmadd_ps(c1, _mm_set1_ps(src[1]), t);
++    bad = _mm_or_si128(bad, Fp::RangeBad(t));
++    t = _mm_fmadd_ps(c2, _mm_set1_ps(src[2]), t);
++    bad = _mm_or_si128(bad, Fp::RangeBad(t));
++    const __m128 centre = _mm_add_ps(c3, t);
++    bad = _mm_or_si128(bad, Fp::RangeBad(centre));
++    _mm_storeu_ps(out.centre.data(), centre);
++    // Squared lengths of c0..c2: ext #8 + fadd .2s gives (l2+l0, l3+l1), faddp adds those two.
++    float len2[3];
++    const __m128 cols[3] = {c0, c1, c2};
++    for (int k = 0; k < 3; ++k) {
++        const __m128 q = _mm_mul_ps(cols[k], cols[k]);
++        bad = _mm_or_si128(bad, Fp::RangeBad(q));
++        const __m128 h = _mm_add_ps(q, _mm_shuffle_ps(q, q, _MM_SHUFFLE(1, 0, 3, 2)));
++        bad = _mm_or_si128(bad, Fp::RangeBad(h));
++        len2[k] = f.Add(_mm_cvtss_f32(h), _mm_cvtss_f32(_mm_shuffle_ps(h, h, _MM_SHUFFLE(1, 1, 1, 1))));
++    }
++    if (_mm_movemask_epi8(bad) != 0) f.bad = true;
++    float s[3];
++    for (int k = 0; k < 3; ++k) {
++        if (len2[k] == 0.0f) { // the game's estimate of 1/sqrt(0) raises "divide by zero": its own code answers
++            f.bad = true;
++            return out;
++        }
++        float r = f.RsqrtEstimate(len2[k]);
++        r = f.Mul(r, f.RsqrtStep(r, f.Mul(r, len2[k])));
++        r = f.Mul(r, f.RsqrtStep(r, f.Mul(len2[k], r)));
++        s[k] = f.Mul(len2[k], r);
++    }
++    const float m1 = s[0] < s[1] ? s[1] : s[0];
++    out.scale = m1 < s[2] ? s[2] : m1;
++    return out;
++}
++
++/// Returns the result, or nothing when the call is not an ordinary one (the game's code answers it).
++std::optional<SphereResult> BoundsFromBones(Core::Memory::Memory& memory, const u64* x, const u64 (*v)[2], u64 eps_addr) {
++    Fp f;
++    Guest g{memory};
++    SphereResult r;
++    const u64 obj = x[0], out = x[1];
++    const s32 idx = static_cast<s32>(x[2]);
++    const u64 sp = x[31];
++    SaveFrame(r, x, v);
++
++    const u64 spheres = g.Read<u64>(obj + 0x38);
++    if (g.bad) return std::nullopt;
++    if (spheres == 0) return r; // nothing written but the frame
++    if (out + 8 < obj + 0x40 && out + 10 > obj + 0x38) return std::nullopt; // the flag would alias the pointer it rereads
++    r.flags = static_cast<u16>(g.Read<u16>(out + 8) | 8);
++    const u64 a_addr = spheres + (static_cast<u64>(static_cast<s64>(static_cast<s32>(static_cast<u32>(idx) << 1))) << 5);
++    const u64 b_addr = spheres + (static_cast<u64>(static_cast<s64>(static_cast<s32>((static_cast<u32>(idx) << 1) | 1))) << 5);
++    const u64 res = g.Read<u64>(obj);
++    const u64 matrices = g.Read<u64>(out + 0x20);
++    const u8 mode = g.Read<u8>(res + 0x66);
++    if (g.bad) return std::nullopt;
++
++    g.ReadBytes(a_addr, r.a.data(), 32);
++    const V4 src = g.ReadV4(b_addr);
++    const float src_radius = f.In(g.Read<float>(b_addr + 0x10));
++    for (float e : src) f.In(e);
++    if (g.bad || f.bad) return std::nullopt;
++    const auto overlaps = [&](u64 lo, u64 n) { return lo < a_addr + 32 && lo + n > a_addr; };
++    r.writes_sphere = true;
++
++    V4 a_centre;
++    float a_radius;
++    const auto first = [&](u64 matrix) {
++        if (overlaps(matrix, 64)) f.bad = true;
++        const BoneOut b = MoveByBone(f, g, matrix, src);
++        a_centre = b.centre;
++        a_radius = f.Mul(src_radius, b.scale);
++    };
++
++    if (mode == 0) {
++        // One bone (res + 0x60).
++        first(matrices + (static_cast<u64>(g.Read<u16>(res + 0x60)) << 6));
++        if (g.bad || f.bad) return std::nullopt;
++        std::memcpy(&r.a[0], a_centre.data(), 16);
++        std::memcpy(&r.a[16], &a_radius, 4);
++        return r;
++    }
++
++    const u64 list = g.Read<u64>(res + 0x28);
++    const u16 count = g.Read<u16>(res + 0x64);
++    if (g.bad) return std::nullopt;
++    if (overlaps(list, u64{count} * 2 + 2)) return std::nullopt;
++    first(matrices + (static_cast<u64>(g.Read<u16>(list)) << 6));
++    if (g.bad || f.bad) return std::nullopt;
++    if (count >= 2) {
++        const float eps = f.In(g.Read<float>(eps_addr));
++        u8 junk[12];
++        g.ReadBytes(sp - 0xC0 + 0x34, junk, sizeof(junk)); // what the game copies along when a sphere is replaced
++        if (g.bad || f.bad) return std::nullopt;
++        std::array<u8, 12> tail{};
++        std::memcpy(tail.data(), &r.a[20], 12);
++        for (u32 k = 1; k < count; ++k) {
++            const u64 matrix = matrices + (static_cast<u64>(g.Read<u16>(list + 2 * k)) << 6);
++            if (overlaps(matrix, 64)) return std::nullopt;
++            const BoneOut b = MoveByBone(f, g, matrix, src);
++            const float b_radius = f.Mul(src_radius, b.scale);
++            if (g.bad || f.bad) return std::nullopt;
++            // The temporaries the game keeps on its stack (sp+0x20: centre, sp+0x30: radius).
++            std::memcpy(&r.stack[0x20], b.centre.data(), 16);
++            std::memcpy(&r.stack[0x30], &b_radius, 4);
++            r.temps = true;
++            V4 d;
++            for (int l = 0; l < 4; ++l) d[l] = f.Sub(b.centre[l], a_centre[l]);
++            const float d0 = f.Mul(d[0], d[0]), d1 = f.Mul(d[1], d[1]), d2s = f.Mul(d[2], d[2]), d3 = f.Mul(d[3], d[3]);
++            const float dist2 = f.Add(f.Add(d2s, d0), f.Add(d3, d1));
++            const float gap = f.Sub(b_radius, a_radius);
++            const float limit = Fp::Max(f.Mul(gap, gap), eps);
++            if (f.bad) return std::nullopt;
++            if (dist2 < limit) {
++                // One sphere holds the other: keep the larger (the game copies 32 bytes, its own or the stack temporaries).
++                if (!(a_radius > b_radius)) {
++                    a_centre = b.centre;
++                    a_radius = b_radius;
++                    std::memcpy(tail.data(), junk, 12);
++                }
++                continue;
++            }
++            const float dist = f.Sqrt(dist2);
++            const float inv = f.Div(1.0f, dist);
++            const float sum = f.Add(a_radius, b_radius);
++            const float len = f.Mul(dist2, inv);
++            const float new_radius = f.Mul(f.Add(len, sum), 0.5f);
++            const float t = f.Div(f.Sub(new_radius, a_radius), len);
++            for (int l = 0; l < 4; ++l) a_centre[l] = f.Add(a_centre[l], f.Mul(d[l], t));
++            a_radius = new_radius;
++            if (f.bad) return std::nullopt;
++        }
++        std::memcpy(&r.a[20], tail.data(), 12);
++    }
++    std::memcpy(&r.a[0], a_centre.data(), 16);
++    std::memcpy(&r.a[16], &a_radius, 4);
++    return r;
++}
++
++/// Writes guest memory, through one pointer when the range stays in a page.
++void Put(Core::Memory::Memory& memory, u64 addr, const void* data, size_t n) {
++    if ((addr & 0xFFF) + n <= 0x1000) {
++        if (u8* p = memory.GetPointer(addr)) {
++            std::memcpy(p, data, n);
++            return;
++        }
++    }
++    memory.WriteBlock(addr, data, n);
++}
++
++void Commit(Core::Memory::Memory& memory, const SphereResult& r, const u64* x) {
++    const u64 frame = x[31] - 0xC0;
++    Put(memory, frame + 0x40, &r.stack[0x40], 8);
++    Put(memory, frame + 0x50, &r.stack[0x50], 0x70);
++    if (r.temps) Put(memory, frame + 0x20, &r.stack[0x20], 0x14);
++    if (!r.writes_sphere) return;
++    Put(memory, x[1] + 8, &r.flags, 2);
++    const u64 spheres = memory.Read64(x[0] + 0x38);
++    const u64 a_addr = spheres + (static_cast<u64>(static_cast<s64>(static_cast<s32>(static_cast<u32>(x[2]) << 1))) << 5);
++    Put(memory, a_addr, r.a.data(), r.a.size());
++}
++
++struct Stats {
++    std::atomic<u64> calls{0}, answered{0}, fallbacks{0}, compared{0}, mismatches{0};
++};
++
++/// The decoded "adrp x8, page; ldr s9, [x8, #off]" pair at `at` (module offsets), or 0.
++u64 DecodeAdrpLdr(std::span<const u8> image, size_t at) {
++    if (at + 8 > image.size()) return 0;
++    u32 adrp, ldr;
++    std::memcpy(&adrp, image.data() + at, 4);
++    std::memcpy(&ldr, image.data() + at + 4, 4);
++    if ((adrp & 0x9F00001F) != 0x90000008) return 0;       // adrp x8
++    if ((ldr & 0xFFC003FF) != 0xBD400109) return 0;        // ldr s9, [x8, #imm]
++    const u64 immlo = (adrp >> 29) & 3, immhi = (adrp >> 5) & 0x7FFFF;
++    s64 page = static_cast<s64>((immhi << 2) | immlo);
++    if (page & (s64{1} << 20)) page -= s64{1} << 21;
++    const u64 base = (at & ~u64{0xFFF}) + static_cast<u64>(page << 12);
++    return base + (((ldr >> 10) & 0xFFF) << 2);
++}
++
++} // namespace
++
++void NoteModule(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name) {
++    if (name != "main" || GetMode() == Mode::Off) return;
++    const std::vector<size_t> hits = KartNativeFns::Find(image.data(), image.size());
++    if (hits.size() != 1) {
++        LOG_INFO(Core_ARM, "native game functions: sphere-from-bones not found; the game's code runs");
++        return;
++    }
++    const size_t fn = hits[0];
++    const u64 eps = DecodeAdrpLdr(image, fn + 0x1B4);
++    if (eps == 0) {
++        LOG_INFO(Core_ARM, "native game functions: sphere-from-bones constant not where expected; the game's code runs");
++        return;
++    }
++    const u64 eps_addr = load_base + eps;
++    Core::System* sys = &system;
++    static Stats stats;
++    const Mode mode = GetMode();
++    RecompHooks::Install(load_base + fn, [sys, eps_addr, mode](RecompHooks::HookContext& ctx) {
++        Stats& st = stats;
++        const u64 n = st.calls.fetch_add(1, std::memory_order_relaxed) + 1;
++        if (mode == Mode::Verify && n % 100000 == 0) {
++            LOG_INFO(Core_ARM, "native sphere-from-bones: {} calls, {} answered, {} left to the game, {} compared, {} mismatches", n,
++                     st.answered.load(), st.fallbacks.load(), st.compared.load(), st.mismatches.load());
++        }
++        if (!ctx.fpcr || !ctx.fpsr || !FpModeOrdinary(ctx, *ctx.fpcr, *ctx.fpsr)) {
++            st.fallbacks.fetch_add(1, std::memory_order_relaxed);
++            return false;
++        }
++        auto& memory = sys->ApplicationMemory();
++        if (mode == Mode::On) {
++            const auto r = BoundsFromBones(memory, ctx.x, ctx.v, eps_addr);
++            if (!r) {
++                st.fallbacks.fetch_add(1, std::memory_order_relaxed);
++                return false;
++            }
++            Commit(memory, *r, ctx.x);
++            for (int k = 8; k <= 12; ++k) ctx.v[k][1] = 0; // the game's epilogue reloads d8..d12, clearing their upper halves
++            st.answered.fetch_add(1, std::memory_order_relaxed);
++            ctx.pc = ctx.x[30];
++            return true;
++        }
++        // Verify: the game's code runs; its result is compared with ours when it returns. x30 is the return trap from here on, which
++        // the game's code saves in its frame, so the prediction is made after it is set.
++        auto holder = std::make_shared<std::optional<SphereResult>>();
++        const u64 sp = ctx.x[31], obj = ctx.x[0], out = ctx.x[1];
++        const u32 idx2 = static_cast<u32>(ctx.x[2]) << 1;
++        RecompHooks::TrapReturn(ctx, [holder, sp, obj, out, idx2, sys](RecompHooks::HookContext&) {
++            if (!*holder) return;
++            const SphereResult& r = **holder;
++            auto& m = sys->ApplicationMemory();
++            bool same = true;
++            std::array<u8, 0xC0> frame{};
++            m.ReadBlock(sp - 0xC0, frame.data(), frame.size());
++            for (size_t i = 0; i < frame.size(); ++i) same = same && (!r.Written(i) || frame[i] == r.stack[i]);
++            if (r.writes_sphere) {
++                same = same && m.Read16(out + 8) == r.flags;
++                const u64 spheres = m.Read64(obj + 0x38);
++                const u64 a_addr = spheres + (static_cast<u64>(static_cast<s64>(static_cast<s32>(idx2))) << 5);
++                std::array<u8, 32> a{};
++                m.ReadBlock(a_addr, a.data(), a.size());
++                if (a != r.a) same = false;
++                if (!same) {
++                    static std::atomic<int> shown{0};
++                    if (shown.fetch_add(1) < 10) {
++                        std::string ours, theirs, fo, ft;
++                        for (size_t i = 0; i < 32; ++i) {
++                            ours += fmt::format("{:02x}", r.a[i]);
++                            theirs += fmt::format("{:02x}", a[i]);
++                        }
++                        for (size_t i = 0; i < frame.size(); ++i)
++                            if (r.Written(i) && frame[i] != r.stack[i]) fo += fmt::format(" {:#x}", i);
++                        u64 game_lr = 0, our_lr = 0;
++                        std::memcpy(&game_lr, &frame[0xB8], 8);
++                        std::memcpy(&our_lr, &r.stack[0xB8], 8);
++                        fo += fmt::format(" (saved x30: game {:#x}, ours {:#x})", game_lr, our_lr);
++                        LOG_WARNING(Core_ARM, "native sphere-from-bones mismatch: game {} native {} flags {:#x}/{:#x} frame bytes off:{}",
++                                    theirs, ours, m.Read16(out + 8), r.flags, fo);
++                    }
++                }
++            }
++            stats.compared.fetch_add(1, std::memory_order_relaxed);
++            if (!same) stats.mismatches.fetch_add(1, std::memory_order_relaxed);
++        });
++        *holder = BoundsFromBones(memory, ctx.x, ctx.v, eps_addr); // after TrapReturn: the frame holds the trap as x30
++        if (*holder) st.answered.fetch_add(1, std::memory_order_relaxed);
++        else st.fallbacks.fetch_add(1, std::memory_order_relaxed);
++        return false;
++    });
++    LOG_INFO(Core_ARM, "native game functions: sphere-from-bones at main+{:#x} ({})", fn, mode == Mode::Verify ? "verify" : "on");
++}
++
++} // namespace Core::NativeGameFns
+diff --git a/src/core/arm/recomp/native_game_fns.h b/src/core/arm/recomp/native_game_fns.h
+new file mode 100644
+index 0000000000..8f09955ad0
+--- /dev/null
++++ b/src/core/arm/recomp/native_game_fns.h
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// kart-recomp: game functions rewritten as host code, one at a time (docs/NATIVE_PERF.md, "Native game functions").
++//
++// Each one is found by its instruction pattern (so a build that differs is left alone), answers a call only for ordinary input
++// (finite, normal floating-point values, round-to-nearest, the inexact flag already set, no traps), and otherwise lets the game's
++// own recompiled code run. What it writes is what the game's code writes, byte for byte, including the stack frame it leaves behind.
++// KARTRECOMP_NATIVE_FNS=0 turns them off; KARTRECOMP_NATIVE_FNS=verify computes each answer, lets the game's code run instead and
++// compares the two (logged every 100,000 calls).
++#pragma once
++
++#include <span>
++#include <string_view>
++
++#include "common/common_types.h"
++
++namespace Core {
++class System;
++}
++
++namespace Core::NativeGameFns {
++
++/// Called by the NSO loader once the module's base is known (after KartHookTrace::NoteModule); installs the rewrites for "main".
++void NoteModule(Core::System& system, std::span<const u8> image, u64 load_base, std::string_view name);
++
++} // namespace Core::NativeGameFns
 diff --git a/src/core/arm/recomp/native_hid.cpp b/src/core/arm/recomp/native_hid.cpp
 new file mode 100644
 index 0000000000..dbce9ea040
@@ -5674,10 +6349,10 @@ index 0000000000..bf85c754dc
 +} // namespace Core::NativeHid
 diff --git a/src/core/arm/recomp/native_libc.cpp b/src/core/arm/recomp/native_libc.cpp
 new file mode 100644
-index 0000000000..83d2c202ce
+index 0000000000..748a5c408f
 --- /dev/null
 +++ b/src/core/arm/recomp/native_libc.cpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,253 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "core/arm/recomp/native_libc.h"
 +#if defined(__linux__)
@@ -5779,7 +6454,7 @@ index 0000000000..83d2c202ce
 +bool Enabled() {
 +    static const bool on = [] {
 +        const char* v = std::getenv("KARTRECOMP_NATIVE_LIBC");
-+        return v && *v == '1';
++        return !(v && *v == '0'); // default on since the hooked calls stopped costing a dispatcher round trip (XM1, 2026-11-27)
 +    }();
 +    return on;
 +}
@@ -5876,6 +6551,12 @@ index 0000000000..83d2c202ce
 +        const u64 dst = ctx.x[0], n = ctx.x[2];
 +        if (!g.Mapped(dst, n)) return false;
 +        const int c = static_cast<int>(ctx.x[1] & 0xFF);
++#if defined(__linux__)
++        if (ZeroPunch() && c == 0 && n >= (256u << 10)) { // large zero fills still give their pages back
++            ZeroFill(g, dst, n);
++            return Return(ctx, dst);
++        }
++#endif
 +        g.Pieces(dst, n, [c](u8* p, u64, u64 len) { std::memset(p, c, len); });
 +        return Return(ctx, dst);
 +    });
@@ -5921,13 +6602,13 @@ index 0000000000..83d2c202ce
 +        return false;
 +    });
 +
-+    LOG_INFO(Core_ARM, "native libc: {} C library functions of sdk answered by host code (KARTRECOMP_NATIVE_LIBC=1)", installed);
++    LOG_INFO(Core_ARM, "native libc: {} C library functions of sdk answered by host code (KARTRECOMP_NATIVE_LIBC=0 turns it off)", installed);
 +}
 +
 +} // namespace Core::NativeLibc
 diff --git a/src/core/arm/recomp/native_libc.h b/src/core/arm/recomp/native_libc.h
 new file mode 100644
-index 0000000000..b5cd0c5fe2
+index 0000000000..be113bed68
 --- /dev/null
 +++ b/src/core/arm/recomp/native_libc.h
 @@ -0,0 +1,26 @@
@@ -5935,8 +6616,8 @@ index 0000000000..b5cd0c5fe2
 +// kart-recomp: native C library for the game (native-engine plan, phase 1; docs/NATIVE_ENGINE.md).
 +//
 +// The sdk module carries the C library the game uses (memcpy, memset, strcmp, ...). The game calls these about 300,000 times a second
-+// in a race, each time through the host dispatcher into recompiled ARM code that goes through the guest memory helpers. With
-+// KARTRECOMP_NATIVE_LIBC=1 those calls from the game are answered by host code working directly on guest memory instead. A call
++// in a race, each time through the host dispatcher into recompiled ARM code that goes through the guest memory helpers. By default (KARTRECOMP_NATIVE_LIBC=0 turns
++// it off) those calls from the game are answered by host code working directly on guest memory instead. A call
 +// touching an unmapped page falls back to the game's own code, so the behaviour on bad pointers is unchanged.
 +#pragma once
 +
@@ -16656,7 +17337,7 @@ index 053fcd0bb1..3d04ec0f1a 100644
          return *nsp_type;
      } else if (const auto xci_type = IdentifyFileLoader<AppLoader_XCI>(file)) {
 diff --git a/src/core/loader/nso.cpp b/src/core/loader/nso.cpp
-index 3cc84acfdf..27d27fc74d 100644
+index 3cc84acfdf..615b39c75e 100644
 --- a/src/core/loader/nso.cpp
 +++ b/src/core/loader/nso.cpp
 @@ -6,9 +6,11 @@
@@ -16671,7 +17352,7 @@ index 3cc84acfdf..27d27fc74d 100644
  #include "common/common_funcs.h"
  #include "common/hex_util.h"
  #include "common/logging.h"
-@@ -23,6 +25,12 @@
+@@ -23,6 +25,13 @@
  #include "core/hle/kernel/k_process.h"
  #include "core/hle/kernel/k_thread.h"
  #include "core/loader/nso.h"
@@ -16679,12 +17360,13 @@ index 3cc84acfdf..27d27fc74d 100644
 +#include "core/arm/recomp/native_fs.h"
 +#include "core/arm/recomp/native_hid.h"
 +#include "core/arm/recomp/native_libc.h"
++#include "core/arm/recomp/native_game_fns.h"
 +#include "core/arm/recomp/sdk_trace.h"
 +#include "core/arm/recomp/nvn_trace.h"
  #include "core/memory.h"
  
  #ifdef HAS_NCE
-@@ -217,6 +225,57 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
+@@ -217,6 +226,61 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
          }
      }
  
@@ -16694,7 +17376,7 @@ index 3cc84acfdf..27d27fc74d 100644
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
 +        load_base + module_start, name);
 +
-+    // kart-recomp: native C library for the game's calls into the sdk (KARTRECOMP_NATIVE_LIBC=1).
++    // kart-recomp: native C library for the game's calls into the sdk (on; KARTRECOMP_NATIVE_LIBC=0 turns it off).
 +    Core::NativeLibc::NoteModuleImage(
 +        system,
 +        std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
@@ -16738,6 +17420,10 @@ index 3cc84acfdf..27d27fc74d 100644
 +    }
 +    Core::KartHookTrace::NoteBuildId(name, nso_header.build_id.data());
 +    Core::KartHookTrace::NoteModule(system, name, load_base);
++    // kart-recomp: game functions rewritten as host code (KARTRECOMP_NATIVE_FNS); needs the main base noted just above.
++    Core::NativeGameFns::NoteModule(
++        system, std::span<const u8>(codeset.memory.data() + module_start, codeset.memory.size() - module_start),
++        load_base + module_start, name);
 +
      // Load codeset for current process
      process.LoadModule(system.Kernel(), std::move(codeset), load_base);
@@ -19163,7 +19849,7 @@ index 0000000000..ff89224f17
 +
 +} // namespace Core::NvnHost
 diff --git a/src/core/recompiler/arm64_to_c.h b/src/core/recompiler/arm64_to_c.h
-index 699980238b..011a2c950a 100644
+index 699980238b..d24ba401fb 100644
 --- a/src/core/recompiler/arm64_to_c.h
 +++ b/src/core/recompiler/arm64_to_c.h
 @@ -329,6 +329,18 @@ inline bool g_emit_fpx = false;
@@ -19258,7 +19944,7 @@ index 699980238b..011a2c950a 100644
                   nm, (unsigned long long)t, nm);
      } else {
          snprintf(b, sizeof b, "{ c->pc=g_module_base+0x%llxULL; return; }",
-@@ -369,6 +429,102 @@ inline std::string ChainTo(u64 t) {
+@@ -369,6 +429,110 @@ inline std::string ChainTo(u64 t) {
      return b;
  }
  
@@ -19269,7 +19955,15 @@ index 699980238b..011a2c950a 100644
 +// pc) returns to the dispatcher as before. The host stack depth is counted in the context's spare fm_reserved word and
 +// capped, past which the BL chains as before.
 +inline bool g_native_calls = false;
-+inline constexpr unsigned kNativeCallDepth = 48;
++// 48 cut deep call chains of the game (the main thread's calls into the SDK from deep in its update code): past the cap every
++// frame above unwinds to the dispatcher and each later RET of that tree goes through it too (about 2 million dispatcher trips a
++// second on the main thread). Host stack: frames are ~80 bytes median, ~1 KB at the 99th percentile; game threads have 8 MB on Linux.
++// KARTRECOMP_NATIVE_DEPTH=<n> at export time overrides it (experiments).
++inline const unsigned kNativeCallDepth = [] {
++    const char* v = std::getenv("KARTRECOMP_NATIVE_DEPTH");
++    const long n = v ? std::strtol(v, nullptr, 10) : 0;
++    return n >= 8 && n <= 4096 ? static_cast<unsigned>(n) : 48u;
++}();
 +// kart-recomp (exporter --chain-cond): conditional branches (B.cond, CBZ/CBNZ, TBZ/TBNZ) tail-call their two targets like B does,
 +// instead of returning to the module's dispatcher loop, whose block-index read misses the cache for most branch targets.
 +// Measured with direct memory on (4.0.1, Mario Circuit, all game threads): 5% less CPU. The older measurement above ("deliberately
@@ -19361,7 +20055,7 @@ index 699980238b..011a2c950a 100644
  // The same for a computed target. A chain of blocks otherwise ends at the first
  // BR, BLR or RET, and every one of those is a round trip out to the host
  // dispatcher: RunThread plus the dispatch lambda are 24.7% of all cycles in a
-@@ -476,6 +632,7 @@ inline std::string FpxArgs(const char* op) {
+@@ -476,6 +640,7 @@ inline std::string FpxArgs(const char* op) {
      return "_a,_b";
  }
  inline std::string EmitFPNativeValue(bool dbl, const char* op) {
@@ -19369,7 +20063,7 @@ index 699980238b..011a2c950a 100644
      if (!g_emit_fpx) return {};
      const std::string call = std::string("recomp_fpx_") + op + (dbl ? "64(" : "32(") + FpxArgs(op);
      if (g_emit_fpx_shadow) {
-@@ -485,7 +642,15 @@ inline std::string EmitFPNativeValue(bool dbl, const char* op) {
+@@ -485,7 +650,15 @@ inline std::string EmitFPNativeValue(bool dbl, const char* op) {
      return "do{if(RECOMP_FPX_OPEN(c)&&RECOMP_LIKELY(" + call +
             ",&_v))){RECOMP_FPX_PROBE(1);break;}RECOMP_FPX_PROBE(2);";
  }
@@ -19385,7 +20079,7 @@ index 699980238b..011a2c950a 100644
      if (!g_emit_fpx) return {};
      if (g_emit_fpx_shadow) {
          static const char* const kinds[] = {"add", "sub", "mul", "div", "fma", "recps", "rsqrts", "sqrt"};
-@@ -502,7 +667,23 @@ inline std::string EmitFPNativeSuffix(bool dbl, const char* op) {
+@@ -502,7 +675,23 @@ inline std::string EmitFPNativeSuffix(bool dbl, const char* op) {
      return "}while(0);";
  }
  
@@ -19409,7 +20103,7 @@ index 699980238b..011a2c950a 100644
      return EmitFPNativeValue(dbl, subtract ? "sub" : "add") +
          "{ const unsigned _f=" + std::string(dbl?"52":"23") +
          ";const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1,_exp="+
-@@ -545,6 +726,7 @@ inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
+@@ -545,6 +734,7 @@ inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
  // IEEE bit patterns. A multiply supplies a same-sign zero addend so its zero
  // result has the product sign in every rounding mode.
  inline std::string EmitFPDivideValue(bool dbl) {
@@ -19417,7 +20111,7 @@ index 699980238b..011a2c950a 100644
      return EmitFPNativeValue(dbl, "div") +
          "{ const unsigned _f="+std::string(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+R"C(;
  const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1;
-@@ -658,6 +840,7 @@ else {
+@@ -658,6 +848,7 @@ else {
  // `mul` marks a multiply (FMUL/FNMUL), whose addend is the sign-matched zero
  // the caller supplies: the fast path then needs no fused multiply-add.
  inline std::string EmitFPMulAddValue(bool dbl, bool mul = false) {
@@ -19425,7 +20119,7 @@ index 699980238b..011a2c950a 100644
      std::string s=EmitFPNativeValue(dbl, mul ? "mul" : "fma")+
          "{ const unsigned _f="+std::string(dbl?"52":"23")+
          ",_bias="+(dbl?"1023":"127")+",_count="+(dbl?"67":"9")+
-@@ -736,6 +919,7 @@ else {
+@@ -736,6 +927,7 @@ else {
  // access trap delivery and FEAT_AFP remain unsupported. The line breaks match
  // what put() emits, so the scalar text is unchanged by sharing it.
  inline std::string EmitFPStepValue(bool dbl, bool half) {
@@ -19433,7 +20127,7 @@ index 699980238b..011a2c950a 100644
      std::string s = std::string("const unsigned _f=")+(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+
              ",_count="+(dbl?"67":"9")+";const int _base="+
              std::to_string((dbl?-2148:-298)-(half?1:0))+";"
-@@ -946,8 +1130,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -946,8 +1138,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
      if ((i & 0xFFFFF0FF) == 0xD503305F) { put("recomp_clrex(c);"); return true; }
  
      if ((i & 0xFFFFF0FF) == 0xD50330DF) {
@@ -19443,7 +20137,7 @@ index 699980238b..011a2c950a 100644
      }
      if ((i & 0xFFFFF01F) == 0xD503301F) { put("recomp_barrier();"); return true; }
  
-@@ -1188,16 +1371,33 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1188,16 +1379,33 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          if ((i & 0xFC000000) == 0x94000000) {
              snprintf(buf, sizeof buf, "c->x[30]=g_module_base+0x%llxULL;", (unsigned long long)next);
              put(buf);
@@ -19481,7 +20175,7 @@ index 699980238b..011a2c950a 100644
          snprintf(buf, sizeof buf,
                   "{ uint64_t _target=c->x[%u]; c->x[30]=g_module_base+0x%llxULL; "
                   "c->pc=_target; return; } /* BLR */",
-@@ -1209,16 +1409,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -1209,16 +1417,11 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
          const s64 off = ((s32)((i >> 5) << 13) >> 13);
          const u64 tt = pc + off * 4;
          const u32 cond = i & 15;
@@ -19501,7 +20195,7 @@ index 699980238b..011a2c950a 100644
      if ((i & 0xFFE0001F) == 0xD4000001) { u32 imm = (i >> 5) & 0xFFFF; snprintf(buf, sizeof buf, "c->pc=g_module_base+0x%llxULL; c->pending_svc=%uULL; recomp_svc(c,%u); return;", (unsigned long long)next, imm, imm); put(buf); return false; }
      if ((i & 0xFFE0001F) == 0xD4200000) {
          const u32 imm = (i >> 5) & 0xFFFF;
-@@ -2174,7 +2369,9 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -2174,7 +2377,9 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              const unsigned lanes=scalar||scalar_pair?1:(q?16:8)/(dbl?8:4);
              const bool sub=scalar?(i&0x1000)!=0:vector&&(i&0x800000)!=0;
              const std::string ct=dbl?"uint64_t":"uint32_t",count=dbl?"2":"4";
@@ -19512,7 +20206,7 @@ index 699980238b..011a2c950a 100644
                  "memcpy(_n,c->vreg["+std::to_string(rn)+"],16);memcpy(_m,c->vreg["+std::to_string(rm)+"],16);");
              for(unsigned e=0;e<lanes;++e) {
                  const std::string src=vector_pair&&e>=lanes/2?"_m":"_n";
-@@ -2184,7 +2381,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -2184,7 +2389,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                      (scalar_pair||vector_pair?src:"_m")+"["+std::to_string(b)+"],_v=0;"+
                      EmitFPAddSubValue(dbl,sub)+"_r["+std::to_string(e)+"]=("+ct+")_v;}");
              }
@@ -19521,7 +20215,7 @@ index 699980238b..011a2c950a 100644
              return true;
          }
      }
-@@ -4282,7 +4479,12 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4282,7 +4487,12 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              const int bytes = scl_idx ? fsz : (Q ? 16 : 8);
              const int lanes = bytes / fsz;
              if (!(dbl && L)) {   // L must be zero for the 64-bit form
@@ -19535,7 +20229,7 @@ index 699980238b..011a2c950a 100644
                                  "],_r[" + std::to_string(lanes) + "],_m; ";
                  s += "memcpy(_a,c->vreg[" + std::to_string(rn) + "]," + std::to_string(bytes) + "); ";
                  s += "memcpy(&_m,(const uint8_t*)c->vreg[" + std::to_string(rm) + "]+" +
-@@ -4299,7 +4501,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4299,7 +4509,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  s+="_r[_i]=("+std::string(ct)+")_v;}}";
                  s += "c->vreg[" + std::to_string(rd) + "][0]=0; c->vreg[" + std::to_string(rd) +
                       "][1]=0; ";
@@ -19544,7 +20238,7 @@ index 699980238b..011a2c950a 100644
                  put(s);
                  return true;
              }
-@@ -4708,7 +4910,8 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4708,7 +4918,8 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              // opcode 11001: FMLA (a=0) / FMLS (a=1), both U=0.
              if (opc5 == 0x19 && !U) {
                  const std::string ty=dbl?"uint64_t":"uint32_t";
@@ -19554,7 +20248,7 @@ index 699980238b..011a2c950a 100644
                      "memcpy(_n,c->vreg["+std::to_string(rn)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_m,c->vreg["+std::to_string(rm)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_d,c->vreg["+std::to_string(rd)+"],"+std::to_string(vbytes)+");"
-@@ -4717,7 +4920,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4717,7 +4928,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  put(EmitFPMulAddValue(dbl));
                  put("_d[_j]=("+ty+")_v;}memcpy(c->vreg["+std::to_string(rd)+"],_d,"+std::to_string(vbytes)+");");
                  if(!Q)put("c->vreg["+std::to_string(rd)+"][1]=0;");
@@ -19563,7 +20257,7 @@ index 699980238b..011a2c950a 100644
                  return true;
              }
              // opcode 11011 with U=1 and a=0 is FMUL. The U=0 encoding at the
-@@ -4725,7 +4928,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4725,7 +4936,7 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
              // it is deliberately left alone rather than aliased to FMUL.
              if (opc5 == 0x1B && U && !a) {
                  const std::string ty=dbl?"uint64_t":"uint32_t";
@@ -19572,7 +20266,7 @@ index 699980238b..011a2c950a 100644
                      "memcpy(_n,c->vreg["+std::to_string(rn)+"],"+std::to_string(vbytes)+");"
                      "memcpy(_m,c->vreg["+std::to_string(rm)+"],"+std::to_string(vbytes)+");"
                      "for(unsigned _j=0;_j<"+std::to_string(fne)+";++_j){uint64_t _a=_n[_j],_b=_m[_j],_z=(_a^_b)&"+
-@@ -4733,20 +4936,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
+@@ -4733,20 +4944,20 @@ inline bool Translate(u32 i, u64 pc, std::string& out, bool* unhandled = nullptr
                  put(EmitFPMulAddValue(dbl,true));
                  put("_d[_j]=("+ty+")_v;}memcpy(c->vreg["+std::to_string(rd)+"],_d,"+std::to_string(vbytes)+");");
                  if(!Q)put("c->vreg["+std::to_string(rd)+"][1]=0;");
@@ -19596,7 +20290,7 @@ index 699980238b..011a2c950a 100644
                  return true;
              }
          }
-@@ -5100,7 +5303,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5100,7 +5311,9 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
      // enough that a compiler needs hours and a great deal of memory, or gives
      // up outright. Splitting keeps each unit to a sane size and lets the build
      // compile them in parallel.
@@ -19607,7 +20301,7 @@ index 699980238b..011a2c950a 100644
      const size_t unit_count =
          blocks.empty() ? 1 : (blocks.size() + kBlocksPerUnit - 1) / kBlocksPerUnit;
      // Written straight to disk rather than buffered. A whole module is over a
-@@ -5183,7 +5388,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5183,7 +5396,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                   u);
          rcu += line;
          for (size_t i = lo; i < hi; ++i) {
@@ -19616,7 +20310,7 @@ index 699980238b..011a2c950a 100644
              snprintf(line, sizeof line, "  {0x%llxULL, 0x%llxULL, %s},\n",
                       (unsigned long long)blocks[i].vaddr,
                       (unsigned long long)(blocks[i].vaddr + (u64)(blocks[i].count - 1) * 4),
-@@ -5219,6 +5424,80 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5219,6 +5432,80 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          }
      } chain_scope;
  
@@ -19697,7 +20391,7 @@ index 699980238b..011a2c950a 100644
      size_t cur_unit = 0;
      for (const auto& b : blocks) {
          const size_t unit = block_index / kBlocksPerUnit;
-@@ -5228,10 +5507,88 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5228,10 +5515,88 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              cur_unit = unit;
          }
          ++block_index;
@@ -19787,7 +20481,7 @@ index 699980238b..011a2c950a 100644
          const u32 first = (u32)((b.vaddr - base) / 4);
          rcu += "    static const uint32_t _expected[]={";
          if (EmitGuardGen()) {
-@@ -5257,12 +5614,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5257,12 +5622,36 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
                     "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
          }
@@ -19825,7 +20519,7 @@ index 699980238b..011a2c950a 100644
              char addr[32];
              rcu += "    { uint64_t _entry=c->pc-g_module_base; if(_entry!=0x";
              snprintf(addr, sizeof addr, "%llx", (unsigned long long)b.vaddr);
-@@ -5299,6 +5680,15 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5299,6 +5688,15 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
              bool unhandled = false;
              open = Translate(insn, insn_pc, body, &unhandled);
              rcu += body;
@@ -19841,7 +20535,7 @@ index 699980238b..011a2c950a 100644
              ++stats.emitted;
              if (unhandled) {
                  ++stats.unhandled;
-@@ -5321,12 +5711,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5321,12 +5719,19 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
          // PC" path - which happily returns *some other module's* block at the
          // same offset and runs it against this module's register state.
          if (open) {
@@ -19865,7 +20559,7 @@ index 699980238b..011a2c950a 100644
          flush_unit(unit, false);
      }
      emit_seg(cur_unit);
-@@ -5566,7 +5963,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5566,7 +5971,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         // lower of that and the core count.
         << "cmake_host_system_information(RESULT _recomp_ram_mb QUERY TOTAL_PHYSICAL_MEMORY)\n"
         << "cmake_host_system_information(RESULT _recomp_cores QUERY NUMBER_OF_LOGICAL_CORES)\n"
@@ -19874,7 +20568,7 @@ index 699980238b..011a2c950a 100644
         << "if(_recomp_ram_jobs LESS 1)\n  set(_recomp_ram_jobs 1)\nendif()\n"
         << "if(_recomp_ram_jobs LESS _recomp_cores)\n"
         << "  set(_recomp_default_jobs ${_recomp_ram_jobs})\n"
-@@ -5746,6 +6143,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5746,6 +6151,7 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
  
      std::ostringstream ex;
      ex << "/* auto-generated by suyu static recompiler - DO NOT EDIT */\n"
@@ -19882,7 +20576,7 @@ index 699980238b..011a2c950a 100644
            "#include \"recomp_runtime.h\"\n\n"
            "/* The one symbol suyu resolves out of a recompiled image. Named\n"
            "   distinctly from the internal recomp_lookup so the export is\n"
-@@ -5758,7 +6156,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5758,7 +6164,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "/* The shared runtime is compiled once for the whole link and therefore\n"
            "   cannot own this - each module needs its own load base. */\n"
            "uint64_t g_module_base = 0;\n"
@@ -19892,7 +20586,7 @@ index 699980238b..011a2c950a 100644
            "#define RECOMP_API __declspec(dllexport)\n"
            "#else\n"
            "#define RECOMP_API __attribute__((visibility(\"default\")))\n"
-@@ -5799,13 +6198,66 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5799,13 +6206,66 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
                "  return &g_recomp_gg_word;\n"
                "}\n";
      }
@@ -19960,7 +20654,7 @@ index 699980238b..011a2c950a 100644
                "RECOMP_API unsigned recomp_image_fastmem_v1(uint32_t page_bits, uint32_t stride_log2,\n"
                "                                            uint64_t ptr_mask, uint32_t off_table,\n"
                "                                            uint32_t off_limit){\n"
-@@ -5838,12 +6290,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5838,12 +6298,25 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "   cross-library host dispatcher. Every additional block consumes the\n"
            "   same execution budget, bounding the interval between interrupt checks\n"
            "   and the host's executed-block accounting. */\n"
@@ -19988,7 +20682,7 @@ index 699980238b..011a2c950a 100644
            "    first=0; f(c);\n"
            "  }\n"
            "}\n\n"
-@@ -5865,7 +6330,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
+@@ -5865,7 +6338,8 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
            "RECOMP_API void recomp_image_set_base(uint64_t base){ g_module_base = base;\n"
            "  /* Single-threaded here, which is what makes the index safe to\n"
            "     build without locking. */\n"
@@ -19998,7 +20692,7 @@ index 699980238b..011a2c950a 100644
            "/* Reports the entry PC so the loader does not have to be told it\n"
            "   separately or parse the image again. */\n"
         << "RECOMP_API uint64_t recomp_image_entry(void){ return 0x"
-@@ -6368,6 +6834,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
+@@ -6368,6 +6842,70 @@ RECOMP_GG_STATIC RECOMP_NOINLINE void recomp_gg_miss(GuestContext* c,uint32_t* s
  )RT";
  }
  
@@ -20069,7 +20763,7 @@ index 699980238b..011a2c950a 100644
  // ABI 6 feature FPX1 pieces of the runtime header. Empty unless the option is on.
  // Kept under MSVC's 16380-byte limit per string literal.
  inline const char* FpxAbiH() {
-@@ -6495,7 +7025,7 @@ static RECOMP_INLINE int recomp_fpx_div32(uint64_t a, uint64_t b, uint64_t* v) {
+@@ -6495,7 +7033,7 @@ static RECOMP_INLINE int recomp_fpx_div32(uint64_t a, uint64_t b, uint64_t* v) {
      (void)a; (void)b; (void)v; return 0;
  }
  static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, uint64_t* v) {
@@ -20078,7 +20772,7 @@ index 699980238b..011a2c950a 100644
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(recomp_fpx_f(a), recomp_fpx_f(b), recomp_fpx_f(z)));
  #elif RECOMP_FPX_HOST == 2
      const double s = (double)recomp_fpx_f(a) * (double)recomp_fpx_f(b) + (double)recomp_fpx_f(z);
-@@ -6511,7 +7041,7 @@ static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, ui
+@@ -6511,7 +7049,7 @@ static RECOMP_INLINE int recomp_fpx_fma32(uint64_t a, uint64_t b, uint64_t z, ui
  /* FRECPS: 2 - a*b; FRSQRTS: (3 - a*b)/2, each rounded once. inf*0 gives NaN
     here, which is never kept; the exact body returns 2.0 or 1.5. */
  static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v) {
@@ -20087,7 +20781,7 @@ index 699980238b..011a2c950a 100644
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(-recomp_fpx_f(a), recomp_fpx_f(b), 2.0f));
  #elif RECOMP_FPX_HOST == 2
      const double s = 2.0 - (double)recomp_fpx_f(a) * (double)recomp_fpx_f(b);
-@@ -6525,7 +7055,7 @@ static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v)
+@@ -6525,7 +7063,7 @@ static RECOMP_INLINE int recomp_fpx_recps32(uint64_t a, uint64_t b, uint64_t* v)
      (void)a; (void)b; (void)v; return 0;
  }
  static RECOMP_INLINE int recomp_fpx_rsqrts32(uint64_t a, uint64_t b, uint64_t* v) {
@@ -20096,7 +20790,7 @@ index 699980238b..011a2c950a 100644
      /* Halving a normal result is exact, and a normal result is all that is kept. */
      const uint64_t t = recomp_fpx_fb(__builtin_fmaf(-recomp_fpx_f(a), recomp_fpx_f(b), 3.0f) * 0.5f);
  #elif RECOMP_FPX_HOST == 2
-@@ -6558,6 +7088,7 @@ static RECOMP_INLINE int recomp_fpx_sqrt32(uint64_t a, uint64_t* v) {
+@@ -6558,6 +7096,7 @@ static RECOMP_INLINE int recomp_fpx_sqrt32(uint64_t a, uint64_t* v) {
  )RT";
  }
  
@@ -20104,7 +20798,7 @@ index 699980238b..011a2c950a 100644
  inline const char* FpxH64() {
      return R"RT(
  static RECOMP_INLINE int recomp_fpx_add64(uint64_t a, uint64_t b, uint64_t* v) {
-@@ -6888,11 +7419,33 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
+@@ -6888,11 +7427,33 @@ typedef char recomp_layout_tpidrro[offsetof(GuestContext, tpidrro_el0) == 840 ?
     real memory rather than near null. One global per image, since each module
     is its own shared library. */
  extern uint64_t g_module_base;
@@ -20138,7 +20832,7 @@ index 699980238b..011a2c950a 100644
  BlockFn recomp_lookup(uint64_t pc); void recomp_run(GuestContext* c);
  /* Builds the direct block index. Called once at load, before any
     guest thread runs. */
-@@ -6960,11 +7513,19 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6960,11 +7521,19 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
          text.replace(text.find(abi5_line), abi5_line.size(),
                       std::string("#define RECOMP_IMAGE_ABI ") + (fastmem ? FastmemAbiH() : FpxAbiH()));
      }
@@ -20159,7 +20853,7 @@ index 699980238b..011a2c950a 100644
                              (fpx == 2 ? "/* FPX1 shadow instrumentation build (never timed). */\n"
                                          "void recomp_fpx_shadow(unsigned kind, int gate, int kept, uint64_t fast,\n"
                                          "    uint64_t exact, uint64_t fpsr_before, uint64_t fpsr_after,\n"
-@@ -6978,6 +7539,106 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
+@@ -6978,6 +7547,106 @@ int  recomp_load_segments(GuestContext* c, const char* data_dir);
      return text;
  }
  
@@ -20266,7 +20960,56 @@ index 699980238b..011a2c950a 100644
  // One cached text per variant: the first caller must not fix the variant for
  // the whole process.
  inline int FpxVariant() {
-@@ -7241,7 +7902,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
+@@ -6993,7 +7662,7 @@ inline const char* RuntimeH() {
+     return texts[g_emit_fastmem ? 1 : 0][EmitGuardGen() ? 1 : 0][FpxVariant()].c_str();
+ }
+ 
+-inline const char* EstimateRuntimeC() {
++inline const char* EstimateRuntimeC_Base() {
+     return R"EST(/* Isolated Armv8 S/D reciprocal-estimate prototype. Integer-only lane core.
+  * Exception flags accumulate in *fpsr. Exception traps are not delivered here.
+  * Interfaces deliberately do not depend on GuestContext or shared emitter code.
+@@ -7049,6 +7718,39 @@ uint64_t recomp_fp_estimate(GuestContext* c,uint64_t bits,unsigned width,int rsq
+ )EST";
+ }
+ 
++// The reciprocal square root estimate searched 9 steps per lane (each a 64-bit multiply chain): about 1% of the main thread in a
++// 12-racer race (the characters' skeletons normalise vectors with FRSQRTE). The same search, done once here for every input it can
++// get (a in 257..1022), becomes a table: identical results by construction.
++inline const char* EstimateRuntimeC() {
++    static const std::string text = [] {
++        std::string base = EstimateRuntimeC_Base();
++        const std::string loop =
++            " unsigned lo=512,hi=1024;\n"
++            " while(lo+1<hi){unsigned mid=(lo+hi)/2;if(a*mid*mid<(UINT64_C(1)<<28))lo=mid;else hi=mid;}\n"
++            " uint64_t estimate=((lo+1)/2)&255;\n";
++        const size_t at = base.find(loop);
++        if (at == std::string::npos) return base; // the helper changed: keep it as it is
++        std::string table = "static const unsigned char recomp_rsqrte_tab[1024]={";
++        for (unsigned a = 0; a < 1024; ++a) {
++            unsigned lo = 512, hi = 1024;
++            if (a >= 257) {
++                while (lo + 1 < hi) {
++                    const unsigned mid = (lo + hi) / 2;
++                    if (static_cast<unsigned long long>(a) * mid * mid < (1ULL << 28)) lo = mid; else hi = mid;
++                }
++            }
++            table += std::to_string(((lo + 1) / 2) & 255) + (a + 1 < 1024 ? "," : "");
++        }
++        table += "};\n";
++        base.replace(at, loop.size(), " uint64_t estimate=recomp_rsqrte_tab[a];\n");
++        const size_t fn = base.find("uint64_t recomp_fp_estimate(");
++        if (fn == std::string::npos) return std::string{EstimateRuntimeC_Base()};
++        base.insert(fn, table);
++        return base;
++    }();
++    return text.c_str();
++}
++
+ // ABI 6 (FM1) memory helpers. `abi5` is the ABI 5 helper text. It is kept
+ // verbatim as the slow path, with only the twelve public helpers renamed to
+ // recomp_*_slow (their calls to one another included) and made static and
+@@ -7241,7 +7943,8 @@ inline std::string BuildRuntimeC(bool fastmem, bool guard_gen = false) {
      // than being a single literal. Adjacent-literal concatenation would not
      // help: the limit applies to the result as well. The memory helpers are a
      // piece of their own because ABI 6 reuses their exact text as its slow path.
@@ -20276,7 +21019,7 @@ index 699980238b..011a2c950a 100644
  #include <stdio.h>
  #include <stdlib.h>
  #include <string.h>
-@@ -7580,6 +8242,25 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
+@@ -7580,6 +8283,25 @@ void recomp_stp32(GuestContext* c,uint64_t a,uint64_t v0,uint64_t v1){
     (renamed) copy in recomp_export.c instead. */
  uint64_t g_module_base = 0;
  #endif
@@ -20302,7 +21045,7 @@ index 699980238b..011a2c950a 100644
  
  uint64_t recomp_umulh(uint64_t a,uint64_t b){
    /* Portable 64x64->high64: split into 32-bit halves. Avoids depending on
-@@ -7895,6 +8576,10 @@ inline const char* RuntimeC() {
+@@ -7895,6 +8617,10 @@ inline const char* RuntimeC() {
          return (EmitGuardGen() ? guard_gen_shadow : g_emit_fastmem ? fastmem_shadow : abi5_shadow)
              .c_str();
      }

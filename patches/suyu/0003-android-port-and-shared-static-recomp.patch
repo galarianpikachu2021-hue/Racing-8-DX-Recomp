@@ -341,10 +341,10 @@ index 0000000000..9cb62faa28
 +#endif
 diff --git a/src/frontend_common/kart_static_recomp.cpp b/src/frontend_common/kart_static_recomp.cpp
 new file mode 100644
-index 0000000000..01dd7d7bc5
+index 0000000000..cd52366f7b
 --- /dev/null
 +++ b/src/frontend_common/kart_static_recomp.cpp
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,577 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: registration of the statically linked recompiled modules with ArmRecomp, shared by the desktop static build
 +// (suyu_cmd/suyu.cpp) and the Android app (android/app/src/main/jni/native.cpp). Compiled into each of those targets (with
@@ -431,6 +431,7 @@ index 0000000000..01dd7d7bc5
 +
 +
 +extern "C" int recomp_block_hook(void* raw, uint64_t module_offset); // core/arm/recomp/arm_recomp.cpp
++extern "C" int recomp_call_hooks(void* raw);                     // core/arm/recomp/arm_recomp.cpp
 +
 +namespace {
 +struct RecompModule {
@@ -789,7 +790,29 @@ index 0000000000..01dd7d7bc5
 +                static const bool xm = !std::getenv("KARTRECOMP_NO_XM") && !Core::KartHookTrace::CoverageEnabled() &&
 +                                       !Core::KartHookTrace::StringWatchEnabled();
 +                static constexpr Core::RecompBlockFn (*enter)(u64) = [](u64 pc) -> Core::RecompBlockFn {
-+                    if (Core::RecompHooks::MayHook(pc)) return nullptr;
++                    // A hooked target (the game's graphics calls: thousands a frame) runs its hooks on this native frame, then
++                    // the block if no hook took the call (KARTRECOMP_XM_HOOKS=0: back to the dispatcher as before).
++                    static const bool inline_hooks = [] { const char* v = std::getenv("KARTRECOMP_XM_HOOKS"); return !(v && v[0] == '0'); }();
++                    if (Core::RecompHooks::MayHook(pc)) {
++                        if (!inline_hooks || pc >= (u64{0xFFFF'FFFE} << 32)) return nullptr; // return traps: the dispatcher
++                        static constexpr Core::RecompBlockFn hooked = [](void* raw) {
++                            if (recomp_call_hooks(raw)) return;
++                            const u64 at = *reinterpret_cast<const u64*>(static_cast<const u8*>(raw) + 256); // GuestContextView::pc (static_assert in arm_recomp.cpp)
++                            for (const auto& mod : s_recomp_modules) {
++                                if (mod.idx && at >= mod.idx_lo && at <= mod.idx_hi && ((at - mod.idx_lo) & 3) == 0) {
++                                    if (const auto fn = mod.idx[(at - mod.idx_lo) >> 2]) fn(raw);
++                                    return;
++                                }
++                            }
++                        };
++                        // Only for a target this would enter anyway (a block in a module taking XM1 targets).
++                        for (const auto& mod : s_recomp_modules) {
++                            if (mod.idx && pc >= mod.idx_lo && pc <= mod.idx_hi && ((pc - mod.idx_lo) & 3) == 0) {
++                                return !mod.xm_skip && mod.idx[(pc - mod.idx_lo) >> 2] ? hooked : nullptr;
++                            }
++                        }
++                        return nullptr;
++                    }
 +                    for (const auto& mod : s_recomp_modules) {
 +                        if (mod.idx && pc >= mod.idx_lo && pc <= mod.idx_hi && ((pc - mod.idx_lo) & 3) == 0) {
 +                            if (mod.xm_skip) return nullptr;

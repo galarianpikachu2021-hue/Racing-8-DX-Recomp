@@ -2117,10 +2117,10 @@ index 0000000000..c7738e3737
 +} // namespace KartMultiplayer
 diff --git a/src/suyu_cmd/kartrecomp_export.cpp b/src/suyu_cmd/kartrecomp_export.cpp
 new file mode 100644
-index 0000000000..45085018e8
+index 0000000000..a924e431f6
 --- /dev/null
 +++ b/src/suyu_cmd/kartrecomp_export.cpp
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,501 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// kart-recomp: headless exporter. Turns the user's own update NSP (its Program NCA holds the whole 64-bit ExeFS) into the generated C tree,
 +// one folder per NSO module, with the same generator the suyu GUI's AOT export uses (core/recompiler/arm64_to_c.h). No Qt, no window,
@@ -2147,6 +2147,7 @@ index 0000000000..45085018e8
 +#include <unistd.h>
 +#endif
 +
++#include "common/kart_native_fns.h"
 +#include "common/kart_code_patches.h"
 +#include "common/kart_tune_sites.h"
 +#include "common/common_types.h"
@@ -2584,6 +2585,13 @@ index 0000000000..45085018e8
 +                    roots.push_back(m.text_vaddr + std::stoull(off, nullptr, 16));
 +                    if (mod == "main") suyu::recomp::g_region_hookable.insert(roots.back());
 +                }
++            }
++        }
++        // Host rewrites of game functions (common/kart_native_fns.h): their start keeps its hook check even inside a hot region.
++        if (m.name == "main") {
++            for (const std::size_t off : KartNativeFns::Find(m.text.data(), m.text.size())) {
++                roots.push_back(m.text_vaddr + off);
++                suyu::recomp::g_region_hookable.insert(m.text_vaddr + off);
 +            }
 +        }
 +        std::sort(roots.begin(), roots.end());
@@ -16477,10 +16485,10 @@ index 0000000000..012165c098
 +} // namespace KartRecomp
 diff --git a/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
 new file mode 100644
-index 0000000000..3e06e04ea4
+index 0000000000..8d2892c477
 --- /dev/null
 +++ b/src/suyu_cmd/native_gpu/vk_shadow_backend.cpp
-@@ -0,0 +1,9333 @@
+@@ -0,0 +1,9432 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +#include "common/kart_tune_sites.h"
 +#include "suyu_cmd/native_gpu/vk_shadow_backend.h"
@@ -16874,6 +16882,100 @@ index 0000000000..3e06e04ea4
 +
 +/// Append-only byte buffer without zero-initialization (submit-time snapshots
 +/// are several MB per frame, filled while the game thread waits).
++/// The submit's buffer copies (several MB a frame, on the game thread that submits, which the main thread then waits for) spread
++/// over this thread and up to two helpers. Each job is a range of guest GPU memory into the snapshot buffer. KARTRECOMP_SNAP_THREADS=
++/// <0..3> sets the helper count (0: copy on the submitting thread as before).
++class SnapshotCopyPool {
++public:
++    struct Job {
++        u64 gpu;
++        size_t at;
++        u64 bytes;
++    };
++    SnapshotCopyPool() {
++        const char* v = std::getenv("KARTRECOMP_SNAP_THREADS");
++        const int n = v ? std::clamp(std::atoi(v), 0, 3) : 2;
++        for (int i = 0; i < n; ++i) {
++            workers.emplace_back([this] { Work(); });
++        }
++    }
++    ~SnapshotCopyPool() {
++        {
++            std::scoped_lock lock{m};
++            stop = true;
++        }
++        cv.notify_all();
++        for (auto& t : workers) t.join();
++    }
++    /// Copies every job into dst and returns when all are done. Large jobs are split so the threads finish together.
++    void Run(std::vector<Job>& jobs, u8* dst_base) {
++        u64 total = 0;
++        for (const Job& j : jobs) total += j.bytes;
++        if (workers.empty() || total < (256u << 10) || jobs.size() < 4) {
++            for (const Job& j : jobs) Core::NvnHost::ReadGpuMemoryInSubmit(j.gpu, dst_base + j.at, j.bytes);
++            return;
++        }
++        // Split jobs bigger than a share, so one 1 MB buffer does not keep a thread alone.
++        const u64 piece = std::max<u64>(64u << 10, total / ((workers.size() + 1) * 4));
++        split.clear();
++        for (const Job& j : jobs) {
++            for (u64 off = 0; off < j.bytes; off += piece) {
++                split.push_back({j.gpu + off, j.at + off, std::min(piece, j.bytes - off)});
++            }
++        }
++        {
++            std::scoped_lock lock{m};
++            base = dst_base;
++            next.store(0, std::memory_order_relaxed);
++            pending = split.size();
++            ++generation;
++        }
++        cv.notify_all();
++        Drain();
++        std::unique_lock lock{m};
++        done_cv.wait(lock, [this] { return pending == 0; });
++    }
++
++private:
++    void Drain() {
++        size_t finished = 0;
++        for (size_t i = next.fetch_add(1, std::memory_order_relaxed); i < split.size();
++             i = next.fetch_add(1, std::memory_order_relaxed)) {
++            const Job& j = split[i];
++            Core::NvnHost::ReadGpuMemoryInSubmit(j.gpu, base + j.at, j.bytes);
++            ++finished;
++        }
++        if (finished) {
++            std::scoped_lock lock{m};
++            pending -= finished;
++            if (pending == 0) done_cv.notify_all();
++        }
++    }
++    void Work() {
++        KrPlatform::SetCurrentThreadName("NativeSnapCopy");
++        u64 seen = 0;
++        while (true) {
++            {
++                std::unique_lock lock{m};
++                cv.wait(lock, [&] { return stop || generation != seen; });
++                if (stop) return;
++                seen = generation;
++            }
++            Drain();
++        }
++    }
++
++    std::vector<std::thread> workers;
++    std::vector<Job> split;
++    u8* base = nullptr;
++    std::atomic<size_t> next{0};
++    size_t pending = 0;
++    u64 generation = 0;
++    bool stop = false;
++    std::mutex m;
++    std::condition_variable cv, done_cv;
++};
++
 +class SnapshotBuffer {
 +public:
 +    size_t size() const { return used; }
@@ -17190,6 +17292,7 @@ index 0000000000..3e06e04ea4
 +        // The same buffer bound by many draws is read once per submit: guest memory cannot change while this call runs,
 +        // so every bind of that range shares one copy (and, downstream, one upload and one descriptor set).
 +        snap_dedupe.clear();
++        snap_jobs.clear();
 +        for (const Command* c : commands) {
 +            building.commands.push_back({c});
 +            building.guest_draws += c->op == Op::Draw;
@@ -17198,9 +17301,7 @@ index 0000000000..3e06e04ea4
 +                // Seed for the in-stream update shadow: the buffer as of submit time.
 +                const u64 bytes = std::min<u64>(c->size ? c->size : 0x10000, 0x10000);
 +                const size_t at = building.snapshot.grow((bytes + 15) & ~u64{15});
-+                const auto t_snap = std::chrono::steady_clock::now();
-+                Core::NvnHost::ReadGpuMemoryInSubmit(c->address, building.snapshot.data() + at, bytes);
-+                snap_ns += static_cast<u64>((std::chrono::steady_clock::now() - t_snap).count());
++                snap_jobs.push_back({c->address, at, bytes});
 +                snap_bytes += bytes;
 +                copy.snap = at + 1;
 +                copy.snap_size = bytes;
@@ -17209,7 +17310,7 @@ index 0000000000..3e06e04ea4
 +                const u64 bytes = CopySourceBytes(*c);
 +                if (bytes && bytes <= (64u << 20)) {
 +                    const size_t at = building.snapshot.grow((bytes + 15) & ~u64{15});
-+                    Core::NvnHost::ReadGpuMemoryInSubmit(c->address, building.snapshot.data() + at, bytes);
++                    snap_jobs.push_back({c->address, at, bytes});
 +                    copy.snap = at + 1;
 +                    copy.snap_size = bytes;
 +                }
@@ -17222,7 +17323,7 @@ index 0000000000..3e06e04ea4
 +                }
 +                const auto [at, fresh] = SnapshotOnce(snap_dedupe, c->address, bytes);
 +                if (fresh) {
-+                    Core::NvnHost::ReadGpuMemoryInSubmit(c->address, building.snapshot.data() + at, bytes);
++                    snap_jobs.push_back({c->address, at, bytes});
 +                    submit_vb_bytes += bytes;
 +                }
 +                copy.snap = at + 1;
@@ -17231,14 +17332,18 @@ index 0000000000..3e06e04ea4
 +                const u64 bytes = std::min<u64>(c->size ? c->size : 0x10000, 0x10000);
 +                const auto [at, fresh] = SnapshotOnce(snap_dedupe, c->address, bytes);
 +                if (fresh) {
-+                    const auto t_snap = std::chrono::steady_clock::now();
-+                    Core::NvnHost::ReadGpuMemoryInSubmit(c->address, building.snapshot.data() + at, bytes);
-+                    snap_ns += static_cast<u64>((std::chrono::steady_clock::now() - t_snap).count());
++                    snap_jobs.push_back({c->address, at, bytes});
 +                    snap_bytes += bytes;
 +                }
 +                copy.snap = at + 1;
 +                copy.snap_size = bytes;
 +            }
++        }
++        // The copies, all at once (the buffer may have moved while it grew, so offsets until here), over the copy threads.
++        {
++            const auto t_snap = std::chrono::steady_clock::now();
++            snap_pool.Run(snap_jobs, building.snapshot.data());
++            snap_ns += static_cast<u64>((std::chrono::steady_clock::now() - t_snap).count());
 +        }
 +        submit_ns += static_cast<u64>((std::chrono::steady_clock::now() - t_submit).count());
 +        submit_snap_ns += snap_ns;
@@ -25749,6 +25854,8 @@ index 0000000000..3e06e04ea4
 +    };
 +    std::unordered_map<u64, UploadEntry> upload_cache; ///< this frame's uploads by guest range
 +    std::unordered_map<u64, SnapSeen> snap_dedupe;     ///< Submit(): ranges already copied by this submit
++    std::vector<SnapshotCopyPool::Job> snap_jobs;     ///< Submit(): copies queued for the end of the submit
++    SnapshotCopyPool snap_pool;
 +    u64 upload_cache_hits = 0;
 +    std::unordered_map<std::string, VkDescriptorSet> descriptor_cache;
 +    // Scratch for Draw(), which runs for every draw of every frame: these keep their capacity, so a draw allocates nothing.
