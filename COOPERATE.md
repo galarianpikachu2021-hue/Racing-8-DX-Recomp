@@ -334,3 +334,11 @@ process mask instead of replacing it). Working set is ~5-6 GB with direct memory
 Not tested on Windows yet: `KARTRECOMP_RUNTIME_KERNEL_ONLY=ON` (removing the emulated kernel), Wireless Play rooms, 3.0.4, mods and
 CTGP on the native path, a full Grand Prix to the award ceremony, AMD/Intel GPUs. The numbers do not separate the two paths on this
 CPU; a slower 4-core PC (the users in #14/#35) is where it would show.
+
+**Later the same day (windows-port, after 9f4c84b):** the Windows engine is now built **without the emulated kernel**
+(`KARTRECOMP_RUNTIME_KERNEL_ONLY` and `KARTRECOMP_DROP_UNUSED_SERVICES` default ON for WIN32 too; the maintainer plans to delete
+the emulated kernel). Two things needed fixing for that: MSVC links code that sits after an early `return` inside the
+runtime-kernel-only guards (now `#else` blocks in hle_ipc.cpp, server_manager.cpp, sm_controller.cpp), and **the Mii editor applet
+(0x12) was not answered by the runtime**, so a new save stopped at "Select a Mii" -> "Create a Mii" (2128-0002, terminate result
+0x2a2). That one affects Linux as well; it is answered now like the emulated applet did (random Mii added). Results and stamp
+`e2f4625381-abi6` are in the commit message. The zip is on the BETA-0.2.5-6 pre-release (the maintainer asked for it).
